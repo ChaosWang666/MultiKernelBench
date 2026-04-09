@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from config import temperature, top_p
 import argparse
-def eval_all(out_dir, language, categories, op_tested=dataset.keys()):
+def eval_all(out_dir, categories, op_tested=dataset.keys()):
     result = {}
     if categories == ['all']:
         output_file = os.path.join(out_dir,'result.json')
@@ -25,7 +25,7 @@ def eval_all(out_dir, language, categories, op_tested=dataset.keys()):
             tf_input.flush()
             try:
                 subprocess.run(
-                    ['python3', 'eval_single_runner.py', tf_input.name, op, language, tf_output.name],
+                    ['python3', 'eval_single_runner.py', tf_input.name, op, tf_output.name],
                     check=True,
                     text=True,
                     timeout=180
@@ -64,7 +64,6 @@ if __name__ == '__main__':
 
     parser.add_argument('--runs', type=int, default=1, help='Number of runs')
     parser.add_argument('--model', type=str, default='deepseek-chat', help='Model name')
-    parser.add_argument('--language', type=str, default='cuda', help='Programming language')
     parser.add_argument('--strategy', type=str, default='add_shot', help='Strategy type.')
     parser.add_argument('--categories', nargs='+', default=['activation'], help='List of categories.')
 
@@ -72,7 +71,7 @@ if __name__ == '__main__':
 
     runs = args.runs
     model = args.model
-    language = args.language
+    language = 'ascendc'
     strategy = args.strategy
     categories = args.categories
 
@@ -87,11 +86,11 @@ if __name__ == '__main__':
         op_tested = [op for op in op_tested if dataset[op]['category'] in categories]
 
     if '/' in model:
-        # processing openrouter model
+        # handle slashed model names (e.g., provider/model-name)
         model_name = model.split('/')[1]
     else:
         model_name = model
 
     for run in range(runs):
         out_dir = f'output/{language}/{strategy}/{temperature}-{top_p}/{model_name}/run{run}'
-        eval_all(out_dir, language, categories, op_tested)  
+        eval_all(out_dir, categories, op_tested)

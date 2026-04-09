@@ -1,0 +1,3 @@
+all: min_gpt_new_gelu_custom0
+min_gpt_new_gelu_custom0:
+	cd /data/w00936672/MultiKernelBench/ascend_op_projects/MinGptNewGeluCustom/build_out/op_kernel/MinGptNewGeluCustom_ascend910b/kernel_0 && bash /data/w00936672/MultiKernelBench/ascend_op_projects/MinGptNewGeluCustom/build_out/op_kernel/MinGptNewGeluCustom_ascend910b/bin_param/MinGptNewGeluCustom-min_gpt_new_gelu_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

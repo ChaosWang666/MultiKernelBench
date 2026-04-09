@@ -5,30 +5,41 @@ from openai import OpenAI
 from dataset import dataset
 import torch
 
+# api3.xhub.chat平台
 def get_client(model):
-    #client 
-    if model.startswith('deepseek'):
-        DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY")
-        client = OpenAI(
-            api_key=DEEPSEEK_KEY,
-            base_url="https://api.deepseek.com",
-            timeout=10000000,
-            max_retries=3,
-        )
-    elif model.startswith('qwen'):
-        api_key = os.environ.get("DASHSCOPE_API_KEY")
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            timeout=10000000,
-            max_retries=3,
-        ) 
-    else:
-        api_key = os.environ.get("OPEN_ROUNTER_KEY")
-        client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
-        )
+    client = OpenAI(
+        api_key="sk-qLGf3r2HFjyUrtvwqWUkzY6m9LIFOJr2xleMMAO04t6nJceY",
+        base_url="https://api3.xhub.chat/v1",
+        timeout=10000000,
+        max_retries=3,
+    )
+    return client
+
+# 阿里云平台
+def get_client(model):
+    client = OpenAI(
+        api_key="sk-ece3d4b1280243b2acb266002a3e3fd0",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        timeout=10000000,
+        max_retries=3,
+    )
+    return client
+
+
+
+# Google genai
+def get_google_client():
+    from google import genai
+    from google.genai import types
+    import httpx
+    http_client = httpx.Client(proxy="http://127.0.0.1:7899", timeout=httpx.Timeout(600))
+    client = genai.Client(
+        api_key="AIzaSyCXzUusLG1zQzLOopfaoZabA47Lr99Yf1k",
+        http_options=types.HttpOptions(
+            httpx_client=http_client,
+            timeout=600000,
+        ),
+    )
     return client
 
 def get_ref_src_path(op):

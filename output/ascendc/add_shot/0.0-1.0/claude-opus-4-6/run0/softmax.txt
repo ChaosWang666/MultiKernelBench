@@ -1,0 +1,321 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "SoftmaxCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(SoftmaxCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, dimSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(SoftmaxCustom, SoftmaxCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "softmax_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    SoftmaxCustomTilingData tiling;
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
+    uint32_t dimSize = xShape->GetStorageShape().GetDim(1);
+
+    // Each block processes some rows
+    uint32_t BLOCK_DIM = batchSize < 32 ? batchSize : 32;
+    // tileNum: number of tiles per row per block (to fit in local memory)
+    // We need to process dimSize elements per row. We tile along dim.
+    // Each tile processes dimSize/tileNum elements
+    // Local memory budget ~256KB, we need 2 buffers * tileLength * 4 bytes
+    // Let's pick tileNum so tileLength fits in ~32KB => tileLength = 8192 floats
+    uint32_t tileNum = (dimSize + 8191) / 8192;
+    if (tileNum < 1) tileNum = 1;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_dimSize(dimSize);
+    tiling.set_tileNum(tileNum);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class SoftmaxCustom : public OpDef {
+public:
+    explicit SoftmaxCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(SoftmaxCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelSoftmax {
+public:
+    __aicore__ inline KernelSoftmax() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t dimSize, uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->dimSize = dimSize;
+        this->tileNum = tileNum;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        // Each block handles a subset of rows
+        this->rowsPerBlock = (batchSize + blockNum - 1) / blockNum;
+        this->startRow = blockIdx * this->rowsPerBlock;
+        this->endRow = this->startRow + this->rowsPerBlock;
+        if (this->endRow > batchSize) this->endRow = batchSize;
+
+        this->tileLength = (dimSize + tileNum - 1) / tileNum;
+        // Align tileLength to 8 (32 bytes / 4 bytes per float)
+        this->tileLength = (this->tileLength + 7) / 8 * 8;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * dimSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * dimSize);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf, 1, this->tileLength * sizeof(float));
+        pipe.InitBuffer(maxBuf, 1, this->tileLength * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t row = this->startRow; row < this->endRow; row++) {
+            ProcessRow(row);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessRow(uint32_t row)
+    {
+        uint32_t rowOffset = row * this->dimSize;
+
+        // Pass 1: Find max value in the row
+        float rowMax = -3.4e38f;
+        for (uint32_t t = 0; t < this->tileNum; t++) {
+            uint32_t offset = rowOffset + t * this->tileLength;
+            uint32_t curLen = this->tileLength;
+            if (t == this->tileNum - 1 && (this->dimSize % this->tileLength) != 0) {
+                curLen = this->dimSize - t * this->tileLength;
+                curLen = (curLen + 7) / 8 * 8;
+            }
+            uint32_t actualLen = this->tileLength;
+            if (offset + actualLen > rowOffset + this->dimSize) {
+                actualLen = rowOffset + this->dimSize - offset;
+            }
+
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+            AscendC::DataCopy(xLocal, xGm[offset], curLen);
+            inQueueX.EnQue(xLocal);
+
+            AscendC::LocalTensor<float> xProc = inQueueX.DeQue<float>();
+            AscendC::LocalTensor<float> maxLocal = maxBuf.Get<float>();
+            AscendC::ReduceMax(maxLocal, xProc, curLen, false);
+            float tileMax = maxLocal.GetValue(0);
+            if (tileMax > rowMax) rowMax = tileMax;
+            inQueueX.FreeTensor(xProc);
+        }
+
+        // Pass 2: Compute exp(x - max) and sum
+        float rowSum = 0.0f;
+        for (uint32_t t = 0; t < this->tileNum; t++) {
+            uint32_t offset = rowOffset + t * this->tileLength;
+            uint32_t curLen = this->tileLength;
+            if (t == this->tileNum - 1 && (this->dimSize % this->tileLength) != 0) {
+                curLen = this->dimSize - t * this->tileLength;
+                curLen = (curLen + 7) / 8 * 8;
+            }
+
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+            AscendC::DataCopy(xLocal, xGm[offset], curLen);
+            inQueueX.EnQue(xLocal);
+
+            AscendC::LocalTensor<float> xProc = inQueueX.DeQue<float>();
+            AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+
+            // x - max
+            AscendC::Adds(yLocal, xProc, -rowMax, curLen);
+            // exp(x - max)
+            AscendC::Exp(yLocal, yLocal, curLen);
+
+            // Store exp results to output
+            AscendC::DataCopy(yGm[offset], yLocal, curLen);
+
+            // Sum
+            AscendC::LocalTensor<float> sumLocal = maxBuf.Get<float>();
+            AscendC::ReduceSum(sumLocal, yLocal, curLen, false);
+            rowSum += sumLocal.GetValue(0);
+
+            outQueueY.FreeTensor(yLocal);
+            inQueueX.FreeTensor(xProc);
+        }
+
+        // Pass 3: Divide by sum
+        float invSum = 1.0f / rowSum;
+        for (uint32_t t = 0; t < this->tileNum; t++) {
+            uint32_t offset = rowOffset + t * this->tileLength;
+            uint32_t curLen = this->tileLength;
+            if (t == this->tileNum - 1 && (this->dimSize % this->tileLength) != 0) {
+                curLen = this->dimSize - t * this->tileLength;
+                curLen = (curLen + 7) / 8 * 8;
+            }
+
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+            AscendC::DataCopy(xLocal, yGm[offset], curLen);
+            inQueueX.EnQue(xLocal);
+
+            AscendC::LocalTensor<float> xProc = inQueueX.DeQue<float>();
+            AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+
+            AscendC::Muls(yLocal, xProc, invSum, curLen);
+
+            outQueueY.EnQue(yLocal);
+            AscendC::LocalTensor<float> yOut = outQueueY.DeQue<float>();
+            AscendC::DataCopy(yGm[offset], yOut, curLen);
+            outQueueY.FreeTensor(yOut);
+            inQueueX.FreeTensor(xProc);
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> maxBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t dimSize;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t rowsPerBlock;
+    uint32_t startRow;
+    uint32_t endRow;
+};
+
+extern "C" __global__ __aicore__ void softmax_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelSoftmax op;
+    op.Init(x, y, tiling_data.batchSize, tiling_data.dimSize, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor softmax_custom_impl_npu(const at::Tensor& self) {
+    at::Tensor result = at::empty_like(self);
+    EXEC_NPU_CMD(aclnnSoftmaxCustom, self, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("softmax_custom", &softmax_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("softmax_custom", &softmax_custom_impl_npu, "softmax custom");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x):
+        return custom_ops_lib.softmax_custom(x)
+'''
+```

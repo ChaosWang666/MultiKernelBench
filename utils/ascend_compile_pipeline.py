@@ -105,8 +105,12 @@ def ascend_compile(generated_code, op, context, extra_kernel_include_paths=None)
     try:
         print("[INFO] Begin deploy")
         os.chdir(os.path.join(target_directory, 'build_out'))
-        # result = subprocess.run(["./custom_opp_ubuntu_aarch64.run", f'--install-path={deploy_path}'], check=True, capture_output=True, text=True)
-        result = subprocess.run(["./custom_opp_ubuntu_aarch64.run"], check=True, capture_output=True, text=True)
+        import glob
+        run_files = glob.glob("custom_opp_*.run")
+        if not run_files:
+            raise FileNotFoundError("No custom_opp_*.run file found in build_out")
+        run_file = run_files[0]
+        result = subprocess.run([f"./{run_file}"], check=True, capture_output=True, text=True)
         print("[INFO] Deploy succeeded")
     except subprocess.CalledProcessError as e:
         print("[INFO] Deploy failed!")

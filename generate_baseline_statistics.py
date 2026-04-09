@@ -9,12 +9,8 @@ import multiprocessing as mp
 import os
 import json
 import numpy as np
-import argparse
 
-parser = argparse.ArgumentParser(description="Run baseline evaluation with specified parameters.")
-parser.add_argument('--language', type=str, default='cuda', help='Language to use.')
-args = parser.parse_args()
-language = args.language
+language = 'ascendc'
 
 
 result = {}

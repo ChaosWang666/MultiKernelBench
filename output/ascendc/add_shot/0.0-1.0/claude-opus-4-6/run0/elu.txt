@@ -1,0 +1,269 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "EluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "alpha",
+                "param_type": "required",
+                "type": "float"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(EluCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(float, alpha);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(EluCustom, EluCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "elu_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 4096;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    EluCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+
+    const float* alphaPtr = context->GetAttrs()->GetAttrPointer<float>(0);
+    float alpha = (alphaPtr != nullptr) ? *alphaPtr : 1.0f;
+    tiling.set_alpha(alpha);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class EluCustom : public OpDef {
+public:
+    explicit EluCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("alpha")
+            .AttrType(REQUIRED)
+            .Float();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(EluCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelElu {
+public:
+    __aicore__ inline KernelElu() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t tileNum, float alpha)
+    {
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->alpha = alpha;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp1 = tmpBuf1.Get<float>();
+        AscendC::LocalTensor<float> tmp2 = tmpBuf2.Get<float>();
+
+        // ELU: f(x) = x if x > 0, alpha*(exp(x)-1) if x <= 0
+
+        // Compute exp(x)
+        AscendC::Exp(tmp1, xLocal, this->tileLength);
+        // tmp1 = exp(x) - 1
+        AscendC::Adds(tmp1, tmp1, (float)(-1.0f), this->tileLength);
+        // tmp1 = alpha * (exp(x) - 1)
+        AscendC::Muls(tmp1, tmp1, this->alpha, this->tileLength);
+
+        // Create mask: for x > 0, select x; for x <= 0, select tmp1
+        // Use Select with comparison
+        // tmp2 = max(x, 0) sign indicator
+        // We'll use: result = max(x, 0) + min(alpha*(exp(x)-1), 0)
+        // Since for x>0: max(x,0)=x, min(alpha*(exp(x)-1),0) could be negative but we need just x
+        // Actually let's think differently:
+        // result = x * (x > 0) + alpha*(exp(x)-1) * (x <= 0)
+        
+        // Use RELU to get positive part: max(x, 0)
+        AscendC::Relu(zLocal, xLocal, this->tileLength);
+        
+        // For negative part: we need alpha*(exp(x)-1) where x <= 0
+        // mins(tmp1, 0) to clamp the alpha*(exp(x)-1) to be <= 0 (when x>0, exp(x)-1>0, so alpha*(exp(x)-1)>0, we want 0 there)
+        AscendC::Mins(tmp2, tmp1, (float)0.0f, this->tileLength);
+        
+        // result = relu(x) + min(alpha*(exp(x)-1), 0)
+        AscendC::Add(zLocal, zLocal, tmp2, this->tileLength);
+
+        outQueueZ.EnQue<float>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    float alpha;
+};
+
+extern "C" __global__ __aicore__ void elu_custom(GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelElu op;
+    op.Init(x, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.alpha);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor elu_custom_impl_npu(const at::Tensor& self, float alpha) {
+    at::Tensor result = at::empty_like(self);
+    EXEC_NPU_CMD(aclnnEluCustom, self, result, alpha);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("elu_custom", &elu_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("elu_custom", &elu_custom_impl_npu, "ELU activation custom");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def __init__(self, alpha: float = 1.0) -> None:
+        super().__init__()
+        self.alpha = alpha
+
+    def forward(self, x):
+        return custom_ops_lib.elu_custom(x, self.alpha)
+'''
+```
