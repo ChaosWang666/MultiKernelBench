@@ -1,0 +1,6 @@
+{
+  "Conv3dMinSoftmaxCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

@@ -1,0 +1,47 @@
+
+[
+    {
+        "op": "Densenet121TransitionLayerCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "num_input_features",
+                "param_type": "required",
+                "type": [
+                    "int"
+                ]
+            },
+            {
+                "name": "num_output_features",
+                "param_type": "required",
+                "type": [
+                    "int"
+                ]
+            }
+        ]
+    }
+]

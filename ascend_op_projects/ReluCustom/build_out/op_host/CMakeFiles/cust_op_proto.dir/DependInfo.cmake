@@ -8,8 +8,8 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/data/w00936672/MultiKernelBench/ascend_op_projects/ReluCustom/build_out/autogen/op_proto.cc" "op_host/CMakeFiles/cust_op_proto.dir/__/autogen/op_proto.cc.o" "gcc" "op_host/CMakeFiles/cust_op_proto.dir/__/autogen/op_proto.cc.o.d"
-  "/data/w00936672/MultiKernelBench/ascend_op_projects/ReluCustom/op_host/relu_custom.cpp" "op_host/CMakeFiles/cust_op_proto.dir/relu_custom.cpp.o" "gcc" "op_host/CMakeFiles/cust_op_proto.dir/relu_custom.cpp.o.d"
+  "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/ReluCustom/build_out/autogen/op_proto.cc" "op_host/CMakeFiles/cust_op_proto.dir/__/autogen/op_proto.cc.o" "gcc" "op_host/CMakeFiles/cust_op_proto.dir/__/autogen/op_proto.cc.o.d"
+  "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/ReluCustom/op_host/relu_custom.cpp" "op_host/CMakeFiles/cust_op_proto.dir/relu_custom.cpp.o" "gcc" "op_host/CMakeFiles/cust_op_proto.dir/relu_custom.cpp.o.d"
   )
 
 # Targets to which this target links.

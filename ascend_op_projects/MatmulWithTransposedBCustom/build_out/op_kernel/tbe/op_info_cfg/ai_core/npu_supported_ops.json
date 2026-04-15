@@ -1,0 +1,6 @@
+{
+  "MatmulWithTransposedBCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

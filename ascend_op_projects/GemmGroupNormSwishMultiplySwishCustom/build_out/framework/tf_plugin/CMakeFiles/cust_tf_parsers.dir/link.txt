@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC -s -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -shared -Wl,-soname,libcust_tf_parsers.so -o libcust_tf_parsers.so CMakeFiles/cust_tf_parsers.dir/tensorflow_gemm_group_norm_swish_multiply_swish_custom_plugin.cc.o   -L/home/developer/Ascend/cann-9.0.0/lib64  -Wl,-rpath,/home/developer/Ascend/cann-9.0.0/lib64: -lgraph 

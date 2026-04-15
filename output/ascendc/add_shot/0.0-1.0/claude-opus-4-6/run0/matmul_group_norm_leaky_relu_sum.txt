@@ -1,0 +1,493 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "MatmulGroupNormLeakyReluSumCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "gamma",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "beta",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "batchSize",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "inputSize",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "hiddenSize",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "numGroups",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "eps",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "negativeSlope",
+                "param_type": "required",
+                "type": "float"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulGroupNormLeakyReluSumCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inputSize);
+  TILING_DATA_FIELD_DEF(uint32_t, hiddenSize);
+  TILING_DATA_FIELD_DEF(uint32_t, numGroups);
+  TILING_DATA_FIELD_DEF(float, eps);
+  TILING_DATA_FIELD_DEF(float, negativeSlope);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulGroupNormLeakyReluSumCustom, MatmulGroupNormLeakyReluSumCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_group_norm_leaky_relu_sum_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulGroupNormLeakyReluSumCustomTilingData tiling;
+    
+    const auto attrs = context->GetAttrs();
+    uint32_t batchSize = *(attrs->GetAttrPointer<int>(0));
+    uint32_t inputSize = *(attrs->GetAttrPointer<int>(1));
+    uint32_t hiddenSize = *(attrs->GetAttrPointer<int>(2));
+    uint32_t numGroups = *(attrs->GetAttrPointer<int>(3));
+    float eps = *(attrs->GetAttrPointer<float>(4));
+    float negativeSlope = *(attrs->GetAttrPointer<float>(5));
+    
+    tiling.set_batchSize(batchSize);
+    tiling.set_inputSize(inputSize);
+    tiling.set_hiddenSize(hiddenSize);
+    tiling.set_numGroups(numGroups);
+    tiling.set_eps(eps);
+    tiling.set_negativeSlope(negativeSlope);
+    
+    context->SetBlockDim(batchSize);
+    
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* z_shape = context->GetOutputShape(0);
+    // output shape is (batchSize, hiddenSize)
+    // We get batchSize from x dim 0, hiddenSize from weight dim 0
+    const gert::Shape* w_shape = context->GetInputShape(1);
+    std::vector<int64_t> dims = {x_shape->GetDim(0), w_shape->GetDim(0)};
+    *z_shape = gert::Shape(dims.size(), dims.data());
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MatmulGroupNormLeakyReluSumCustom : public OpDef {
+public:
+    explicit MatmulGroupNormLeakyReluSumCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("gamma")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("beta")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("batchSize").AttrType(REQUIRED).Int();
+        this->Attr("inputSize").AttrType(REQUIRED).Int();
+        this->Attr("hiddenSize").AttrType(REQUIRED).Int();
+        this->Attr("numGroups").AttrType(REQUIRED).Int();
+        this->Attr("eps").AttrType(REQUIRED).Float();
+        this->Attr("negativeSlope").AttrType(REQUIRED).Float();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MatmulGroupNormLeakyReluSumCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 1;
+
+class KernelMatmulGroupNormLeakyReluSum {
+public:
+    __aicore__ inline KernelMatmulGroupNormLeakyReluSum() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR gamma, GM_ADDR beta, GM_ADDR z,
+                                 uint32_t batchSize, uint32_t inputSize, uint32_t hiddenSize, uint32_t numGroups,
+                                 float eps, float negativeSlope)
+    {
+        this->batchSize = batchSize;
+        this->inputSize = inputSize;
+        this->hiddenSize = hiddenSize;
+        this->numGroups = numGroups;
+        this->eps = eps;
+        this->negativeSlope = negativeSlope;
+        this->channelsPerGroup = hiddenSize / numGroups;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        // Each block processes one sample in the batch
+        this->sampleIdx = blockIdx;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + sampleIdx * inputSize, inputSize);
+        weightGm.SetGlobalBuffer((__gm__ float *)weight, hiddenSize * inputSize);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, hiddenSize);
+        gammaGm.SetGlobalBuffer((__gm__ float *)gamma, hiddenSize);
+        betaGm.SetGlobalBuffer((__gm__ float *)beta, hiddenSize);
+        zGm.SetGlobalBuffer((__gm__ float *)z + sampleIdx * hiddenSize, hiddenSize);
+
+        // We process the hidden dimension in tiles
+        // Each tile handles channelsPerGroup elements for one group at a time
+        uint32_t tileSize = this->channelsPerGroup;
+        // Align tile size to 32 bytes (8 floats)
+        uint32_t alignedTileSize = (tileSize + 7) / 8 * 8;
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, inputSize * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, alignedTileSize * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, BUFFER_NUM, alignedTileSize * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, BUFFER_NUM, alignedTileSize * sizeof(float));
+        pipe.InitBuffer(tmpBuf3, BUFFER_NUM, alignedTileSize * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        // Load x for this sample once
+        CopyInX();
+
+        // Process each group
+        for (uint32_t g = 0; g < numGroups; g++) {
+            ComputeGroup(g);
+            CopyOut(g);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyInX()
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm, inputSize);
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void ComputeGroup(uint32_t groupIdx)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        uint32_t startCh = groupIdx * channelsPerGroup;
+        uint32_t alignedCPG = (channelsPerGroup + 7) / 8 * 8;
+
+        // Allocate output and temp buffers
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp1 = tmpBuf1.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp2 = tmpBuf2.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp3 = tmpBuf3.AllocTensor<float>();
+
+        // Step 1: Matmul - compute linear output for channels in this group
+        // For each channel c in [startCh, startCh + channelsPerGroup):
+        //   linear[c] = dot(x, weight[c]) + bias[c]
+        // We compute this channel by channel and store in zLocal
+
+        for (uint32_t c = 0; c < channelsPerGroup; c++) {
+            uint32_t ch = startCh + c;
+            float dotVal = 0.0f;
+            // Compute dot product in tiles
+            // We'll do vector multiply and reduce
+            // For simplicity with large inputSize, tile the dot product
+            uint32_t tileLen = 1024;
+            float accumulator = 0.0f;
+            for (uint32_t offset = 0; offset < inputSize; offset += tileLen) {
+                uint32_t curLen = tileLen;
+                if (offset + curLen > inputSize) {
+                    curLen = inputSize - offset;
+                }
+                uint32_t alignedLen = (curLen + 7) / 8 * 8;
+                // We need to load weight segment - but we can't easily load from weightGm in tiles here
+                // Instead, let's do scalar computation
+            }
+            // Fallback: scalar dot product
+            // This is slow but correct. For production, we'd use a matmul intrinsic.
+        }
+
+        // Actually, let's simplify: compute the full hidden vector using scalar ops for correctness
+        // Then apply group norm, leaky relu, and sum (x2)
+        
+        // Compute linear output for this group's channels
+        for (uint32_t c = 0; c < channelsPerGroup; c++) {
+            uint32_t ch = startCh + c;
+            float val = 0.0f;
+            for (uint32_t k = 0; k < inputSize; k++) {
+                val += xLocal.GetValue(k) * weightGm.GetValue(ch * inputSize + k);
+            }
+            val += biasGm.GetValue(ch);
+            zLocal.SetValue(c, val);
+        }
+
+        // Step 2: Group Normalization over this group's channels
+        // Compute mean
+        float mean = 0.0f;
+        for (uint32_t c = 0; c < channelsPerGroup; c++) {
+            mean += zLocal.GetValue(c);
+        }
+        mean /= (float)channelsPerGroup;
+
+        // Compute variance
+        float var = 0.0f;
+        for (uint32_t c = 0; c < channelsPerGroup; c++) {
+            float diff = zLocal.GetValue(c) - mean;
+            var += diff * diff;
+        }
+        var /= (float)channelsPerGroup;
+
+        float invStd = 1.0f / sqrtf(var + eps);
+
+        // Normalize, scale, shift, leaky relu, and double (sum with self)
+        for (uint32_t c = 0; c < channelsPerGroup; c++) {
+            uint32_t ch = startCh + c;
+            float normalized = (zLocal.GetValue(c) - mean) * invStd;
+            float scaled = normalized * gammaGm.GetValue(ch) + betaGm.GetValue(ch);
+            // Leaky ReLU
+            float activated = scaled >= 0.0f ? scaled : scaled * negativeSlope;
+            // Sum with self (x + x = 2*x)
+            float result = activated * 2.0f;
+            zLocal.SetValue(c, result);
+        }
+
+        // Pad remaining elements if alignedCPG > channelsPerGroup
+        for (uint32_t c = channelsPerGroup; c < alignedCPG; c++) {
+            zLocal.SetValue(c, 0.0f);
+        }
+
+        outQueueZ.EnQue(zLocal);
+        tmpBuf1.FreeTensor(tmp1);
+        tmpBuf2.FreeTensor(tmp2);
+        tmpBuf3.FreeTensor(tmp3);
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(uint32_t groupIdx)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        uint32_t startCh = groupIdx * channelsPerGroup;
+        AscendC::DataCopy(zGm[startCh], zLocal, (channelsPerGroup + 7) / 8 * 8);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TQue<AscendC::TPosition::VECCALC, BUFFER_NUM> tmpBuf1, tmpBuf2, tmpBuf3;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> weightGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> gammaGm;
+    AscendC::GlobalTensor<float> betaGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t batchSize;
+    uint32_t inputSize;
+    uint32_t hiddenSize;
+    uint32_t numGroups;
+    uint32_t channelsPerGroup;
+    uint32_t sampleIdx;
+    float eps;
+    float negativeSlope;
+};
+
+extern "C" __global__ __aicore__ void matmul_group_norm_leaky_relu_sum_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR bias,
+    GM_ADDR gamma, GM_ADDR beta, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMatmulGroupNormLeakyReluSum op;
+    op.Init(x, weight, bias, gamma, beta, z,
+            tiling_data.batchSize, tiling_data.inputSize, tiling_data.hiddenSize,
+            tiling_data.numGroups, tiling_data.eps, tiling_data.negativeSlope);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_group_norm_leaky_relu_sum_custom_impl_npu(const at::Tensor& x, const at::Tensor& weight,
+    const at::Tensor& bias, const at::Tensor& gamma, const at::Tensor& beta,
+    int64_t batchSize, int64_t inputSize, int64_t hiddenSize, int64_t numGroups,
+    double eps, double negativeSlope) {
+    at::Tensor result = at::empty({batchSize, hiddenSize}, x.options());
+    EXEC_NPU_CMD(aclnnMatmulGroupNormLeakyReluSumCustom, x, weight, bias, gamma, beta, result,
+                  batchSize, inputSize, hiddenSize, numGroups, static_cast<float>(eps), static_cast<float>(negativeSlope));
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_group_norm_leaky_relu_sum_custom", &matmul_group_norm_leaky_relu_sum_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_group_norm_leaky_relu_sum_custom", &matmul_group_norm_leaky_relu_sum_custom_impl_npu,
+          "Fused matmul + group norm + leaky relu + sum");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model using fused custom AscendC kernel for matmul + group norm + leaky relu + sum.
+    """
+    def __init__(self, input_size, hidden_size, num_groups, eps=1e-5, negative_slope=0.01):
+        super(ModelNew, self).__init__()
+        self.fc = torch.nn.Linear(input_size, hidden_size)
+        self.gn = torch.nn.GroupNorm(num_groups=num_groups, num_channels=hidden_size, eps=eps)
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_groups = num_groups
+        self.eps = eps
+        self.negative_slope = negative_slope
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        return custom_ops_lib.matmul_group_norm_leaky_relu_sum_custom(
+            x,
+            self.fc.weight,
+            self.fc.bias,
+            self.gn.weight,
+            self.gn.bias,
+            batch_size,
+            self.input_size,
+            self.hidden_size,
+            self.num_groups,
+            self.eps,
+            self.negative_slope
+        )
+'''
+```

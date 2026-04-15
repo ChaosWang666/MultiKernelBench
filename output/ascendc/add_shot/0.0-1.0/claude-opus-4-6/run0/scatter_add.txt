@@ -1,0 +1,266 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ScatterAddCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "idx",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "int32"
+                ]
+            },
+            {
+                "name": "updates",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ScatterAddCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, numRows);
+  TILING_DATA_FIELD_DEF(uint32_t, xCols);
+  TILING_DATA_FIELD_DEF(uint32_t, idxCols);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ScatterAddCustom, ScatterAddCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "scatter_add_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ScatterAddCustomTilingData tiling;
+    const gert::Shape* xShape = context->GetInputShape(0);
+    const gert::Shape* idxShape = context->GetInputShape(1);
+    uint32_t numRows = xShape->GetDim(0);
+    uint32_t xCols = xShape->GetDim(1);
+    uint32_t idxCols = idxShape->GetDim(1);
+
+    // Use one block per row, up to 32 blocks
+    uint32_t blockDim = numRows < 32 ? numRows : 32;
+    context->SetBlockDim(blockDim);
+
+    tiling.set_numRows(numRows);
+    tiling.set_xCols(xCols);
+    tiling.set_idxCols(idxCols);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ScatterAddCustom : public OpDef {
+public:
+    explicit ScatterAddCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("idx")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("updates")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ScatterAddCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+extern "C" __global__ __aicore__ void scatter_add_custom(GM_ADDR x, GM_ADDR idx, GM_ADDR updates, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    
+    uint32_t numRows = tiling_data.numRows;
+    uint32_t xCols = tiling_data.xCols;
+    uint32_t idxCols = tiling_data.idxCols;
+    
+    uint32_t blockIdx = AscendC::GetBlockIdx();
+    uint32_t blockNum = AscendC::GetBlockNum();
+    
+    // Each block processes multiple rows
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<int32_t> idxGm;
+    AscendC::GlobalTensor<float> updatesGm;
+    AscendC::GlobalTensor<float> zGm;
+    
+    xGm.SetGlobalBuffer((__gm__ float*)x, numRows * xCols);
+    idxGm.SetGlobalBuffer((__gm__ int32_t*)idx, numRows * idxCols);
+    updatesGm.SetGlobalBuffer((__gm__ float*)updates, numRows * idxCols);
+    zGm.SetGlobalBuffer((__gm__ float*)z, numRows * xCols);
+    
+    AscendC::TPipe pipe;
+    
+    // Align sizes to 32 bytes (8 floats)
+    uint32_t xColsAligned = ((xCols + 7) / 8) * 8;
+    uint32_t idxColsAligned = ((idxCols + 7) / 8) * 8;
+    
+    // Buffers for one row of x/z and one row of idx/updates
+    AscendC::TBuf<AscendC::TPosition::VECIN> inBufX, inBufIdx, inBufUpd;
+    AscendC::TBuf<AscendC::TPosition::VECOUT> outBufZ;
+    
+    pipe.InitBuffer(inBufX, xColsAligned * sizeof(float));
+    pipe.InitBuffer(inBufIdx, idxColsAligned * sizeof(int32_t));
+    pipe.InitBuffer(inBufUpd, idxColsAligned * sizeof(float));
+    pipe.InitBuffer(outBufZ, xColsAligned * sizeof(float));
+    
+    for (uint32_t row = blockIdx; row < numRows; row += blockNum) {
+        // Get local tensors
+        AscendC::LocalTensor<float> xLocal = inBufX.Get<float>();
+        AscendC::LocalTensor<float> zLocal = outBufZ.Get<float>();
+        AscendC::LocalTensor<int32_t> idxLocal = inBufIdx.Get<int32_t>();
+        AscendC::LocalTensor<float> updLocal = inBufUpd.Get<float>();
+        
+        // Copy x row to local
+        AscendC::DataCopy(xLocal, xGm[row * xCols], xColsAligned);
+        // Copy idx row to local
+        AscendC::DataCopy(idxLocal, idxGm[row * idxCols], idxColsAligned);
+        // Copy updates row to local
+        AscendC::DataCopy(updLocal, updatesGm[row * idxCols], idxColsAligned);
+        
+        AscendC::PipeBarrier<PIPE_ALL>();
+        
+        // Copy x to z first
+        AscendC::DataCopy(zLocal, xLocal, xColsAligned);
+        
+        AscendC::PipeBarrier<PIPE_ALL>();
+        
+        // Perform scatter add: z[idx[j]] += updates[j]
+        for (uint32_t j = 0; j < idxCols; j++) {
+            int32_t targetIdx = idxLocal.GetValue(j);
+            float updVal = updLocal.GetValue(j);
+            float curVal = zLocal.GetValue(targetIdx);
+            zLocal.SetValue(targetIdx, curVal + updVal);
+        }
+        
+        AscendC::PipeBarrier<PIPE_ALL>();
+        
+        // Copy result back to global
+        AscendC::DataCopy(zGm[row * xCols], zLocal, xColsAligned);
+        
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor scatter_add_custom_impl_npu(const at::Tensor& x, const at::Tensor& idx, const at::Tensor& updates) {
+    at::Tensor result = at::empty_like(x);
+    auto idx_int32 = idx.to(at::kInt);
+    EXEC_NPU_CMD(aclnnScatterAddCustom, x, idx_int32, updates, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("scatter_add_custom", &scatter_add_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("scatter_add_custom", &scatter_add_custom_impl_npu, "scatter_add custom op");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x, idx, updates):
+        return custom_ops_lib.scatter_add_custom(x, idx, updates)
+'''
+```

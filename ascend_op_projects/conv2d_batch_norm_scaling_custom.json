@@ -1,0 +1,91 @@
+
+[
+    {
+        "op": "Conv2dBatchNormScalingCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "convWeight",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "convBias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bnWeight",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bnBias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bnMean",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bnVar",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]

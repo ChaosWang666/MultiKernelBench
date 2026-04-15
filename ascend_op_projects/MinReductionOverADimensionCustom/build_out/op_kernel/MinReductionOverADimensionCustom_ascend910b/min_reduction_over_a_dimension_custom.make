@@ -1,0 +1,3 @@
+all: min_reduction_over_a_dimension_custom0
+min_reduction_over_a_dimension_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MinReductionOverADimensionCustom/build_out/op_kernel/MinReductionOverADimensionCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MinReductionOverADimensionCustom/build_out/op_kernel/MinReductionOverADimensionCustom_ascend910b/bin_param/MinReductionOverADimensionCustom-min_reduction_over_a_dimension_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftsignCustom/op_host/softsign_custom.cpp" "op_host/CMakeFiles/cust_optiling.dir/softsign_custom.cpp.o" "gcc" "op_host/CMakeFiles/cust_optiling.dir/softsign_custom.cpp.o.d"
+  "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftsignCustom/op_host/softsign_custom.cpp" "op_host/CMakeFiles/cust_optiling.dir/softsign_custom.cpp.o" "gcc" "op_host/CMakeFiles/cust_optiling.dir/softsign_custom.cpp.o.d"
   )
 
 # Targets to which this target links.

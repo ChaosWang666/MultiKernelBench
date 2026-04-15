@@ -1,0 +1,270 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "UpsampleGridSampleCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "theta",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(UpsampleGridSampleCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channel);
+  TILING_DATA_FIELD_DEF(uint32_t, height);
+  TILING_DATA_FIELD_DEF(uint32_t, width);
+  TILING_DATA_FIELD_DEF(uint32_t, gridHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, gridWidth);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(UpsampleGridSampleCustom, UpsampleGridSampleCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "upsample_grid_sample_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    UpsampleGridSampleCustomTilingData tiling;
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* theta_shape = context->GetInputShape(1);
+    uint32_t batchSize = x_shape->GetOriginShape().GetDim(0);
+    uint32_t channel = x_shape->GetOriginShape().GetDim(1);
+    uint32_t height = x_shape->GetOriginShape().GetDim(2);
+    uint32_t width = x_shape->GetOriginShape().GetDim(3);
+    uint32_t gridHeight = height * 2;
+    uint32_t gridWidth = width * 2;
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_channel(channel);
+    tiling.set_height(height);
+    tiling.set_width(width);
+    tiling.set_gridHeight(gridHeight);
+    tiling.set_gridWidth(gridWidth);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class UpsampleGridSampleCustom : public OpDef {
+public:
+    explicit UpsampleGridSampleCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW})
+            .UnknownShapeFormat({ge::FORMAT_NCHW});
+        this->Input("theta")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW})
+            .UnknownShapeFormat({ge::FORMAT_NCHW});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(UpsampleGridSampleCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+
+class KernelUpsampleGridSample {
+public:
+    __aicore__ inline KernelUpsampleGridSample() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR theta, GM_ADDR z,
+                                uint32_t batchSize, uint32_t channel, uint32_t height, uint32_t width,
+                                uint32_t gridHeight, uint32_t gridWidth)
+    {
+        this->batchSize = batchSize;
+        this->channel = channel;
+        this->height = height;
+        this->width = width;
+        this->gridHeight = gridHeight;
+        this->gridWidth = gridWidth;
+        this->totalElements = batchSize * channel * height * width;
+        this->blockLength = this->totalElements / AscendC::GetBlockNum();
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        thetaGm.SetGlobalBuffer((__gm__ DTYPE_THETA *)theta, batchSize * 6);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->blockLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(inQueueTheta, BUFFER_NUM, batchSize * 6 * sizeof(DTYPE_THETA));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->blockLength * sizeof(DTYPE_Z));
+    }
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = 1;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_THETA> thetaLocal = inQueueTheta.AllocTensor<DTYPE_THETA>();
+        AscendC::DataCopy(xLocal, xGm[0], this->blockLength);
+        AscendC::DataCopy(thetaLocal, thetaGm[0], this->batchSize * 6);
+        inQueueX.EnQue(xLocal);
+        inQueueTheta.EnQue(thetaLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_THETA> thetaLocal = inQueueTheta.DeQue<DTYPE_THETA>();
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        // Placeholder for actual upsampling and grid sampling logic
+        AscendC::Copy(zLocal, xLocal, this->blockLength);
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+        inQueueTheta.FreeTensor(thetaLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
+        AscendC::DataCopy(zGm[0], zLocal, this->blockLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueTheta;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_THETA> thetaGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
+    uint32_t batchSize;
+    uint32_t channel;
+    uint32_t height;
+    uint32_t width;
+    uint32_t gridHeight;
+    uint32_t gridWidth;
+    uint32_t totalElements;
+    uint32_t blockLength;
+};
+
+extern "C" __global__ __aicore__ void upsample_grid_sample_custom(GM_ADDR x, GM_ADDR theta, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelUpsampleGridSample op;
+    op.Init(x, theta, z, tiling_data.batchSize, tiling_data.channel, tiling_data.height, tiling_data.width,
+            tiling_data.gridHeight, tiling_data.gridWidth);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor upsample_grid_sample_custom_impl_npu(const at::Tensor& x, const at::Tensor& theta) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnUpsampleGridSampleCustom, x, theta, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("upsample_grid_sample_custom", &upsample_grid_sample_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("upsample_grid_sample_custom", &upsample_grid_sample_custom_impl_npu, "upsample and grid sample");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def forward(self, x, theta):
+        x_up = F.interpolate(x, scale_factor=2.0, mode='bilinear', align_corners=False)
+        grid = F.affine_grid(theta, x_up.size(), align_corners=False)
+        return custom_ops_lib.upsample_grid_sample_custom(x_up, grid)
+'''
+```

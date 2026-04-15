@@ -1,0 +1,49 @@
+{
+  "binList": [
+    {
+      "implMode": "high_performance",
+      "int64Mode": false,
+      "simplifiedKeyMode": 0,
+      "simplifiedKey": [
+        "ShufflenetCustom/d=0,p=1/0,0/0,0",
+        "ShufflenetCustom/d=0,p=0/0,0/0,0",
+        "ShufflenetCustom/d=1,p=1/0,0/0,0",
+        "ShufflenetCustom/d=1,p=0/0,0/0,0"
+      ],
+      "staticKey": "26ef76d81b58db2dd6424f7dca8b1b196305159c0dba2238c9d570447d0d78ed,9b503eb7dfb721dbeb9dc4cc643966ca26b7e667fc2c099af721abd178ec4ccd",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "NCHW",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float32",
+          "format": "NCHW",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "opMode": "dynamic",
+      "optionalInputMode": "gen_placeholder",
+      "deterministic": "ignore",
+      "optionalOutputMode": "gen_placeholder",
+      "binInfo": {
+        "jsonFilePath": "ascend910b/shufflenet_custom/ShufflenetCustom_df5dc3929a72184ee16e8396e7662590.json"
+      }
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+{
+ "binFileName": "IndexSelectCustom_500f005be6ea1809948ea9f4bfcc1ea9",
+ "binFileSuffix": ".o",
+ "blockDim": -1,
+ "coreType": "VectorCore",
+ "core_type": "AIV",
+ "intercoreSync": 0,
+ "kernelName": "IndexSelectCustom_500f005be6ea1809948ea9f4bfcc1ea9",
+ "magic": "RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+ "memoryStamping": [],
+ "opParaSize": 24,
+ "parameters": [
+  null,
+  null,
+  null,
+  null
+ ],
+ "sha256": "69f14f6e04a7000ac65f502592788a49f87b46b9c8ccf0e448e08f2ae86b7da9",
+ "workspace": {
+  "num": 1,
+  "size": [
+   -1
+  ],
+  "type": [
+   0
+  ]
+ },
+ "kernelList": [
+  {
+   "kernelName": "IndexSelectCustom_500f005be6ea1809948ea9f4bfcc1ea9_0"
+  }
+ ],
+ "optionalInputMode": "gen_placeholder",
+ "optionalOutputMode": "gen_placeholder",
+ "supportSuperKernel": 1,
+ "compileInfo": {},
+ "supportInfo": {
+  "implMode": "high_performance",
+  "int64Mode": false,
+  "simplifiedKeyMode": 0,
+  "simplifiedKey": [
+   "IndexSelectCustom/d=0,p=1/0,2/3,2/0,2",
+   "IndexSelectCustom/d=0,p=0/0,2/3,2/0,2",
+   "IndexSelectCustom/d=1,p=1/0,2/3,2/0,2",
+   "IndexSelectCustom/d=1,p=0/0,2/3,2/0,2"
+  ],
+  "optionalInputMode": "gen_placeholder",
+  "optionalOutputMode": "gen_placeholder",
+  "staticKey": "e5c396131596087a7e091356f8126a584e0499c6c5b048c8616a440a58089941,0c909877ba29f0e67915cb0b37bf04fc06d9bef86b814dffee7171a6b9c06e6f",
+  "inputs": [
+   {
+    "name": "x",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   },
+   {
+    "name": "indices",
+    "index": 1,
+    "dtype": "int32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "y",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "attrs": [
+   {
+    "name": "dim",
+    "dtype": "int",
+    "value": 0
+   },
+   {
+    "name": "numRows",
+    "dtype": "int",
+    "value": 0
+   },
+   {
+    "name": "numCols",
+    "dtype": "int",
+    "value": 0
+   },
+   {
+    "name": "numIndices",
+    "dtype": "int",
+    "value": 0
+   }
+  ],
+  "opMode": "dynamic",
+  "deterministic": "ignore"
+ },
+ "filePath": "ascend910b/index_select_custom/IndexSelectCustom_500f005be6ea1809948ea9f4bfcc1ea9.json"
+}

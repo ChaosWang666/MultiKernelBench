@@ -1,0 +1,523 @@
+
+
+Looking at this architecture, I need to analyze what's happening:
+
+1. An LSTM processes sequential input
+2. A linear layer processes the last hidden state
+
+Implementing a full multi-layer LSTM from scratch in AscendC is extremely complex. Instead, I'll focus on optimizing the core LSTM cell computation - the gate computations (sigmoid, tanh, element-wise operations) which are the computational bottleneck. I'll implement a fused LSTM cell kernel that computes one timestep's gates and state updates.
+
+However, given the complexity of a full LSTM with multiple layers, weight matrices, etc., a more practical approach is to implement a fused element-wise kernel for the LSTM cell's post-matrix-multiplication operations (the gate activations and cell/hidden state updates), which is where significant optimization can be gained.
+
+Let me implement a fused LSTM cell kernel that takes the pre-computed gate values (after linear transforms) and computes the sigmoid/tanh activations, cell state update, and hidden state output in one fused kernel.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "LstmCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "gates",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "c_prev",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "h_out",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "c_out",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(LstmCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, hiddenSize);
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(LstmCustom, LstmCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "lstm_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 8;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    LstmCustomTilingData tiling;
+    const gert::Shape* gatesShape = context->GetInputShape(0);
+    const gert::Shape* cShape = context->GetInputShape(1);
+    
+    uint32_t batchSize = cShape->GetDim(0);
+    uint32_t hiddenSize = cShape->GetDim(1);
+    uint32_t totalLength = batchSize * hiddenSize;
+    
+    uint32_t blockDim = BLOCK_DIM;
+    if (blockDim > totalLength) {
+        blockDim = 1;
+    }
+    
+    context->SetBlockDim(blockDim);
+    tiling.set_batchSize(batchSize);
+    tiling.set_hiddenSize(hiddenSize);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* c_shape = context->GetInputShape(1);
+    gert::Shape* h_out_shape = context->GetOutputShape(0);
+    gert::Shape* c_out_shape = context->GetOutputShape(1);
+    *h_out_shape = *c_shape;
+    *c_out_shape = *c_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    context->SetOutputDataType(1, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class LstmCustom : public OpDef {
+public:
+    explicit LstmCustom(const char* name) : OpDef(name)
+    {
+        this->Input("gates")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("c_prev")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("h_out")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("c_out")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(LstmCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelLstmCell {
+public:
+    __aicore__ inline KernelLstmCell() {}
+    __aicore__ inline void Init(GM_ADDR gates, GM_ADDR c_prev, GM_ADDR h_out, GM_ADDR c_out,
+                                 uint32_t batchSize, uint32_t hiddenSize, uint32_t totalLength, uint32_t tileNum)
+    {
+        this->hiddenSize = hiddenSize;
+        this->totalLength = totalLength;
+        
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        
+        this->blockLength = totalLength / blockNum;
+        uint32_t remainder = totalLength % blockNum;
+        if (blockIdx < remainder) {
+            this->blockLength += 1;
+        }
+        
+        uint32_t blockOffset = (totalLength / blockNum) * blockIdx;
+        if (blockIdx < remainder) {
+            blockOffset += blockIdx;
+        } else {
+            blockOffset += remainder;
+        }
+        
+        if (this->blockLength == 0) {
+            this->tileNum = 0;
+            this->tileLength = 0;
+            this->lastTileLength = 0;
+            return;
+        }
+        
+        this->tileNum = tileNum;
+        if (this->tileNum > this->blockLength) {
+            this->tileNum = 1;
+        }
+        
+        // Align tile length to 32 bytes (8 floats)
+        uint32_t alignUnit = 8;
+        this->tileLength = this->blockLength / this->tileNum;
+        this->tileLength = (this->tileLength + alignUnit - 1) / alignUnit * alignUnit;
+        
+        if (this->tileLength * this->tileNum > this->blockLength) {
+            this->tileNum = this->blockLength / this->tileLength;
+            if (this->tileNum == 0) {
+                this->tileNum = 1;
+                this->tileLength = (this->blockLength + alignUnit - 1) / alignUnit * alignUnit;
+            }
+        }
+        
+        this->lastTileLength = this->blockLength - this->tileLength * (this->tileNum - 1);
+        this->lastTileLength = (this->lastTileLength + alignUnit - 1) / alignUnit * alignUnit;
+        
+        // gates is [batch, 4*hidden], c_prev is [batch, hidden]
+        // For gate indexing: gate i starts at offset i*totalLength in the flattened view
+        // Actually gates shape is [batch, 4*hidden], so for element j in [0, totalLength):
+        //   batch_idx = j / hiddenSize, hidden_idx = j % hiddenSize
+        //   gate_i offset = batch_idx * 4*hiddenSize + 0*hiddenSize + hidden_idx
+        //   gate_f offset = batch_idx * 4*hiddenSize + 1*hiddenSize + hidden_idx
+        //   gate_g offset = batch_idx * 4*hiddenSize + 2*hiddenSize + hidden_idx
+        //   gate_o offset = batch_idx * 4*hiddenSize + 3*hiddenSize + hidden_idx
+        // But we can't do scatter/gather easily. Instead let's treat gates as 4 separate contiguous blocks.
+        // We'll pass gates as [4, batch*hidden] reshaped, so:
+        //   gate_i = gates[0*totalLength .. 1*totalLength]
+        //   gate_f = gates[1*totalLength .. 2*totalLength]  
+        //   gate_g = gates[2*totalLength .. 3*totalLength]
+        //   gate_o = gates[3*totalLength .. 4*totalLength]
+        
+        gatesIGm.SetGlobalBuffer((__gm__ float *)gates + 0 * totalLength + blockOffset, this->blockLength);
+        gatesFGm.SetGlobalBuffer((__gm__ float *)gates + 1 * totalLength + blockOffset, this->blockLength);
+        gatesGGm.SetGlobalBuffer((__gm__ float *)gates + 2 * totalLength + blockOffset, this->blockLength);
+        gatesOGm.SetGlobalBuffer((__gm__ float *)gates + 3 * totalLength + blockOffset, this->blockLength);
+        cPrevGm.SetGlobalBuffer((__gm__ float *)c_prev + blockOffset, this->blockLength);
+        hOutGm.SetGlobalBuffer((__gm__ float *)h_out + blockOffset, this->blockLength);
+        cOutGm.SetGlobalBuffer((__gm__ float *)c_out + blockOffset, this->blockLength);
+        
+        uint32_t maxTile = this->tileLength > this->lastTileLength ? this->tileLength : this->lastTileLength;
+        
+        pipe.InitBuffer(inQueueI, BUFFER_NUM, maxTile * sizeof(float));
+        pipe.InitBuffer(inQueueF, BUFFER_NUM, maxTile * sizeof(float));
+        pipe.InitBuffer(inQueueG, BUFFER_NUM, maxTile * sizeof(float));
+        pipe.InitBuffer(inQueueO, BUFFER_NUM, maxTile * sizeof(float));
+        pipe.InitBuffer(inQueueC, BUFFER_NUM, maxTile * sizeof(float));
+        pipe.InitBuffer(outQueueH, BUFFER_NUM, maxTile * sizeof(float));
+        pipe.InitBuffer(outQueueC, BUFFER_NUM, maxTile * sizeof(float));
+        pipe.InitBuffer(tmpBuf, 1, maxTile * sizeof(float));
+    }
+    
+    __aicore__ inline void Process()
+    {
+        if (this->blockLength == 0) return;
+        for (int32_t i = 0; i < this->tileNum; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline uint32_t GetTileLength(int32_t progress)
+    {
+        if (progress == this->tileNum - 1) {
+            return this->lastTileLength;
+        }
+        return this->tileLength;
+    }
+    
+    __aicore__ inline uint32_t GetCopyLength(int32_t progress)
+    {
+        if (progress == this->tileNum - 1) {
+            uint32_t remaining = this->blockLength - this->tileLength * (this->tileNum - 1);
+            return remaining;
+        }
+        return this->tileLength;
+    }
+
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        uint32_t len = GetTileLength(progress);
+        uint32_t offset = progress * this->tileLength;
+        
+        AscendC::LocalTensor<float> iLocal = inQueueI.AllocTensor<float>();
+        AscendC::LocalTensor<float> fLocal = inQueueF.AllocTensor<float>();
+        AscendC::LocalTensor<float> gLocal = inQueueG.AllocTensor<float>();
+        AscendC::LocalTensor<float> oLocal = inQueueO.AllocTensor<float>();
+        AscendC::LocalTensor<float> cLocal = inQueueC.AllocTensor<float>();
+        
+        AscendC::DataCopy(iLocal, gatesIGm[offset], len);
+        AscendC::DataCopy(fLocal, gatesFGm[offset], len);
+        AscendC::DataCopy(gLocal, gatesGGm[offset], len);
+        AscendC::DataCopy(oLocal, gatesOGm[offset], len);
+        AscendC::DataCopy(cLocal, cPrevGm[offset], len);
+        
+        inQueueI.EnQue(iLocal);
+        inQueueF.EnQue(fLocal);
+        inQueueG.EnQue(gLocal);
+        inQueueO.EnQue(oLocal);
+        inQueueC.EnQue(cLocal);
+    }
+    
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        uint32_t len = GetTileLength(progress);
+        
+        AscendC::LocalTensor<float> iLocal = inQueueI.DeQue<float>();
+        AscendC::LocalTensor<float> fLocal = inQueueF.DeQue<float>();
+        AscendC::LocalTensor<float> gLocal = inQueueG.DeQue<float>();
+        AscendC::LocalTensor<float> oLocal = inQueueO.DeQue<float>();
+        AscendC::LocalTensor<float> cLocal = inQueueC.DeQue<float>();
+        
+        AscendC::LocalTensor<float> hOut = outQueueH.AllocTensor<float>();
+        AscendC::LocalTensor<float> cOut = outQueueC.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp = tmpBuf.AllocTensor<float>();
+        
+        // sigmoid(i) -> iLocal
+        AscendC::Sigmoid(iLocal, iLocal, len);
+        // sigmoid(f) -> fLocal
+        AscendC::Sigmoid(fLocal, fLocal, len);
+        // tanh(g) -> gLocal
+        AscendC::Tanh(gLocal, gLocal, len);
+        // sigmoid(o) -> oLocal
+        AscendC::Sigmoid(oLocal, oLocal, len);
+        
+        // c_new = f * c_prev + i * g
+        AscendC::Mul(fLocal, fLocal, cLocal, len);   // f * c_prev
+        AscendC::Mul(iLocal, iLocal, gLocal, len);   // i * g
+        AscendC::Add(cOut, fLocal, iLocal, len);      // c_new
+        
+        // h_new = o * tanh(c_new)
+        AscendC::Tanh(tmp, cOut, len);
+        AscendC::Mul(hOut, oLocal, tmp, len);
+        
+        outQueueH.EnQue(hOut);
+        outQueueC.EnQue(cOut);
+        tmpBuf.FreeTensor(tmp);
+        
+        inQueueI.FreeTensor(iLocal);
+        inQueueF.FreeTensor(fLocal);
+        inQueueG.FreeTensor(gLocal);
+        inQueueO.FreeTensor(oLocal);
+        inQueueC.FreeTensor(cLocal);
+    }
+    
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        uint32_t len = GetTileLength(progress);
+        uint32_t offset = progress * this->tileLength;
+        
+        AscendC::LocalTensor<float> hLocal = outQueueH.DeQue<float>();
+        AscendC::LocalTensor<float> cLocal = outQueueC.DeQue<float>();
+        
+        AscendC::DataCopy(hOutGm[offset], hLocal, len);
+        AscendC::DataCopy(cOutGm[offset], cLocal, len);
+        
+        outQueueH.FreeTensor(hLocal);
+        outQueueC.FreeTensor(cLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueI, inQueueF, inQueueG, inQueueO, inQueueC;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueH, outQueueC;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<float> gatesIGm, gatesFGm, gatesGGm, gatesOGm;
+    AscendC::GlobalTensor<float> cPrevGm;
+    AscendC::GlobalTensor<float> hOutGm, cOutGm;
+    uint32_t hiddenSize;
+    uint32_t totalLength;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t lastTileLength;
+};
+
+extern "C" __global__ __aicore__ void lstm_custom(GM_ADDR gates, GM_ADDR c_prev, GM_ADDR h_out, GM_ADDR c_out, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelLstmCell op;
+    op.Init(gates, c_prev, h_out, c_out, tiling_data.batchSize, tiling_data.hiddenSize, tiling_data.totalLength, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+std::vector<at::Tensor> lstm_custom_impl_npu(const at::Tensor& gates, const at::Tensor& c_prev) {
+    // gates: [4, batch*hidden] contiguous, c_prev: [batch, hidden]
+    auto c_prev_flat = c_prev.contiguous();
+    auto gates_cont = gates.contiguous();
+    
+    at::Tensor h_out = at::empty_like(c_prev_flat);
+    at::Tensor c_out = at::empty_like(c_prev_flat);
+    
+    EXEC_NPU_CMD(aclnnLstmCustom, gates_cont, c_prev_flat, h_out, c_out);
+    return {h_out, c_out};
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("lstm_custom", &lstm_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("lstm_custom", &lstm_custom_impl_npu, "Fused LSTM cell gate computation");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class LSTMCellCustom(nn.Module):
+    """Custom LSTM cell using fused AscendC kernel for gate computations."""
+    def __init__(self, input_size, hidden_size):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.weight_ih = nn.Parameter(torch.randn(4 * hidden_size, input_size))
+        self.weight_hh = nn.Parameter(torch.randn(4 * hidden_size, hidden_size))
+        self.bias_ih = nn.Parameter(torch.randn(4 * hidden_size))
+        self.bias_hh = nn.Parameter(torch.randn(4 * hidden_size))
+        self._init_weights()
+
+    def _init_weights(self):
+        import math
+        stdv = 1.0 / math.sqrt(self.hidden_size)
+        for weight in self.parameters():
+            weight.data.uniform_(-stdv, stdv)
+
+    def forward(self, x, h_prev, c_prev):
+        # x: [batch, input_size], h_prev: [batch, hidden], c_prev: [batch, hidden]
+        batch_size = x.size(0)
+        
+        # Compute gates: [batch, 4*hidden]
+        gates = (x @ self.weight_ih.t() + self.bias_ih +
+                 h_prev @ self.weight_hh.t() + self.bias_hh)
+        
+        # Reshape gates to [4, batch*hidden] for the kernel
+        gates = gates.view(batch_size, 4, self.hidden_size)
+        gates = gates.permute(1, 0, 2).contiguous()  # [4, batch, hidden]
+        gates = gates.view(4, batch_size * self.hidden_size)  # [4, batch*hidden]
+        
+        c_prev_cont = c_prev.contiguous()
+        
+        # Call custom fused kernel
+        result = custom_ops_lib.lstm_custom(gates, c_prev_cont)
+        h_new = result[0].view(batch_size, self.hidden_size)
+        c_new = result[1].view(batch_size, self.hidden_size)
+        
+        return h_new, c_new
+
+
+class ModelNew(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, dropout=0.0):
+        super(ModelNew, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        
+        # Create custom LSTM cells for each layer
+        self.cells = nn.ModuleList()
+        for layer in range(num_layers):
+            layer_input_size = input_size if layer == 0 else hidden_size
+            self.cells.append(LSTMCellCustom(layer_input_size, hidden_size))
+        
+        self.fc = nn.Linear(hidden_size, output_size)
+        
+        # Copy weights from original LSTM if needed
+        self.dropout = dropout
+        if dropout > 0 and num_layers > 1:
+            self.drop = nn.Dropout(dropout)
+        else:
+            self.drop = None
+
+    def forward(self, x, h0=None, c0=None):
+        batch_size = x.size(0)
+        seq_length = x.size(1)
+        
+        if h0 is None:
+            h0 = torch.randn(self.num_layers, batch_size, self.hidden_size, device=x.device)
+        if c0 is None:
+            c0 = torch.randn(self.num_layers, batch_size, self.hidden_size, device=x.device)
+        
+        # Initialize hidden states for each layer
+        h = [h0[i] for i in range(self.num_layers)]
+        c = [c0[i] for i in range(self.num_layers)]
+        
+        # Process sequence
+        for t in range(seq_length):
+            inp = x[:, t, :]  # [batch, input_size]
+            for layer in range(self.num_layers):
+                h[layer], c[layer] = self.cells[layer](inp, h[layer], c[layer])
+                inp = h[layer]
+                if self.drop is not None and layer < self.num_layers - 1:
+                    inp = self.drop(inp)
+        
+        # Use last hidden state of last layer
+        out = self.fc(h[-1])
+        return out
+'''
+```

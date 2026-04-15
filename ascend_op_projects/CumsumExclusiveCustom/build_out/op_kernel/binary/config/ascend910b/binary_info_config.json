@@ -1,0 +1,44 @@
+{
+  "CumsumExclusiveCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "dim"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "CumsumExclusiveCustom/d=0,p=1/0,2/0,2",
+          "CumsumExclusiveCustom/d=0,p=0/0,2/0,2",
+          "CumsumExclusiveCustom/d=1,p=1/0,2/0,2",
+          "CumsumExclusiveCustom/d=1,p=0/0,2/0,2"
+        ],
+        "binPath": "ascend910b/cumsum_exclusive_custom/CumsumExclusiveCustom_60b3b65c7b2abfb9ff2119530709672c.o",
+        "jsonPath": "ascend910b/cumsum_exclusive_custom/CumsumExclusiveCustom_60b3b65c7b2abfb9ff2119530709672c.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "binList": [
+    {
+      "implMode": "high_performance",
+      "int64Mode": false,
+      "simplifiedKeyMode": 0,
+      "simplifiedKey": [
+        "CumsumExclusiveCustom/d=0,p=1/0,2/0,2",
+        "CumsumExclusiveCustom/d=0,p=0/0,2/0,2",
+        "CumsumExclusiveCustom/d=1,p=1/0,2/0,2",
+        "CumsumExclusiveCustom/d=1,p=0/0,2/0,2"
+      ],
+      "staticKey": "e85f3d6de45f3f51767150c663e93bb737cee4861e7a7308cb7a5c35e8661856,51ba57c03ce11fb35ec35fa1c2c08884472c02c7113f07173847b4a90b1240b6",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "dim",
+          "dtype": "int",
+          "value": 0
+        }
+      ],
+      "opMode": "dynamic",
+      "optionalInputMode": "gen_placeholder",
+      "deterministic": "ignore",
+      "optionalOutputMode": "gen_placeholder",
+      "binInfo": {
+        "jsonFilePath": "ascend910b/cumsum_exclusive_custom/CumsumExclusiveCustom_60b3b65c7b2abfb9ff2119530709672c.json"
+      }
+    }
+  ]
+}

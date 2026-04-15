@@ -1,0 +1,6 @@
+{
+  "MatmulScaleResidualAddClampLogSumExpMishCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

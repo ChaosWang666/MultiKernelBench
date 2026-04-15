@@ -1,0 +1,6 @@
+{
+  "GemmGroupNormMinBiasAddCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

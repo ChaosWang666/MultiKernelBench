@@ -1,0 +1,6 @@
+{
+  "Conv3dScalingTanhMultiplySigmoidCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

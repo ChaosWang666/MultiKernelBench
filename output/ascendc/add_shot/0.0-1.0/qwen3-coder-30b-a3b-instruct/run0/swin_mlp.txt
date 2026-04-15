@@ -1,0 +1,471 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "SwinMlpCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "fc1_weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "fc1_bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "fc2_weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "fc2_bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(SwinMlpCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, seqLen);
+  TILING_DATA_FIELD_DEF(uint32_t, hiddenDim);
+  TILING_DATA_FIELD_DEF(uint32_t, outDim);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(SwinMlpCustom, SwinMlpCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "swin_mlp_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 4096;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+
+    SwinMlpCustomTilingData tiling;
+    uint32_t batchSize = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    uint32_t seqLen = context->GetInputShape(0)->GetOriginShape().GetDim(1);
+    uint32_t hiddenDim = context->GetInputShape(1)->GetOriginShape().GetDim(0); // fc1 weight shape
+    uint32_t outDim = context->GetInputShape(3)->GetOriginShape().GetDim(0); // fc2 weight shape
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_seqLen(seqLen);
+    tiling.set_hiddenDim(hiddenDim);
+    tiling.set_outDim(outDim);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class SwinMlpCustom : public OpDef {
+public:
+    explicit SwinMlpCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("fc1_weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("fc1_bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("fc2_weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("fc2_bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(SwinMlpCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+ 
+class KernelSwinMlp {
+public:
+    __aicore__ inline KernelSwinMlp() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR fc1Weight, GM_ADDR fc1Bias, GM_ADDR fc2Weight, GM_ADDR fc2Bias, GM_ADDR y, 
+                                uint32_t batchSize, uint32_t seqLen, uint32_t hiddenDim, uint32_t outDim)
+    {
+        this->batchSize = batchSize;
+        this->seqLen = seqLen;
+        this->hiddenDim = hiddenDim;
+        this->outDim = outDim;
+        this->blockLength = seqLen * hiddenDim / AscendC::GetBlockNum();
+        this->tileNum = 4096;
+        this->tileLength = this->blockLength / this->tileNum / BUFFER_NUM;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * seqLen * hiddenDim);
+        fc1WeightGm.SetGlobalBuffer((__gm__ float *)fc1Weight, hiddenDim * outDim);
+        fc1BiasGm.SetGlobalBuffer((__gm__ float *)fc1Bias, outDim);
+        fc2WeightGm.SetGlobalBuffer((__gm__ float *)fc2Weight, outDim * hiddenDim);
+        fc2BiasGm.SetGlobalBuffer((__gm__ float *)fc2Bias, hiddenDim);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * seqLen * hiddenDim);
+        
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueFc1Weight, BUFFER_NUM, this->tileLength * outDim * sizeof(float));
+        pipe.InitBuffer(inQueueFc1Bias, BUFFER_NUM, outDim * sizeof(float));
+        pipe.InitBuffer(inQueueFc2Weight, BUFFER_NUM, outDim * hiddenDim * sizeof(float));
+        pipe.InitBuffer(inQueueFc2Bias, BUFFER_NUM, hiddenDim * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> fc1WeightLocal = inQueueFc1Weight.AllocTensor<float>();
+        AscendC::LocalTensor<float> fc1BiasLocal = inQueueFc1Bias.AllocTensor<float>();
+        AscendC::LocalTensor<float> fc2WeightLocal = inQueueFc2Weight.AllocTensor<float>();
+        AscendC::LocalTensor<float> fc2BiasLocal = inQueueFc2Bias.AllocTensor<float>();
+        
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(fc1WeightLocal, fc1WeightGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(fc1BiasLocal, fc1BiasGm, outDim);
+        AscendC::DataCopy(fc2WeightLocal, fc2WeightGm, outDim * hiddenDim);
+        AscendC::DataCopy(fc2BiasLocal, fc2BiasGm, hiddenDim);
+        
+        inQueueX.EnQue(xLocal);
+        inQueueFc1Weight.EnQue(fc1WeightLocal);
+        inQueueFc1Bias.EnQue(fc1BiasLocal);
+        inQueueFc2Weight.EnQue(fc2WeightLocal);
+        inQueueFc2Bias.EnQue(fc2BiasLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> fc1WeightLocal = inQueueFc1Weight.DeQue<float>();
+        AscendC::LocalTensor<float> fc1BiasLocal = inQueueFc1Bias.DeQue<float>();
+        AscendC::LocalTensor<float> fc2WeightLocal = inQueueFc2Weight.DeQue<float>();
+        AscendC::LocalTensor<float> fc2BiasLocal = inQueueFc2Bias.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+        
+        // FC1 computation
+        AscendC::MatMul(yLocal, xLocal, fc1WeightLocal, fc1BiasLocal, seqLen, hiddenDim, outDim, true, false);
+        
+        // GELU activation
+        AscendC::Gelu(yLocal, yLocal, seqLen * outDim);
+        
+        // FC2 computation
+        AscendC::MatMul(yLocal, yLocal, fc2WeightLocal, fc2BiasLocal, seqLen, outDim, hiddenDim, true, false);
+        
+        outQueueY.EnQue<float>(yLocal);
+        inQueueX.FreeTensor(xLocal);
+        inQueueFc1Weight.FreeTensor(fc1WeightLocal);
+        inQueueFc1Bias.FreeTensor(fc1BiasLocal);
+        inQueueFc2Weight.FreeTensor(fc2WeightLocal);
+        inQueueFc2Bias.FreeTensor(fc2BiasLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        outQueueY.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueFc1Weight, inQueueFc1Bias, inQueueFc2Weight, inQueueFc2Bias;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> fc1WeightGm;
+    AscendC::GlobalTensor<float> fc1BiasGm;
+    AscendC::GlobalTensor<float> fc2WeightGm;
+    AscendC::GlobalTensor<float> fc2BiasGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t seqLen;
+    uint32_t hiddenDim;
+    uint32_t outDim;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void swin_mlp_custom(GM_ADDR x, GM_ADDR fc1Weight, GM_ADDR fc1Bias, GM_ADDR fc2Weight, GM_ADDR fc2Bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelSwinMlp op;
+    op.Init(x, fc1Weight, fc1Bias, fc2Weight, fc2Bias, y, tiling_data.batchSize, tiling_data.seqLen, tiling_data.hiddenDim, tiling_data.outDim);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor swin_mlp_custom_impl_npu(const at::Tensor& x, const at::Tensor& fc1_weight, const at::Tensor& fc1_bias, const at::Tensor& fc2_weight, const at::Tensor& fc2_bias) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnSwinMlpCustom, x, fc1_weight, fc1_bias, fc2_weight, fc2_bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("swin_mlp_custom", &swin_mlp_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("swin_mlp_custom", &swin_mlp_custom_impl_npu, "Swin MLP forward pass");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class SwinMlpBlockCustom(torch.nn.Module):
+    def __init__(self, dim, input_resolution, num_heads, window_size=7, shift_size=0,
+                 mlp_ratio=4., drop=0., drop_path=0.,
+                 act_layer=torch.nn.GELU, norm_layer=torch.nn.LayerNorm):
+        super().__init__()
+        self.dim = dim
+        self.input_resolution = input_resolution
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.shift_size = shift_size
+        self.mlp_ratio = mlp_ratio
+        
+        self.norm1 = norm_layer(dim)
+        self.spatial_mlp = torch.nn.Conv1d(self.num_heads * self.window_size ** 2,
+                                     self.num_heads * self.window_size ** 2,
+                                     kernel_size=1,
+                                     groups=self.num_heads)
+        self.drop_path = torch.nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.fc1 = torch.nn.Linear(dim, mlp_hidden_dim)
+        self.act = act_layer()
+        self.fc2 = torch.nn.Linear(mlp_hidden_dim, dim)
+        self.drop = torch.nn.Dropout(drop)
+
+    def forward(self, x):
+        H, W = self.input_resolution
+        B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
+
+        shortcut = x
+        x = self.norm1(x)
+        x = x.view(B, H, W, C)
+
+        # shift
+        if self.shift_size > 0:
+            P_l, P_r, P_t, P_b = [self.window_size - self.shift_size, self.shift_size,
+                                  self.window_size - self.shift_size, self.shift_size]
+            shifted_x = torch.nn.functional.pad(x, [0, 0, P_l, P_r, P_t, P_b], "constant", 0)
+        else:
+            shifted_x = x
+        _, _H, _W, _ = shifted_x.shape
+
+        # partition windows
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
+
+        # Window/Shifted-Window Spatial MLP
+        x_windows_heads = x_windows.view(-1, self.window_size * self.window_size, self.num_heads, C // self.num_heads)
+        x_windows_heads = x_windows_heads.transpose(1, 2)  # nW*B, nH, window_size*window_size, C//nH
+        x_windows_heads = x_windows_heads.reshape(-1, self.num_heads * self.window_size * self.window_size,
+                                                  C // self.num_heads)
+        spatial_mlp_windows = self.spatial_mlp(x_windows_heads)  # nW*B, nH*window_size*window_size, C//nH
+        spatial_mlp_windows = spatial_mlp_windows.view(-1, self.num_heads, self.window_size * self.window_size,
+                                                       C // self.num_heads).transpose(1, 2)
+        spatial_mlp_windows = spatial_mlp_windows.reshape(-1, self.window_size * self.window_size, C)
+
+        # merge windows
+        spatial_mlp_windows = spatial_mlp_windows.reshape(-1, self.window_size, self.window_size, C)
+        shifted_x = window_reverse(spatial_mlp_windows, self.window_size, _H, _W)  # B H' W' C
+
+        # reverse shift
+        if self.shift_size > 0:
+            P_l, P_r, P_t, P_b = [self.window_size - self.shift_size, self.shift_size,
+                                  self.window_size - self.shift_size, self.shift_size]
+            x = shifted_x[:, P_t:-P_b, P_l:-P_r, :].contiguous()
+        else:
+            x = shifted_x
+        x = x.view(B, H * W, C)
+
+        # FFN
+        x = shortcut + self.drop_path(x)
+        x = x + self.drop_path(custom_ops_lib.swin_mlp_custom(x, self.fc1.weight, self.fc1.bias, self.fc2.weight, self.fc2.bias))
+
+        return x
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, img_size=224, patch_size=4, in_chans=3, num_classes=1000,
+                 embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
+                 window_size=7, mlp_ratio=4., drop_rate=0., drop_path_rate=0.1,
+                 norm_layer=torch.nn.LayerNorm, patch_norm=True,
+                 use_checkpoint=False, **kwargs):
+        super().__init__()
+
+        self.num_classes = num_classes
+        self.num_layers = len(depths)
+        self.embed_dim = embed_dim
+        self.patch_norm = patch_norm
+        self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
+        self.mlp_ratio = mlp_ratio
+
+        # split image into non-overlapping patches
+        self.patch_embed = torch.nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.norm = norm_layer(embed_dim) if patch_norm else None
+
+        self.pos_drop = torch.nn.Dropout(p=drop_rate)
+
+        # stochastic depth
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
+
+        # build layers
+        self.layers = torch.nn.ModuleList()
+        for i_layer in range(self.num_layers):
+            layer = SwinMlpBlockCustom(dim=int(embed_dim * 2 ** i_layer),
+                               input_resolution=(224 // (2 ** i_layer), 224 // (2 ** i_layer)),
+                               depth=depths[i_layer],
+                               num_heads=num_heads[i_layer],
+                               window_size=window_size,
+                               mlp_ratio=self.mlp_ratio,
+                               drop=drop_rate,
+                               drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                               norm_layer=norm_layer)
+            self.layers.append(layer)
+
+        self.norm = norm_layer(self.num_features)
+        self.avgpool = torch.nn.AdaptiveAvgPool1d(1)
+        self.head = torch.nn.Linear(self.num_features, num_classes) if num_classes > 0 else torch.nn.Identity()
+
+    def forward_features(self, x):
+        x = self.patch_embed(x).flatten(2).transpose(1, 2)  # B Ph*Pw C
+        if self.norm is not None:
+            x = self.norm(x)
+        x = self.pos_drop(x)
+
+        for layer in self.layers:
+            x = layer(x)
+
+        x = self.norm(x)  # B L C
+        x = self.avgpool(x.transpose(1, 2))  # B C 1
+        x = torch.flatten(x, 1)
+        return x
+
+    def forward(self, x):
+        x = self.forward_features(x)
+        x = self.head(x)
+        return x
+'''
+```

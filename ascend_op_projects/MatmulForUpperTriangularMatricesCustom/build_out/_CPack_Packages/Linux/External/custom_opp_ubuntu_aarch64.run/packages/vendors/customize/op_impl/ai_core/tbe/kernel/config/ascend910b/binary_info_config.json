@@ -1,0 +1,45 @@
+{
+  "MatmulForUpperTriangularMatricesCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "a",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "b",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "c",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "MatmulForUpperTriangularMatricesCustom/d=0,p=1/0,2/0,2/0,2",
+          "MatmulForUpperTriangularMatricesCustom/d=0,p=0/0,2/0,2/0,2",
+          "MatmulForUpperTriangularMatricesCustom/d=1,p=1/0,2/0,2/0,2",
+          "MatmulForUpperTriangularMatricesCustom/d=1,p=0/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/matmul_for_upper_triangular_matrices_custom/MatmulForUpperTriangularMatricesCustom_9b73ff8251e67d5e90ae01cb7ce4b52f.o",
+        "jsonPath": "ascend910b/matmul_for_upper_triangular_matrices_custom/MatmulForUpperTriangularMatricesCustom_9b73ff8251e67d5e90ae01cb7ce4b52f.json"
+      }
+    ]
+  }
+}

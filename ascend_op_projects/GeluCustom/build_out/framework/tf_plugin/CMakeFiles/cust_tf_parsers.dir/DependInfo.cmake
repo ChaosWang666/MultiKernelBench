@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/data/w00936672/MultiKernelBench/ascend_op_projects/GeluCustom/framework/tf_plugin/tensorflow_gelu_custom_plugin.cc" "framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_gelu_custom_plugin.cc.o" "gcc" "framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_gelu_custom_plugin.cc.o.d"
+  "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GeluCustom/framework/tf_plugin/tensorflow_gelu_custom_plugin.cc" "framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_gelu_custom_plugin.cc.o" "gcc" "framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_gelu_custom_plugin.cc.o.d"
   )
 
 # Targets to which this target links.

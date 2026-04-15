@@ -1,0 +1,90 @@
+
+#include "alexnet_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    AlexnetCustomTilingData tiling;
+    const gert::Shape* inputShape = context->GetInputShape(0);
+    const std::vector<int64_t>& inputDims = inputShape->GetOriginShape().GetDims();
+    uint32_t batchSize = static_cast<uint32_t>(inputDims[0]);
+    uint32_t channel = static_cast<uint32_t>(inputDims[1]);
+    uint32_t height = static_cast<uint32_t>(inputDims[2]);
+    uint32_t width = static_cast<uint32_t>(inputDims[3]);
+
+    // Set default values for conv parameters
+    uint32_t kernelH = 11;
+    uint32_t kernelW = 11;
+    uint32_t padH = 2;
+    uint32_t padW = 2;
+    uint32_t strideH = 4;
+    uint32_t strideW = 4;
+    uint32_t outChannel = 96;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_channel(channel);
+    tiling.set_height(height);
+    tiling.set_width(width);
+    tiling.set_kernelH(kernelH);
+    tiling.set_kernelW(kernelW);
+    tiling.set_padH(padH);
+    tiling.set_padW(padW);
+    tiling.set_strideH(strideH);
+    tiling.set_strideW(strideW);
+    tiling.set_outChannel(outChannel);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* inputShape = context->GetInputShape(0);
+    gert::Shape* outputShape = context->GetOutputShape(0);
+    const std::vector<int64_t>& inputDims = inputShape->GetOriginShape().GetDims();
+    std::vector<int64_t> outputDims = {inputDims[0], 96, 55, 55};
+    *outputShape = gert::Shape(outputDims);
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class AlexnetCustom : public OpDef {
+public:
+    explicit AlexnetCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW})
+            .UnknownShapeFormat({ge::FORMAT_NCHW});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW})
+            .UnknownShapeFormat({ge::FORMAT_NCHW});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(AlexnetCustom);
+}

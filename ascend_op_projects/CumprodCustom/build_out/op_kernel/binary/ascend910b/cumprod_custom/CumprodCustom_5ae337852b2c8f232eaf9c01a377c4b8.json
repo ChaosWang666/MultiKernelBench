@@ -1,0 +1,86 @@
+{
+ "binFileName": "CumprodCustom_5ae337852b2c8f232eaf9c01a377c4b8",
+ "binFileSuffix": ".o",
+ "blockDim": -1,
+ "coreType": "VectorCore",
+ "core_type": "AIV",
+ "intercoreSync": 0,
+ "kernelName": "CumprodCustom_5ae337852b2c8f232eaf9c01a377c4b8",
+ "magic": "RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+ "memoryStamping": [],
+ "opParaSize": 32,
+ "parameters": [
+  null,
+  null,
+  null
+ ],
+ "sha256": "0b18b04e65ad898950be73906c837e4bb865f1d9430df2b527e672f4af903e54",
+ "workspace": {
+  "num": 1,
+  "size": [
+   -1
+  ],
+  "type": [
+   0
+  ]
+ },
+ "kernelList": [
+  {
+   "kernelName": "CumprodCustom_5ae337852b2c8f232eaf9c01a377c4b8_0"
+  }
+ ],
+ "optionalInputMode": "gen_placeholder",
+ "optionalOutputMode": "gen_placeholder",
+ "supportSuperKernel": 1,
+ "compileInfo": {},
+ "supportInfo": {
+  "implMode": "high_performance",
+  "int64Mode": false,
+  "simplifiedKeyMode": 0,
+  "simplifiedKey": [
+   "CumprodCustom/d=0,p=1/0,2/0,2",
+   "CumprodCustom/d=0,p=0/0,2/0,2",
+   "CumprodCustom/d=1,p=1/0,2/0,2",
+   "CumprodCustom/d=1,p=0/0,2/0,2"
+  ],
+  "optionalInputMode": "gen_placeholder",
+  "optionalOutputMode": "gen_placeholder",
+  "staticKey": "e85f3d6de45f3f51767150c663e93bb737cee4861e7a7308cb7a5c35e8661856,51ba57c03ce11fb35ec35fa1c2c08884472c02c7113f07173847b4a90b1240b6",
+  "inputs": [
+   {
+    "name": "x",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "y",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "attrs": [
+   {
+    "name": "dim",
+    "dtype": "int",
+    "value": 0
+   }
+  ],
+  "opMode": "dynamic",
+  "deterministic": "ignore"
+ },
+ "filePath": "ascend910b/cumprod_custom/CumprodCustom_5ae337852b2c8f232eaf9c01a377c4b8.json"
+}

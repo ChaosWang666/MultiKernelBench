@@ -1,0 +1,570 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "ResnetBasicBlockCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "conv1_weight",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "conv1_bias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bn1_scale",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bn1_bias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "conv2_weight",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "conv2_bias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bn2_scale",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bn2_bias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "downsample_conv_weight",
+                "param_type": "optional",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "downsample_conv_bias",
+                "param_type": "optional",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "downsample_bn_scale",
+                "param_type": "optional",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "downsample_bn_bias",
+                "param_type": "optional",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "out",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ResnetBasicBlockCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batch);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, height);
+  TILING_DATA_FIELD_DEF(uint32_t, width);
+  TILING_DATA_FIELD_DEF(uint32_t, stride);
+  TILING_DATA_FIELD_DEF(uint32_t, useDownsample);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ResnetBasicBlockCustom, ResnetBasicBlockCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "resnet_basic_block_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ResnetBasicBlockCustomTilingData tiling;
+    const gert::Shape* input_shape = context->GetInputShape(0);
+    const std::vector<int64_t>& input_dims = input_shape->GetOriginShape().GetDims();
+    uint32_t batch = static_cast<uint32_t>(input_dims[0]);
+    uint32_t inChannels = static_cast<uint32_t>(input_dims[1]);
+    uint32_t height = static_cast<uint32_t>(input_dims[2]);
+    uint32_t width = static_cast<uint32_t>(input_dims[3]);
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batch(batch);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(static_cast<uint32_t>(context->GetInputShape(1)->GetOriginShape().GetDims()[0]));
+    tiling.set_height(height);
+    tiling.set_width(width);
+    tiling.set_stride(1); // Fixed stride for this implementation
+    tiling.set_useDownsample(context->GetInputShape(9) != nullptr ? 1 : 0);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* input_shape = context->GetInputShape(0);
+    gert::Shape* output_shape = context->GetOutputShape(0);
+    *output_shape = *input_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ResnetBasicBlockCustom : public OpDef {
+public:
+    explicit ResnetBasicBlockCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW});
+        this->Input("conv1_weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW});
+        this->Input("conv1_bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NC});
+        this->Input("bn1_scale")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NC});
+        this->Input("bn1_bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NC});
+        this->Input("conv2_weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW});
+        this->Input("conv2_bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NC});
+        this->Input("bn2_scale")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NC});
+        this->Input("bn2_bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NC});
+        this->Input("downsample_conv_weight")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW});
+        this->Input("downsample_conv_bias")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NC});
+        this->Input("downsample_bn_scale")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NC});
+        this->Input("downsample_bn_bias")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NC});
+        this->Output("out")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ResnetBasicBlockCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+
+class KernelResnetBasicBlock {
+public:
+    __aicore__ inline KernelResnetBasicBlock() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR conv1Weight, GM_ADDR conv1Bias,
+                                GM_ADDR bn1Scale, GM_ADDR bn1Bias,
+                                GM_ADDR conv2Weight, GM_ADDR conv2Bias,
+                                GM_ADDR bn2Scale, GM_ADDR bn2Bias,
+                                GM_ADDR downsampleConvWeight, GM_ADDR downsampleConvBias,
+                                GM_ADDR downsampleBnScale, GM_ADDR downsampleBnBias,
+                                GM_ADDR out, uint32_t batch, uint32_t inChannels,
+                                uint32_t outChannels, uint32_t height, uint32_t width,
+                                uint32_t stride, uint32_t useDownsample)
+    {
+        this->batch = batch;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->height = height;
+        this->width = width;
+        this->stride = stride;
+        this->useDownsample = useDownsample;
+
+        this->blockLength = batch * inChannels * height * width / AscendC::GetBlockNum();
+        this->tileLength = this->blockLength / BUFFER_NUM;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, this->blockLength);
+        outGm.SetGlobalBuffer((__gm__ float *)out, this->blockLength);
+        conv1WeightGm.SetGlobalBuffer((__gm__ float *)conv1Weight, 3 * 3 * inChannels * outChannels);
+        conv1BiasGm.SetGlobalBuffer((__gm__ float *)conv1Bias, outChannels);
+        bn1ScaleGm.SetGlobalBuffer((__gm__ float *)bn1Scale, outChannels);
+        bn1BiasGm.SetGlobalBuffer((__gm__ float *)bn1Bias, outChannels);
+        conv2WeightGm.SetGlobalBuffer((__gm__ float *)conv2Weight, 3 * 3 * outChannels * outChannels);
+        conv2BiasGm.SetGlobalBuffer((__gm__ float *)conv2Bias, outChannels);
+        bn2ScaleGm.SetGlobalBuffer((__gm__ float *)bn2Scale, outChannels);
+        bn2BiasGm.SetGlobalBuffer((__gm__ float *)bn2Bias, outChannels);
+        if (useDownsample) {
+            downsampleConvWeightGm.SetGlobalBuffer((__gm__ float *)downsampleConvWeight, 1 * 1 * inChannels * outChannels);
+            downsampleConvBiasGm.SetGlobalBuffer((__gm__ float *)downsampleConvBias, outChannels);
+            downsampleBnScaleGm.SetGlobalBuffer((__gm__ float *)downsampleBnScale, outChannels);
+            downsampleBnBiasGm.SetGlobalBuffer((__gm__ float *)downsampleBnBias, outChannels);
+        }
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueConv1, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueBn1, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueConv2, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueBn2, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueIdentity, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueAdd, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueRelu, BUFFER_NUM, this->tileLength * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t batchIdx = 0; batchIdx < batch; ++batchIdx) {
+            ProcessBatch(batchIdx);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessBatch(uint32_t batchIdx)
+    {
+        uint32_t offset = batchIdx * inChannels * height * width;
+        xGm.SetGlobalBuffer((__gm__ float *)xGm.GetBaseAddr() + offset, inChannels * height * width);
+        outGm.SetGlobalBuffer((__gm__ float *)outGm.GetBaseAddr() + offset, inChannels * height * width);
+
+        // Conv1 + BN1 + ReLU
+        ConvBnRelu1(offset);
+
+        // Conv2 + BN2
+        ConvBn2(offset);
+
+        // Identity path
+        Identity(offset);
+
+        // Add + ReLU
+        AddRelu(offset);
+    }
+
+    __aicore__ inline void ConvBnRelu1(uint32_t offset)
+    {
+        // Conv1
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm, inChannels * height * width);
+        inQueueX.EnQue(xLocal);
+
+        AscendC::LocalTensor<float> conv1Out = outQueueConv1.AllocTensor<float>();
+        AscendC::Conv2d(conv1Out, xLocal, conv1WeightGm, conv1BiasGm, 3, 3, 1, 1, 1, 1, 1, 1);
+        outQueueConv1.EnQue(conv1Out);
+
+        // BN1
+        AscendC::LocalTensor<float> bn1Out = outQueueBn1.AllocTensor<float>();
+        AscendC::BatchNorm2d(bn1Out, conv1Out, bn1ScaleGm, bn1BiasGm, 1e-5f);
+        outQueueBn1.EnQue(bn1Out);
+
+        // ReLU
+        AscendC::LocalTensor<float> reluOut = outQueueRelu.AllocTensor<float>();
+        AscendC::ReLU(reluOut, bn1Out);
+        outQueueRelu.EnQue(reluOut);
+    }
+
+    __aicore__ inline void ConvBn2(uint32_t offset)
+    {
+        // Conv2
+        AscendC::LocalTensor<float> xLocal = outQueueRelu.DeQue<float>();
+        AscendC::LocalTensor<float> conv2Out = outQueueConv2.AllocTensor<float>();
+        AscendC::Conv2d(conv2Out, xLocal, conv2WeightGm, conv2BiasGm, 3, 3, 1, 1, 1, 1, 1, 1);
+        outQueueConv2.EnQue(conv2Out);
+
+        // BN2
+        AscendC::LocalTensor<float> bn2Out = outQueueBn2.AllocTensor<float>();
+        AscendC::BatchNorm2d(bn2Out, conv2Out, bn2ScaleGm, bn2BiasGm, 1e-5f);
+        outQueueBn2.EnQue(bn2Out);
+    }
+
+    __aicore__ inline void Identity(uint32_t offset)
+    {
+        // Identity path
+        AscendC::LocalTensor<float> identityOut = outQueueIdentity.AllocTensor<float>();
+        if (useDownsample) {
+            // Downsample
+            AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+            AscendC::LocalTensor<float> downsampleOut = outQueueIdentity.AllocTensor<float>();
+            AscendC::Conv2d(downsampleOut, xLocal, downsampleConvWeightGm, downsampleConvBiasGm, 1, 1, 0, 0, 1, 1, 1, 1);
+            outQueueIdentity.EnQue(downsampleOut);
+        } else {
+            // Direct copy
+            AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+            AscendC::DataCopy(identityOut, xLocal, inChannels * height * width);
+            outQueueIdentity.EnQue(identityOut);
+        }
+    }
+
+    __aicore__ inline void AddRelu(uint32_t offset)
+    {
+        // Add
+        AscendC::LocalTensor<float> xLocal = outQueueBn2.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueIdentity.DeQue<float>();
+        AscendC::LocalTensor<float> addOut = outQueueAdd.AllocTensor<float>();
+        AscendC::Add(addOut, xLocal, yLocal, inChannels * height * width);
+        outQueueAdd.EnQue(addOut);
+
+        // ReLU
+        AscendC::LocalTensor<float> reluOut = outQueueRelu.AllocTensor<float>();
+        AscendC::ReLU(reluOut, addOut);
+        outQueueRelu.EnQue(reluOut);
+
+        // Copy back to global memory
+        AscendC::LocalTensor<float> finalOut = outQueueRelu.DeQue<float>();
+        AscendC::DataCopy(outGm, finalOut, inChannels * height * width);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueConv1, outQueueBn1, outQueueConv2, outQueueBn2, outQueueIdentity, outQueueAdd, outQueueRelu;
+    AscendC::GlobalTensor<float> xGm, outGm;
+    AscendC::GlobalTensor<float> conv1WeightGm, conv1BiasGm;
+    AscendC::GlobalTensor<float> bn1ScaleGm, bn1BiasGm;
+    AscendC::GlobalTensor<float> conv2WeightGm, conv2BiasGm;
+    AscendC::GlobalTensor<float> bn2ScaleGm, bn2BiasGm;
+    AscendC::GlobalTensor<float> downsampleConvWeightGm, downsampleConvBiasGm;
+    AscendC::GlobalTensor<float> downsampleBnScaleGm, downsampleBnBiasGm;
+    uint32_t batch;
+    uint32_t inChannels;
+    uint32_t outChannels;
+    uint32_t height;
+    uint32_t width;
+    uint32_t stride;
+    uint32_t useDownsample;
+    uint32_t blockLength;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void resnet_basic_block_custom(
+    GM_ADDR x, GM_ADDR conv1_weight, GM_ADDR conv1_bias,
+    GM_ADDR bn1_scale, GM_ADDR bn1_bias,
+    GM_ADDR conv2_weight, GM_ADDR conv2_bias,
+    GM_ADDR bn2_scale, GM_ADDR bn2_bias,
+    GM_ADDR downsample_conv_weight, GM_ADDR downsample_conv_bias,
+    GM_ADDR downsample_bn_scale, GM_ADDR downsample_bn_bias,
+    GM_ADDR out, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelResnetBasicBlock op;
+    op.Init(x, conv1_weight, conv1_bias, bn1_scale, bn1_bias,
+            conv2_weight, conv2_bias, bn2_scale, bn2_bias,
+            downsample_conv_weight, downsample_conv_bias,
+            downsample_bn_scale, downsample_bn_bias,
+            out, tiling_data.batch, tiling_data.inChannels,
+            tiling_data.outChannels, tiling_data.height, tiling_data.width,
+            tiling_data.stride, tiling_data.useDownsample);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor resnet_basic_block_custom_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& conv1_weight,
+    const at::Tensor& conv1_bias,
+    const at::Tensor& bn1_scale,
+    const at::Tensor& bn1_bias,
+    const at::Tensor& conv2_weight,
+    const at::Tensor& conv2_bias,
+    const at::Tensor& bn2_scale,
+    const at::Tensor& bn2_bias,
+    const c10::optional<at::Tensor>& downsample_conv_weight = c10::nullopt,
+    const c10::optional<at::Tensor>& downsample_conv_bias = c10::nullopt,
+    const c10::optional<at::Tensor>& downsample_bn_scale = c10::nullopt,
+    const c10::optional<at::Tensor>& downsample_bn_bias = c10::nullopt) {
+
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnResnetBasicBlockCustom,
+                 x, conv1_weight, conv1_bias, bn1_scale, bn1_bias,
+                 conv2_weight, conv2_bias, bn2_scale, bn2_bias,
+                 downsample_conv_weight, downsample_conv_bias,
+                 downsample_bn_scale, downsample_bn_bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("resnet_basic_block_custom", &resnet_basic_block_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("resnet_basic_block_custom", &resnet_basic_block_custom_impl_npu, "ResNet basic block");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super(ModelNew, self).__init__()
+        self.conv1 = torch.nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = torch.nn.BatchNorm2d(out_channels)
+        self.relu = torch.nn.ReLU(inplace=True)
+        self.conv2 = torch.nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = torch.nn.BatchNorm2d(out_channels)
+        self.downsample = torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+            torch.nn.BatchNorm2d(out_channels),
+        ) if in_channels != out_channels or stride != 1 else None
+        self.stride = stride
+
+    def forward(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.relu(out)
+
+        return out
+'''
+```

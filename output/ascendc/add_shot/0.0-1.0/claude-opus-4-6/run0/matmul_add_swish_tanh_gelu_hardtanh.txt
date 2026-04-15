@@ -1,0 +1,332 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "MatmulAddSwishTanhGeluHardtanhCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "add_value",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulAddSwishTanhGeluHardtanhCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, addValueLength);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulAddSwishTanhGeluHardtanhCustom, MatmulAddSwishTanhGeluHardtanhCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_add_swish_tanh_gelu_hardtanh_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 4096;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulAddSwishTanhGeluHardtanhCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    uint32_t addValueLength = context->GetInputShape(1)->GetOriginShape().GetShapeSize();
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.set_addValueLength(addValueLength);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MatmulAddSwishTanhGeluHardtanhCustom : public OpDef {
+public:
+    explicit MatmulAddSwishTanhGeluHardtanhCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("add_value")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MatmulAddSwishTanhGeluHardtanhCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelMatmulAddSwishTanhGeluHardtanh {
+public:
+    __aicore__ inline KernelMatmulAddSwishTanhGeluHardtanh() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR addVal, GM_ADDR z, uint32_t totalLength, uint32_t tileNum, uint32_t addValueLength)
+    {
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->addValueLength = addValueLength;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        addValGm.SetGlobalBuffer((__gm__ float *)addVal, addValueLength);
+        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueAdd, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> addLocal = inQueueAdd.AllocTensor<float>();
+        uint32_t offset = progress * this->tileLength;
+        AscendC::DataCopy(xLocal, xGm[offset], this->tileLength);
+        // add_value is broadcast along rows; compute the column offset
+        // The global offset for this block is blockLength * blockIdx + progress * tileLength
+        // Column index = globalOffset % addValueLength
+        uint32_t globalOffset = this->blockLength * AscendC::GetBlockIdx() + offset;
+        uint32_t colOffset = globalOffset % this->addValueLength;
+        AscendC::DataCopy(addLocal, addValGm[colOffset], this->tileLength);
+        inQueueX.EnQue(xLocal);
+        inQueueAdd.EnQue(addLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> addLocal = inQueueAdd.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp1 = tmpBuf1.Get<float>();
+        AscendC::LocalTensor<float> tmp2 = tmpBuf2.Get<float>();
+
+        // x = x + add_value
+        AscendC::Add(xLocal, xLocal, addLocal, this->tileLength);
+
+        // Swish: x = sigmoid(x) * x
+        // sigmoid(x) = 1/(1+exp(-x))
+        // tmp1 = -x
+        AscendC::Muls(tmp1, xLocal, (float)-1.0f, this->tileLength);
+        // tmp1 = exp(-x)
+        AscendC::Exp(tmp1, tmp1, this->tileLength);
+        // tmp1 = 1 + exp(-x)
+        AscendC::Adds(tmp1, tmp1, (float)1.0f, this->tileLength);
+        // tmp1 = 1 / (1 + exp(-x))
+        AscendC::Reciprocal(tmp1, tmp1, this->tileLength);
+        // xLocal = sigmoid(x) * x
+        AscendC::Mul(xLocal, tmp1, xLocal, this->tileLength);
+
+        // Tanh: x = tanh(x)
+        // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+        // Use: tanh(x) = 2*sigmoid(2x) - 1
+        AscendC::Muls(tmp1, xLocal, (float)2.0f, this->tileLength);
+        // tmp1 = -2x
+        AscendC::Muls(tmp1, tmp1, (float)-1.0f, this->tileLength);
+        // tmp1 = exp(-2x)
+        AscendC::Exp(tmp1, tmp1, this->tileLength);
+        // tmp1 = 1 + exp(-2x)
+        AscendC::Adds(tmp1, tmp1, (float)1.0f, this->tileLength);
+        // tmp1 = 1/(1+exp(-2x)) = sigmoid(2x)
+        AscendC::Reciprocal(tmp1, tmp1, this->tileLength);
+        // tmp1 = 2*sigmoid(2x)
+        AscendC::Muls(tmp1, tmp1, (float)2.0f, this->tileLength);
+        // xLocal = 2*sigmoid(2x) - 1 = tanh(x)
+        AscendC::Adds(xLocal, tmp1, (float)-1.0f, this->tileLength);
+
+        // GELU: x = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        // tmp1 = x^2
+        AscendC::Mul(tmp1, xLocal, xLocal, this->tileLength);
+        // tmp1 = x^3
+        AscendC::Mul(tmp1, tmp1, xLocal, this->tileLength);
+        // tmp1 = 0.044715 * x^3
+        AscendC::Muls(tmp1, tmp1, (float)0.044715f, this->tileLength);
+        // tmp1 = x + 0.044715 * x^3
+        AscendC::Add(tmp1, tmp1, xLocal, this->tileLength);
+        // tmp1 = sqrt(2/pi) * (x + 0.044715 * x^3), sqrt(2/pi) ~ 0.7978845608
+        AscendC::Muls(tmp1, tmp1, (float)0.7978845608f, this->tileLength);
+        // tanh(tmp1): use 2*sigmoid(2*tmp1) - 1
+        AscendC::Muls(tmp1, tmp1, (float)2.0f, this->tileLength);
+        AscendC::Muls(tmp1, tmp1, (float)-1.0f, this->tileLength);
+        AscendC::Exp(tmp1, tmp1, this->tileLength);
+        AscendC::Adds(tmp1, tmp1, (float)1.0f, this->tileLength);
+        AscendC::Reciprocal(tmp1, tmp1, this->tileLength);
+        AscendC::Muls(tmp1, tmp1, (float)2.0f, this->tileLength);
+        AscendC::Adds(tmp1, tmp1, (float)-1.0f, this->tileLength);
+        // tmp1 = 1 + tanh(...)
+        AscendC::Adds(tmp1, tmp1, (float)1.0f, this->tileLength);
+        // tmp1 = 0.5 * x * (1 + tanh(...))
+        AscendC::Mul(tmp1, tmp1, xLocal, this->tileLength);
+        AscendC::Muls(xLocal, tmp1, (float)0.5f, this->tileLength);
+
+        // Hardtanh: clamp to [-1, 1]
+        // min with 1.0
+        AscendC::Mins(xLocal, xLocal, (float)1.0f, this->tileLength);
+        // max with -1.0
+        AscendC::Maxs(xLocal, xLocal, (float)-1.0f, this->tileLength);
+
+        AscendC::DataCopy(zLocal, xLocal, this->tileLength);
+        outQueueZ.EnQue<float>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+        inQueueAdd.FreeTensor(addLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueAdd;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> addValGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t addValueLength;
+};
+
+extern "C" __global__ __aicore__ void matmul_add_swish_tanh_gelu_hardtanh_custom(GM_ADDR x, GM_ADDR add_value, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMatmulAddSwishTanhGeluHardtanh op;
+    op.Init(x, add_value, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.addValueLength);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_add_swish_tanh_gelu_hardtanh_custom_impl_npu(const at::Tensor& x, const at::Tensor& add_value) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnMatmulAddSwishTanhGeluHardtanhCustom, x, add_value, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_add_swish_tanh_gelu_hardtanh_custom", &matmul_add_swish_tanh_gelu_hardtanh_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_add_swish_tanh_gelu_hardtanh_custom", &matmul_add_swish_tanh_gelu_hardtanh_custom_impl_npu, "fused add+swish+tanh+gelu+hardtanh");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model that performs matrix multiplication using nn.Linear,
+    then applies a fused custom kernel for add + swish + tanh + gelu + hardtanh.
+    """
+    def __init__(self, in_features, out_features, add_value_shape):
+        super(ModelNew, self).__init__()
+        self.matmul = torch.nn.Linear(in_features, out_features)
+        self.add_value = torch.nn.Parameter(torch.randn(add_value_shape))
+
+    def forward(self, x):
+        x = self.matmul(x)
+        # Fused: add + swish + tanh + gelu + hardtanh
+        x = custom_ops_lib.matmul_add_swish_tanh_gelu_hardtanh_custom(x, self.add_value)
+        return x
+'''
+```

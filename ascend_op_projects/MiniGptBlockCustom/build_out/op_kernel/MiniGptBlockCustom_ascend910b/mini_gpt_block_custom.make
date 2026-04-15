@@ -1,0 +1,3 @@
+all: mini_gpt_block_custom0
+mini_gpt_block_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MiniGptBlockCustom/build_out/op_kernel/MiniGptBlockCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MiniGptBlockCustom/build_out/op_kernel/MiniGptBlockCustom_ascend910b/bin_param/MiniGptBlockCustom-mini_gpt_block_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

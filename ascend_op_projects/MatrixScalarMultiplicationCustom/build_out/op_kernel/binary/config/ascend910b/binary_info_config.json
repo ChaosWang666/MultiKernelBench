@@ -1,0 +1,45 @@
+{
+  "MatrixScalarMultiplicationCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "s",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "z",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "MatrixScalarMultiplicationCustom/d=0,p=1/0,2/0,2/0,2",
+          "MatrixScalarMultiplicationCustom/d=0,p=0/0,2/0,2/0,2",
+          "MatrixScalarMultiplicationCustom/d=1,p=1/0,2/0,2/0,2",
+          "MatrixScalarMultiplicationCustom/d=1,p=0/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/matrix_scalar_multiplication_custom/MatrixScalarMultiplicationCustom_8053682ae4e536f2890d1bac916af1d5.o",
+        "jsonPath": "ascend910b/matrix_scalar_multiplication_custom/MatrixScalarMultiplicationCustom_8053682ae4e536f2890d1bac916af1d5.json"
+      }
+    ]
+  }
+}

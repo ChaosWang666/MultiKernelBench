@@ -1,0 +1,3 @@
+all: swintransformer_v2_custom0
+swintransformer_v2_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SwintransformerV2Custom/build_out/op_kernel/SwintransformerV2Custom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SwintransformerV2Custom/build_out/op_kernel/SwintransformerV2Custom_ascend910b/bin_param/SwintransformerV2Custom-swintransformer_v2_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

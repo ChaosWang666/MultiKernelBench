@@ -1,31 +1,26 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2;
-
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+ 
 class KernelElu {
 public:
     __aicore__ inline KernelElu() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR alpha, GM_ADDR z, uint32_t totalLength, uint32_t tileNum)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, float alpha)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->tileNum = tileNum;
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
-
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        alphaGm.SetGlobalBuffer((__gm__ float *)alpha, 1);
-        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
+        this->alpha = alpha;
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->blockLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->blockLength * sizeof(DTYPE_Y));
     }
     __aicore__ inline void Process()
     {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
-        float alphaVal = alphaGm.GetValue(0);
+        int32_t loopCount = BUFFER_NUM;
         for (int32_t i = 0; i < loopCount; i++) {
             CopyIn(i);
-            Compute(i, alphaVal);
+            Compute(i);
             CopyOut(i);
         }
     }
@@ -33,49 +28,38 @@ public:
 private:
     __aicore__ inline void CopyIn(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->blockLength], this->blockLength);
         inQueueX.EnQue(xLocal);
     }
-    __aicore__ inline void Compute(int32_t progress, float alphaVal)
+    __aicore__ inline void Compute(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
-        
-        AscendC::LocalTensor<float> mask = xLocal < 0.0f;
-        AscendC::LocalTensor<float> temp = xLocal;
-        
-        AscendC::Exp(temp, xLocal, this->tileLength);
-        AscendC::Sub(temp, temp, 1.0f, this->tileLength);
-        AscendC::Mul(temp, temp, alphaVal, this->tileLength);
-        
-        AscendC::Select(zLocal, mask, temp, xLocal, this->tileLength);
-        
-        outQueueZ.EnQue<float>(zLocal);
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::Elu(yLocal, xLocal, this->alpha, this->blockLength);
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
     }
     __aicore__ inline void CopyOut(int32_t progress)
     {
-        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
-        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
-        outQueueZ.FreeTensor(zLocal);
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[progress * this->blockLength], yLocal, this->blockLength);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> alphaGm;
-    AscendC::GlobalTensor<float> zGm;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t blockLength;
-    uint32_t tileNum;
-    uint32_t tileLength;
+    float alpha;
 };
 
-extern "C" __global__ __aicore__ void elu_custom(GM_ADDR x, GM_ADDR alpha, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void elu_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelElu op;
-    op.Init(x, alpha, z, tiling_data.totalLength, tiling_data.tileNum);
+    op.Init(x, y, tiling_data.totalLength, tiling_data.alpha);
     op.Process();
 }

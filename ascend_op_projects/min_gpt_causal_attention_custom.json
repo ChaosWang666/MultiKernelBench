@@ -1,0 +1,58 @@
+
+[
+    {
+        "op": "MinGptCausalAttentionCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "n_embd",
+                "param_type": "required",
+                "type": "int64"
+            },
+            {
+                "name": "n_head",
+                "param_type": "required",
+                "type": "int64"
+            },
+            {
+                "name": "attn_pdrop",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "resid_pdrop",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "max_seqlen",
+                "param_type": "required",
+                "type": "int64"
+            }
+        ]
+    }
+]

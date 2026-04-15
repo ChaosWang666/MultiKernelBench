@@ -1,0 +1,3 @@
+all: gemm_group_norm_min_bias_add_custom0
+gemm_group_norm_min_bias_add_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmGroupNormMinBiasAddCustom/build_out/op_kernel/GemmGroupNormMinBiasAddCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmGroupNormMinBiasAddCustom/build_out/op_kernel/GemmGroupNormMinBiasAddCustom_ascend910b/bin_param/GemmGroupNormMinBiasAddCustom-gemm_group_norm_min_bias_add_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

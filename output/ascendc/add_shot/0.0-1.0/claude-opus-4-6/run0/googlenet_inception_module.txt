@@ -1,0 +1,407 @@
+
+
+Looking at this architecture, the GoogLeNet Inception module consists of multiple branches with convolutions, max pooling, and a final concatenation along the channel dimension. The key custom operation I can implement is the final `torch.cat` along dimension 1 (channel concatenation of 4 branches), which is a memory-bound operation that can benefit from a fused kernel.
+
+However, given the complexity of convolutions (which are best left to highly optimized cuBLAS/CANN libraries), I'll focus on creating a custom kernel that fuses the concatenation of 4 tensors along the channel dimension, which is the distinctive operation in the Inception module.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "GooglenetInceptionModuleCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "branch1",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "branch2",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "branch3",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "branch4",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GooglenetInceptionModuleCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, height);
+  TILING_DATA_FIELD_DEF(uint32_t, width);
+  TILING_DATA_FIELD_DEF(uint32_t, c1);
+  TILING_DATA_FIELD_DEF(uint32_t, c2);
+  TILING_DATA_FIELD_DEF(uint32_t, c3);
+  TILING_DATA_FIELD_DEF(uint32_t, c4);
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GooglenetInceptionModuleCustom, GooglenetInceptionModuleCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "googlenet_inception_module_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 8;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    GooglenetInceptionModuleCustomTilingData tiling;
+    
+    const gert::StorageShape* branch1Shape = context->GetInputShape(0);
+    const gert::StorageShape* branch2Shape = context->GetInputShape(1);
+    const gert::StorageShape* branch3Shape = context->GetInputShape(2);
+    const gert::StorageShape* branch4Shape = context->GetInputShape(3);
+    
+    uint32_t batchSize = branch1Shape->GetOriginShape().GetDim(0);
+    uint32_t height = branch1Shape->GetOriginShape().GetDim(2);
+    uint32_t width = branch1Shape->GetOriginShape().GetDim(3);
+    uint32_t c1 = branch1Shape->GetOriginShape().GetDim(1);
+    uint32_t c2 = branch2Shape->GetOriginShape().GetDim(1);
+    uint32_t c3 = branch3Shape->GetOriginShape().GetDim(1);
+    uint32_t c4 = branch4Shape->GetOriginShape().GetDim(1);
+    
+    uint32_t totalOutChannels = c1 + c2 + c3 + c4;
+    uint32_t totalLength = batchSize * totalOutChannels * height * width;
+    
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_height(height);
+    tiling.set_width(width);
+    tiling.set_c1(c1);
+    tiling.set_c2(c2);
+    tiling.set_c3(c3);
+    tiling.set_c4(c4);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* b1_shape = context->GetInputShape(0);
+    const gert::Shape* b2_shape = context->GetInputShape(1);
+    const gert::Shape* b3_shape = context->GetInputShape(2);
+    const gert::Shape* b4_shape = context->GetInputShape(3);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    
+    int64_t batch = b1_shape->GetDim(0);
+    int64_t h = b1_shape->GetDim(2);
+    int64_t w = b1_shape->GetDim(3);
+    int64_t totalC = b1_shape->GetDim(1) + b2_shape->GetDim(1) + b3_shape->GetDim(1) + b4_shape->GetDim(1);
+    
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, batch);
+    y_shape->SetDim(1, totalC);
+    y_shape->SetDim(2, h);
+    y_shape->SetDim(3, w);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class GooglenetInceptionModuleCustom : public OpDef {
+public:
+    explicit GooglenetInceptionModuleCustom(const char* name) : OpDef(name)
+    {
+        this->Input("branch1")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("branch2")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("branch3")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("branch4")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(GooglenetInceptionModuleCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelCat4 {
+public:
+    __aicore__ inline KernelCat4() {}
+    __aicore__ inline void Init(GM_ADDR branch1, GM_ADDR branch2, GM_ADDR branch3, GM_ADDR branch4, GM_ADDR z,
+                                uint32_t batchSize, uint32_t height, uint32_t width,
+                                uint32_t c1, uint32_t c2, uint32_t c3, uint32_t c4,
+                                uint32_t totalLength, uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->height = height;
+        this->width = width;
+        this->c1 = c1;
+        this->c2 = c2;
+        this->c3 = c3;
+        this->c4 = c4;
+        this->hw = height * width;
+        this->totalC = c1 + c2 + c3 + c4;
+        
+        // Total number of batch-spatial elements (each is one row in NCHW for a given batch and spatial position)
+        // We'll work at the granularity of batch items
+        uint32_t totalBatches = batchSize;
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        
+        // Divide batches across blocks
+        this->batchPerBlock = (totalBatches + blockNum - 1) / blockNum;
+        this->batchStart = blockIdx * this->batchPerBlock;
+        this->batchEnd = this->batchStart + this->batchPerBlock;
+        if (this->batchEnd > totalBatches) this->batchEnd = totalBatches;
+        
+        uint32_t b1Total = batchSize * c1 * hw;
+        uint32_t b2Total = batchSize * c2 * hw;
+        uint32_t b3Total = batchSize * c3 * hw;
+        uint32_t b4Total = batchSize * c4 * hw;
+        
+        branch1Gm.SetGlobalBuffer((__gm__ float*)branch1, b1Total);
+        branch2Gm.SetGlobalBuffer((__gm__ float*)branch2, b2Total);
+        branch3Gm.SetGlobalBuffer((__gm__ float*)branch3, b3Total);
+        branch4Gm.SetGlobalBuffer((__gm__ float*)branch4, b4Total);
+        zGm.SetGlobalBuffer((__gm__ float*)z, totalLength);
+        
+        // Allocate buffer for the largest branch channel data per batch
+        // For a single batch, the largest copy is max(c1,c2,c3,c4)*hw floats
+        uint32_t maxC = c1;
+        if (c2 > maxC) maxC = c2;
+        if (c3 > maxC) maxC = c3;
+        if (c4 > maxC) maxC = c4;
+        
+        // We need to tile within a batch if the data is too large
+        // Buffer size per tile: we use a reasonable size
+        uint32_t maxBufElements = maxC * hw;
+        // Align to 32 bytes (8 floats)
+        uint32_t alignedElements = (maxBufElements + 7) / 8 * 8;
+        
+        this->bufSize = alignedElements;
+        pipe.InitBuffer(inQueue, BUFFER_NUM, this->bufSize * sizeof(float));
+    }
+    
+    __aicore__ inline void Process()
+    {
+        for (uint32_t b = this->batchStart; b < this->batchEnd; b++) {
+            // Copy branch1 for batch b
+            CopyBranch(branch1Gm, b, c1, 0);
+            // Copy branch2 for batch b
+            CopyBranch(branch2Gm, b, c2, c1);
+            // Copy branch3 for batch b
+            CopyBranch(branch3Gm, b, c3, c1 + c2);
+            // Copy branch4 for batch b
+            CopyBranch(branch4Gm, b, c4, c1 + c2 + c3);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyBranch(AscendC::GlobalTensor<float>& srcGm, uint32_t batchIdx,
+                                       uint32_t channels, uint32_t channelOffset)
+    {
+        uint32_t srcOffset = batchIdx * channels * hw;
+        uint32_t dstOffset = batchIdx * totalC * hw + channelOffset * hw;
+        uint32_t copyLen = channels * hw;
+        uint32_t alignedLen = (copyLen + 7) / 8 * 8;
+        
+        AscendC::LocalTensor<float> localBuf = inQueue.AllocTensor<float>();
+        AscendC::DataCopy(localBuf, srcGm[srcOffset], alignedLen);
+        inQueue.EnQue(localBuf);
+        
+        AscendC::LocalTensor<float> outBuf = inQueue.DeQue<float>();
+        AscendC::DataCopy(zGm[dstOffset], outBuf, alignedLen);
+        inQueue.FreeTensor(outBuf);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
+    AscendC::GlobalTensor<float> branch1Gm, branch2Gm, branch3Gm, branch4Gm, zGm;
+    uint32_t batchSize, height, width, hw;
+    uint32_t c1, c2, c3, c4, totalC;
+    uint32_t batchPerBlock, batchStart, batchEnd;
+    uint32_t bufSize;
+};
+
+extern "C" __global__ __aicore__ void googlenet_inception_module_custom(GM_ADDR branch1, GM_ADDR branch2,
+    GM_ADDR branch3, GM_ADDR branch4, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelCat4 op;
+    op.Init(branch1, branch2, branch3, branch4, z,
+            tiling_data.batchSize, tiling_data.height, tiling_data.width,
+            tiling_data.c1, tiling_data.c2, tiling_data.c3, tiling_data.c4,
+            tiling_data.totalLength, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor googlenet_inception_module_custom_impl_npu(const at::Tensor& branch1, const at::Tensor& branch2,
+                                                       const at::Tensor& branch3, const at::Tensor& branch4) {
+    auto b = branch1.size(0);
+    auto h = branch1.size(2);
+    auto w = branch1.size(3);
+    auto totalC = branch1.size(1) + branch2.size(1) + branch3.size(1) + branch4.size(1);
+    
+    at::Tensor result = at::empty({b, totalC, h, w}, branch1.options());
+    
+    EXEC_NPU_CMD(aclnnGooglenetInceptionModuleCustom, branch1, branch2, branch3, branch4, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("googlenet_inception_module_custom", &googlenet_inception_module_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("googlenet_inception_module_custom", &googlenet_inception_module_custom_impl_npu, "Cat4 branches along channel dim");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+import torch.nn as nn
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_1x1, reduce_3x3, out_3x3, reduce_5x5, out_5x5, pool_proj):
+        """
+        :param in_channels: Number of input channels
+        :param out_1x1: Number of output channels for the 1x1 convolution
+        :param reduce_3x3: Number of output channels for the 1x1 reduction before 3x3 convolution
+        :param out_3x3: Number of output channels for the 3x3 convolution
+        :param reduce_5x5: Number of output channels for the 1x1 reduction before 5x5 convolution
+        :param out_5x5: Number of output channels for the 5x5 convolution
+        :param pool_proj: Number of output channels for the pooling projection
+        """
+        super(ModelNew, self).__init__()
+        
+        # 1x1 convolution branch
+        self.branch1x1 = nn.Conv2d(in_channels, out_1x1, kernel_size=1)
+        
+        # 3x3 convolution branch
+        self.branch3x3 = nn.Sequential(
+            nn.Conv2d(in_channels, reduce_3x3, kernel_size=1),
+            nn.Conv2d(reduce_3x3, out_3x3, kernel_size=3, padding=1)
+        )
+        
+        # 5x5 convolution branch
+        self.branch5x5 = nn.Sequential(
+            nn.Conv2d(in_channels, reduce_5x5, kernel_size=1),
+            nn.Conv2d(reduce_5x5, out_5x5, kernel_size=5, padding=2)
+        )
+        
+        # Max pooling branch
+        self.branch_pool = nn.Sequential(
+            nn.MaxPool2d(kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(in_channels, pool_proj, kernel_size=1)
+        )
+    
+    def forward(self, x):
+        """
+        :param x: Input tensor, shape (batch_size, in_channels, height, width)
+        :return: Output tensor, shape (batch_size, out_channels, height, width)
+        """
+        branch1x1 = self.branch1x1(x)
+        branch3x3 = self.branch3x3(x)
+        branch5x5 = self.branch5x5(x)
+        branch_pool = self.branch_pool(x)
+        
+        return custom_ops_lib.googlenet_inception_module_custom(branch1x1, branch3x3, branch5x5, branch_pool)
+'''
+```

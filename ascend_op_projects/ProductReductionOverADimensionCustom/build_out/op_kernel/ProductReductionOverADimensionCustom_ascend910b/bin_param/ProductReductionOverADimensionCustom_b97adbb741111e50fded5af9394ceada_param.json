@@ -1,0 +1,41 @@
+{
+  "op_type": "ProductReductionOverADimensionCustom",
+  "op_list": [
+    {
+      "bin_filename": "ProductReductionOverADimensionCustom_b97adbb741111e50fded5af9394ceada",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "dim",
+          "dtype": "int",
+          "value": 0
+        }
+      ]
+    }
+  ]
+}

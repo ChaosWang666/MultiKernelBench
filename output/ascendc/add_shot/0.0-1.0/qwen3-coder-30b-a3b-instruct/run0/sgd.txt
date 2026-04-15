@@ -1,0 +1,270 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "SgdCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "param",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "grad",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "velocity",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "out_param",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(SgdCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(float, momentum);
+  TILING_DATA_FIELD_DEF(float, lr);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(SgdCustom, SgdCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "sgd_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 4096;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+
+    SgdCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_momentum(0.9f);
+    tiling.set_lr(1e-2f);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class SgdCustom : public OpDef {
+public:
+    explicit SgdCustom(const char* name) : OpDef(name)
+    {
+        this->Input("param")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("grad")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("velocity")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("out_param")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(SgdCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+ 
+class KernelSgd {
+public:
+    __aicore__ inline KernelSgd() {}
+    __aicore__ inline void Init(GM_ADDR param, GM_ADDR grad, GM_ADDR velocity, GM_ADDR z, uint32_t totalLength, float momentum, float lr)
+    {
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->momentum = momentum;
+        this->lr = lr;
+
+        paramGm.SetGlobalBuffer((__gm__ DTYPE_PARAM *)param + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        gradGm.SetGlobalBuffer((__gm__ DTYPE_GRAD *)grad + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        velocityGm.SetGlobalBuffer((__gm__ DTYPE_VELOCITY *)velocity + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueParam, BUFFER_NUM, this->blockLength * sizeof(DTYPE_PARAM));
+        pipe.InitBuffer(inQueueGrad, BUFFER_NUM, this->blockLength * sizeof(DTYPE_GRAD));
+        pipe.InitBuffer(inQueueVelocity, BUFFER_NUM, this->blockLength * sizeof(DTYPE_VELOCITY));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->blockLength * sizeof(DTYPE_Z));
+    }
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<DTYPE_PARAM> paramLocal = inQueueParam.AllocTensor<DTYPE_PARAM>();
+        AscendC::LocalTensor<DTYPE_GRAD> gradLocal = inQueueGrad.AllocTensor<DTYPE_GRAD>();
+        AscendC::LocalTensor<DTYPE_VELOCITY> velocityLocal = inQueueVelocity.AllocTensor<DTYPE_VELOCITY>();
+        AscendC::DataCopy(paramLocal, paramGm, this->blockLength);
+        AscendC::DataCopy(gradLocal, gradGm, this->blockLength);
+        AscendC::DataCopy(velocityLocal, velocityGm, this->blockLength);
+        inQueueParam.EnQue(paramLocal);
+        inQueueGrad.EnQue(gradLocal);
+        inQueueVelocity.EnQue(velocityLocal);
+        
+        Compute();
+        
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
+        AscendC::DataCopy(zGm, zLocal, this->blockLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    __aicore__ inline void Compute()
+    {
+        AscendC::LocalTensor<DTYPE_PARAM> paramLocal = inQueueParam.DeQue<DTYPE_PARAM>();
+        AscendC::LocalTensor<DTYPE_GRAD> gradLocal = inQueueGrad.DeQue<DTYPE_GRAD>();
+        AscendC::LocalTensor<DTYPE_VELOCITY> velocityLocal = inQueueVelocity.DeQue<DTYPE_VELOCITY>();
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        
+        // velocity = momentum * velocity + grad
+        AscendC::Mul(velocityLocal, velocityLocal, this->momentum, this->blockLength);
+        AscendC::Add(velocityLocal, velocityLocal, gradLocal, this->blockLength);
+        
+        // param = param - lr * velocity
+        AscendC::Mul(zLocal, velocityLocal, this->lr, this->blockLength);
+        AscendC::Sub(zLocal, paramLocal, zLocal, this->blockLength);
+        
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        inQueueParam.FreeTensor(paramLocal);
+        inQueueGrad.FreeTensor(gradLocal);
+        inQueueVelocity.FreeTensor(velocityLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueParam, inQueueGrad, inQueueVelocity;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::GlobalTensor<DTYPE_PARAM> paramGm;
+    AscendC::GlobalTensor<DTYPE_GRAD> gradGm;
+    AscendC::GlobalTensor<DTYPE_VELOCITY> velocityGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
+    uint32_t blockLength;
+    float momentum;
+    float lr;
+};
+
+extern "C" __global__ __aicore__ void sgd_custom(GM_ADDR param, GM_ADDR grad, GM_ADDR velocity, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelSgd op;
+    op.Init(param, grad, velocity, z, tiling_data.totalLength, tiling_data.momentum, tiling_data.lr);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor sgd_custom_impl_npu(const at::Tensor& param, const at::Tensor& grad, const at::Tensor& velocity) {
+    at::Tensor result = at::empty_like(param);
+    EXEC_NPU_CMD(aclnnSgdCustom, param, grad, velocity, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("sgd_custom", &sgd_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("sgd_custom", &sgd_custom_impl_npu, "SGD update");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def __init__(self, momentum=0.9, lr=1e-2):
+        super().__init__()
+        self.momentum = momentum
+        self.lr = lr
+
+    def forward(self, param, grad, velocity):
+        return custom_ops_lib.sgd_custom(param, grad, velocity)
+'''
+```

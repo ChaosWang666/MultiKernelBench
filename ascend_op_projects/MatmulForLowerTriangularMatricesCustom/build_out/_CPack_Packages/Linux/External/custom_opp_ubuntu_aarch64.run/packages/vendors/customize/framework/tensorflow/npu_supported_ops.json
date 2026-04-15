@@ -1,0 +1,6 @@
+{
+  "MatmulForLowerTriangularMatricesCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

@@ -1,0 +1,3 @@
+all: conv_transpose3d_max_max_sum_custom0
+conv_transpose3d_max_max_sum_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/ConvTranspose3dMaxMaxSumCustom/build_out/op_kernel/ConvTranspose3dMaxMaxSumCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/ConvTranspose3dMaxMaxSumCustom/build_out/op_kernel/ConvTranspose3dMaxMaxSumCustom_ascend910b/bin_param/ConvTranspose3dMaxMaxSumCustom-conv_transpose3d_max_max_sum_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

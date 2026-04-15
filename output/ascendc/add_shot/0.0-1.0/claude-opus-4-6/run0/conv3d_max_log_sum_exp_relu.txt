@@ -1,0 +1,377 @@
+
+
+Looking at the architecture, I need to analyze the operations: Conv3d → MaxPool3d → LogSumExp(dim=1) → ReLU. The Conv3d and MaxPool3d are complex operations best left to the existing NPU implementations. I'll fuse the LogSumExp + ReLU into a custom kernel, as LogSumExp along a channel dimension followed by ReLU is a good fusion candidate.
+
+LogSumExp(x, dim=1, keepdim=True) = log(sum(exp(x), dim=1, keepdim=True)), then ReLU.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv3dMaxLogSumExpReluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dMaxLogSumExpReluCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dMaxLogSumExpReluCustom, Conv3dMaxLogSumExpReluCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_max_log_sum_exp_relu_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 8;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dMaxLogSumExpReluCustomTilingData tiling;
+    const gert::Shape* xShape = context->GetInputShape(0);
+    // Input shape: (batch, channels, D, H, W)
+    uint32_t batchSize = xShape->GetDim(0);
+    uint32_t channels = xShape->GetDim(1);
+    uint32_t D = xShape->GetDim(2);
+    uint32_t H = xShape->GetDim(3);
+    uint32_t W = xShape->GetDim(4);
+    uint32_t spatialSize = D * H * W;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_channels(channels);
+    tiling.set_spatialSize(spatialSize);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    // Output: (batch, 1, D, H, W)
+    *y_shape = *x_shape;
+    y_shape->SetDim(1, 1);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Conv3dMaxLogSumExpReluCustom : public OpDef {
+public:
+    explicit Conv3dMaxLogSumExpReluCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv3dMaxLogSumExpReluCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelLogSumExpRelu {
+public:
+    __aicore__ inline KernelLogSumExpRelu() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t channels, uint32_t spatialSize, uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->channels = channels;
+        this->spatialSize = spatialSize;
+
+        // Total output spatial elements = batchSize * spatialSize
+        uint32_t totalOutElems = batchSize * spatialSize;
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        // Divide output spatial elements across blocks
+        this->blockLength = totalOutElems / blockNum;
+        uint32_t remainder = totalOutElems % blockNum;
+        if (blockIdx < remainder) {
+            this->blockLength += 1;
+            this->blockStart = blockIdx * this->blockLength;
+        } else {
+            this->blockStart = blockIdx * this->blockLength + remainder;
+        }
+
+        if (this->blockLength == 0) {
+            this->tileNum = 0;
+            return;
+        }
+
+        this->tileNum = tileNum;
+        if (this->tileNum > this->blockLength) {
+            this->tileNum = this->blockLength;
+        }
+        this->tileLength = this->blockLength / this->tileNum;
+        this->tileTail = this->blockLength % this->tileNum;
+
+        // Align tileLength to 8 (32 bytes / 4 bytes per float)
+        uint32_t alignFactor = 8;
+        uint32_t alignedTileLength = (this->tileLength + alignFactor - 1) / alignFactor * alignFactor;
+        if (alignedTileLength > this->blockLength) {
+            alignedTileLength = (this->blockLength + alignFactor - 1) / alignFactor * alignFactor;
+        }
+        this->alignedTileLen = alignedTileLength;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * channels * spatialSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * spatialSize);
+
+        // We need buffers for: one channel tile input, accumulator, temp
+        pipe.InitBuffer(inQueueX, 1, this->alignedTileLen * sizeof(float));
+        pipe.InitBuffer(outQueueZ, 1, this->alignedTileLen * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, 1, this->alignedTileLen * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, 1, this->alignedTileLen * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (this->blockLength == 0) return;
+
+        uint32_t processed = 0;
+        for (uint32_t t = 0; t < this->tileNum; t++) {
+            uint32_t curLen = this->tileLength;
+            if (t < this->tileTail) curLen += 1;
+            if (curLen == 0) continue;
+            ProcessTile(this->blockStart + processed, curLen);
+            processed += curLen;
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessTile(uint32_t outStart, uint32_t curLen)
+    {
+        uint32_t alignLen = (curLen + 7) / 8 * 8;
+
+        // accLocal will hold sum of exp(x - maxVal)
+        AscendC::LocalTensor<float> accLocal = outQueueZ.AllocTensor<float>();
+        AscendC::LocalTensor<float> maxLocal = tmpBuf1.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf2.AllocTensor<float>();
+        AscendC::LocalTensor<float> inLocal = inQueueX.AllocTensor<float>();
+
+        // First pass: find max across channels
+        // Load channel 0
+        LoadChannelData(inLocal, outStart, 0, curLen, alignLen);
+        AscendC::DataCopy(maxLocal, inLocal, alignLen);
+
+        for (uint32_t c = 1; c < this->channels; c++) {
+            LoadChannelData(inLocal, outStart, c, curLen, alignLen);
+            AscendC::Max(maxLocal, maxLocal, inLocal, alignLen);
+        }
+
+        // Second pass: compute sum(exp(x_c - max))
+        // Channel 0
+        LoadChannelData(inLocal, outStart, 0, curLen, alignLen);
+        AscendC::Sub(accLocal, inLocal, maxLocal, alignLen);
+        AscendC::Exp(accLocal, accLocal, alignLen);
+
+        for (uint32_t c = 1; c < this->channels; c++) {
+            LoadChannelData(inLocal, outStart, c, curLen, alignLen);
+            AscendC::Sub(tmpLocal, inLocal, maxLocal, alignLen);
+            AscendC::Exp(tmpLocal, tmpLocal, alignLen);
+            AscendC::Add(accLocal, accLocal, tmpLocal, alignLen);
+        }
+
+        // result = log(accLocal) + maxLocal
+        AscendC::Ln(accLocal, accLocal, alignLen);
+        AscendC::Add(accLocal, accLocal, maxLocal, alignLen);
+
+        // ReLU: max(0, result)
+        float zeroVal = 0.0f;
+        AscendC::Maxs(accLocal, accLocal, zeroVal, alignLen);
+
+        // Copy out
+        AscendC::DataCopy(yGm[outStart], accLocal, curLen);
+
+        tmpBuf2.FreeTensor(tmpLocal);
+        tmpBuf1.FreeTensor(maxLocal);
+        outQueueZ.FreeTensor(accLocal);
+        inQueueX.FreeTensor(inLocal);
+    }
+
+    __aicore__ inline void LoadChannelData(AscendC::LocalTensor<float>& dst, uint32_t outStart, uint32_t channel, uint32_t curLen, uint32_t alignLen)
+    {
+        // outStart is a linear index into (batch, spatial)
+        // We need to gather from x[batch, channel, spatialIdx]
+        // x layout: (batch, channels, spatialSize)
+        // For a given outStart + i: batch = (outStart+i) / spatialSize, spatialIdx = (outStart+i) % spatialSize
+        // GM address = batch * channels * spatialSize + channel * spatialSize + spatialIdx
+
+        // If all elements in this tile belong to the same batch, we can do a contiguous copy
+        uint32_t startBatch = outStart / this->spatialSize;
+        uint32_t startSpatial = outStart % this->spatialSize;
+        uint32_t endBatch = (outStart + curLen - 1) / this->spatialSize;
+
+        if (startBatch == endBatch) {
+            // Contiguous within one batch
+            uint32_t gmOffset = startBatch * this->channels * this->spatialSize + channel * this->spatialSize + startSpatial;
+            AscendC::DataCopy(dst, xGm[gmOffset], alignLen);
+        } else {
+            // Elements span multiple batches - copy element by element using small copies
+            uint32_t copied = 0;
+            uint32_t curBatch = startBatch;
+            uint32_t curSpatial = startSpatial;
+            while (copied < curLen) {
+                uint32_t remaining = this->spatialSize - curSpatial;
+                uint32_t toCopy = remaining;
+                if (toCopy > curLen - copied) toCopy = curLen - copied;
+                // We need aligned copies; use minimum 8-element aligned size for intermediate
+                uint32_t gmOffset = curBatch * this->channels * this->spatialSize + channel * this->spatialSize + curSpatial;
+                uint32_t alignedCopy = (toCopy + 7) / 8 * 8;
+                // Use a sub-tensor view
+                AscendC::DataCopy(dst[copied], xGm[gmOffset], alignedCopy);
+                copied += toCopy;
+                curBatch += 1;
+                curSpatial = 0;
+            }
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t channels;
+    uint32_t spatialSize;
+    uint32_t blockLength;
+    uint32_t blockStart;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t tileTail;
+    uint32_t alignedTileLen;
+};
+
+extern "C" __global__ __aicore__ void conv3d_max_log_sum_exp_relu_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelLogSumExpRelu op;
+    op.Init(x, y, tiling_data.batchSize, tiling_data.channels, tiling_data.spatialSize, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_max_log_sum_exp_relu_custom_impl_npu(const at::Tensor& x) {
+    // x shape: (batch, channels, D, H, W)
+    auto sizes = x.sizes();
+    int64_t batch = sizes[0];
+    int64_t channels = sizes[1];
+    int64_t D = sizes[2];
+    int64_t H = sizes[3];
+    int64_t W = sizes[4];
+
+    // Output shape: (batch, 1, D, H, W)
+    at::Tensor x_contig = x.contiguous();
+    at::Tensor result = at::empty({batch, 1, D, H, W}, x_contig.options());
+
+    EXEC_NPU_CMD(aclnnConv3dMaxLogSumExpReluCustom, x_contig, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_max_log_sum_exp_relu_custom", &conv3d_max_log_sum_exp_relu_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_max_log_sum_exp_relu_custom", &conv3d_max_log_sum_exp_relu_custom_impl_npu, "logsumexp(dim=1) + relu fused");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Model that performs a 3D convolution, max pooling, log sum exp, and ReLU activation.
+    The logsumexp + relu are fused into a custom AscendC kernel.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
+        super(ModelNew, self).__init__()
+        self.conv = torch.nn.Conv3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
+        self.max_pool = torch.nn.MaxPool3d(kernel_size=2, stride=2)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.max_pool(x)
+        # Fused logsumexp(dim=1, keepdim=True) + relu
+        x = custom_ops_lib.conv3d_max_log_sum_exp_relu_custom(x)
+        return x
+'''
+```

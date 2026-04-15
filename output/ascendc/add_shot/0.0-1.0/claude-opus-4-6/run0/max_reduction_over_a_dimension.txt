@@ -1,0 +1,353 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "MaxReductionOverADimensionCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "dim",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MaxReductionOverADimensionCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, dimBefore);
+  TILING_DATA_FIELD_DEF(uint32_t, dimSize);
+  TILING_DATA_FIELD_DEF(uint32_t, dimAfter);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MaxReductionOverADimensionCustom, MaxReductionOverADimensionCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "max_reduction_over_a_dimension_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 8;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MaxReductionOverADimensionCustomTilingData tiling;
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    int32_t dimCount = xShape->GetStorageShape().GetDimNum();
+    
+    // Get the dim attribute
+    const int64_t* dimPtr = context->GetAttrs()->GetAttrPointer<int64_t>(0);
+    int32_t dim = (int32_t)(*dimPtr);
+    if (dim < 0) dim += dimCount;
+    
+    uint32_t dimBefore = 1;
+    uint32_t dimSize = 1;
+    uint32_t dimAfter = 1;
+    
+    for (int32_t i = 0; i < dimCount; i++) {
+        int64_t s = xShape->GetStorageShape().GetDim(i);
+        if (i < dim) dimBefore *= (uint32_t)s;
+        else if (i == dim) dimSize = (uint32_t)s;
+        else dimAfter *= (uint32_t)s;
+    }
+    
+    uint32_t totalLength = dimBefore * dimAfter; // output size
+    
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_dimBefore(dimBefore);
+    tiling.set_dimSize(dimSize);
+    tiling.set_dimAfter(dimAfter);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    
+    // Get dim attribute
+    const int64_t* dimPtr = context->GetAttrs()->GetAttrPointer<int64_t>(0);
+    int32_t dim = (int32_t)(*dimPtr);
+    int32_t dimCount = x_shape->GetDimNum();
+    if (dim < 0) dim += dimCount;
+    
+    // Output shape: remove the dim-th dimension
+    int idx = 0;
+    for (int32_t i = 0; i < dimCount; i++) {
+        if (i != dim) {
+            y_shape->SetDim(idx++, x_shape->GetDim(i));
+        }
+    }
+    // Set the number of dims
+    // We need to handle this carefully - the output has dimCount-1 dimensions
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MaxReductionOverADimensionCustom : public OpDef {
+public:
+    explicit MaxReductionOverADimensionCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("dim")
+            .AttrType(REQUIRED)
+            .Int();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MaxReductionOverADimensionCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelMaxReduction {
+public:
+    __aicore__ inline KernelMaxReduction() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t dimBefore, uint32_t dimSize, uint32_t dimAfter, uint32_t tileNum)
+    {
+        this->dimBefore = dimBefore;
+        this->dimSize = dimSize;
+        this->dimAfter = dimAfter;
+        this->totalLength = totalLength; // dimBefore * dimAfter
+        
+        // Each block handles a portion of the output elements
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        
+        this->blockLength = (totalLength + blockNum - 1) / blockNum;
+        this->startIdx = blockIdx * this->blockLength;
+        if (this->startIdx + this->blockLength > totalLength) {
+            this->blockLength = totalLength - this->startIdx;
+        }
+        if (this->startIdx >= totalLength) {
+            this->blockLength = 0;
+        }
+        
+        this->tileNum = tileNum;
+        
+        uint32_t inputSize = dimBefore * dimSize * dimAfter;
+        xGm.SetGlobalBuffer((__gm__ float *)x, inputSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y, totalLength);
+        
+        // Allocate buffer for one slice along the reduction dimension
+        // We need to handle dimSize elements at a time
+        // Align to 32 bytes (8 floats)
+        uint32_t alignedDimSize = ((dimSize + 7) / 8) * 8;
+        if (alignedDimSize < 8) alignedDimSize = 8;
+        
+        this->alignedDimSize = alignedDimSize;
+        
+        pipe.InitBuffer(inQueueX, 1, alignedDimSize * sizeof(float));
+        pipe.InitBuffer(outQueueY, 1, 8 * sizeof(float)); // at least 32 bytes
+    }
+    
+    __aicore__ inline void Process()
+    {
+        if (this->blockLength == 0) return;
+        
+        for (uint32_t i = 0; i < this->blockLength; i++) {
+            uint32_t outIdx = this->startIdx + i;
+            // outIdx = beforeIdx * dimAfter + afterIdx
+            uint32_t beforeIdx = outIdx / this->dimAfter;
+            uint32_t afterIdx = outIdx % this->dimAfter;
+            
+            if (this->dimAfter == 1) {
+                // Reduction along last or contiguous dimension - data is contiguous
+                // Input offset: beforeIdx * dimSize * dimAfter + 0 * dimAfter + afterIdx
+                //             = beforeIdx * dimSize
+                uint32_t srcOffset = beforeIdx * this->dimSize;
+                
+                AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+                AscendC::DataCopy(xLocal, xGm[srcOffset], this->alignedDimSize);
+                inQueueX.EnQue(xLocal);
+                
+                xLocal = inQueueX.DeQue<float>();
+                AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+                
+                AscendC::ReduceMax(yLocal, xLocal, this->dimSize, false);
+                
+                outQueueY.EnQue(yLocal);
+                inQueueX.FreeTensor(xLocal);
+                
+                yLocal = outQueueY.DeQue<float>();
+                // Copy single value
+                float maxVal = yLocal.GetValue(0);
+                yGm.SetValue(outIdx, maxVal);
+                outQueueY.FreeTensor(yLocal);
+            } else {
+                // General case: gather elements along reduction dim
+                // Elements are at: beforeIdx * dimSize * dimAfter + k * dimAfter + afterIdx, k=0..dimSize-1
+                AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+                
+                // Gather manually
+                uint32_t baseOffset = beforeIdx * this->dimSize * this->dimAfter + afterIdx;
+                for (uint32_t k = 0; k < this->dimSize; k++) {
+                    float val = xGm.GetValue(baseOffset + k * this->dimAfter);
+                    xLocal.SetValue(k, val);
+                }
+                // Pad remaining with very small values
+                for (uint32_t k = this->dimSize; k < this->alignedDimSize; k++) {
+                    xLocal.SetValue(k, -3.4028235e+38f);
+                }
+                
+                inQueueX.EnQue(xLocal);
+                xLocal = inQueueX.DeQue<float>();
+                
+                AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+                AscendC::ReduceMax(yLocal, xLocal, this->alignedDimSize, false);
+                outQueueY.EnQue(yLocal);
+                inQueueX.FreeTensor(xLocal);
+                
+                yLocal = outQueueY.DeQue<float>();
+                float maxVal = yLocal.GetValue(0);
+                yGm.SetValue(outIdx, maxVal);
+                outQueueY.FreeTensor(yLocal);
+            }
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueY;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t dimBefore;
+    uint32_t dimSize;
+    uint32_t dimAfter;
+    uint32_t totalLength;
+    uint32_t blockLength;
+    uint32_t startIdx;
+    uint32_t tileNum;
+    uint32_t alignedDimSize;
+};
+
+extern "C" __global__ __aicore__ void max_reduction_over_a_dimension_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMaxReduction op;
+    op.Init(x, y, tiling_data.totalLength, tiling_data.dimBefore, tiling_data.dimSize, tiling_data.dimAfter, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor max_reduction_over_a_dimension_custom_impl_npu(const at::Tensor& x, int64_t dim) {
+    // Compute output shape
+    auto input_sizes = x.sizes().vec();
+    int64_t actual_dim = dim;
+    if (actual_dim < 0) actual_dim += x.dim();
+    
+    std::vector<int64_t> output_sizes;
+    for (int64_t i = 0; i < (int64_t)input_sizes.size(); i++) {
+        if (i != actual_dim) {
+            output_sizes.push_back(input_sizes[i]);
+        }
+    }
+    
+    at::Tensor x_contig = x.contiguous();
+    at::Tensor result = at::empty(output_sizes, x_contig.options());
+    
+    EXEC_NPU_CMD(aclnnMaxReductionOverADimensionCustom, x_contig, dim, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("max_reduction_over_a_dimension_custom", &max_reduction_over_a_dimension_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("max_reduction_over_a_dimension_custom", &max_reduction_over_a_dimension_custom_impl_npu, "max reduction over a dimension");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model that performs Max reduction over a specific dimension using custom AscendC kernel.
+    """
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return custom_ops_lib.max_reduction_over_a_dimension_custom(x, self.dim)
+'''
+```

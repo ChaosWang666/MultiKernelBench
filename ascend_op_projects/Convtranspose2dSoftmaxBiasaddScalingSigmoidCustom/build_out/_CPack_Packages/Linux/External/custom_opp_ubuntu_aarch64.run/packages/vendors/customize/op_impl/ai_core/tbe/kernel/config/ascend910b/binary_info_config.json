@@ -1,0 +1,45 @@
+{
+  "Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "bias",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "z",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom/d=0,p=1/0,2/0,2/0,2",
+          "Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom/d=0,p=0/0,2/0,2/0,2",
+          "Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom/d=1,p=1/0,2/0,2/0,2",
+          "Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom/d=1,p=0/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/convtranspose2d_softmax_biasadd_scaling_sigmoid_custom/Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom_04a88a845be0c34a9fbbde972f73fd48.o",
+        "jsonPath": "ascend910b/convtranspose2d_softmax_biasadd_scaling_sigmoid_custom/Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom_04a88a845be0c34a9fbbde972f73fd48.json"
+      }
+    ]
+  }
+}

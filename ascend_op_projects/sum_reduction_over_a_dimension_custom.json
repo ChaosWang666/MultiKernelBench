@@ -1,0 +1,53 @@
+
+[
+    {
+        "op": "SumReductionOverADimensionCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "dim",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "shape0",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "shape1",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "shape2",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]

@@ -1,0 +1,6 @@
+{
+  "GemmBatchNormScalingSoftmaxCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

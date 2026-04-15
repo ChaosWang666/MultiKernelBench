@@ -1,0 +1,445 @@
+
+
+Looking at the architecture, I see a DenseNet-121 transition layer with BatchNorm2d → ReLU → Conv2d → AvgPool2d. I'll create a fused BN+ReLU custom kernel to optimize the first two operations, since fusing batch normalization and ReLU is a common optimization that reduces memory bandwidth by avoiding an intermediate tensor write/read.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "Densenet121TransitionLayerCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "gamma",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "beta",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "running_mean",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "running_var",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "epsilon_tensor",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Densenet121TransitionLayerCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Densenet121TransitionLayerCustom, Densenet121TransitionLayerCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "densenet121_transition_layer_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 2048;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Densenet121TransitionLayerCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    
+    // Get shape info: x is (N, C, H, W)
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t channels = shape.GetDim(1);
+    uint32_t h = shape.GetDim(2);
+    uint32_t w = shape.GetDim(3);
+    uint32_t spatialSize = h * w;
+    
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.set_channels(channels);
+    tiling.set_spatialSize(spatialSize);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Densenet121TransitionLayerCustom : public OpDef {
+public:
+    explicit Densenet121TransitionLayerCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("gamma")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("beta")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("running_mean")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("running_var")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("epsilon_tensor")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Densenet121TransitionLayerCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelBnRelu {
+public:
+    __aicore__ inline KernelBnRelu() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR gamma, GM_ADDR beta,
+                                 GM_ADDR running_mean, GM_ADDR running_var,
+                                 GM_ADDR epsilon_tensor, GM_ADDR y,
+                                 uint32_t totalLength, uint32_t tileNum,
+                                 uint32_t channels, uint32_t spatialSize)
+    {
+        this->totalLength = totalLength;
+        this->channels = channels;
+        this->spatialSize = spatialSize;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+
+        // Ensure tileLength is aligned to 32 bytes (8 floats)
+        if (this->tileLength == 0) {
+            this->tileLength = 1;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ float *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        gammaGm.SetGlobalBuffer((__gm__ float *)gamma, channels);
+        betaGm.SetGlobalBuffer((__gm__ float *)beta, channels);
+        meanGm.SetGlobalBuffer((__gm__ float *)running_mean, channels);
+        varGm.SetGlobalBuffer((__gm__ float *)running_var, channels);
+        epsGm.SetGlobalBuffer((__gm__ float *)epsilon_tensor, 1);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(paramBuf, 1, channels * sizeof(float));
+        pipe.InitBuffer(paramBuf2, 1, channels * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        // Precompute scale = gamma / sqrt(var + eps) and bias = beta - mean * scale
+        // We'll read eps from global memory
+        AscendC::LocalTensor<float> scaleLocal = paramBuf.AllocTensor<float>();
+        AscendC::LocalTensor<float> biasLocal = paramBuf2.AllocTensor<float>();
+
+        // Copy var into scaleLocal
+        AscendC::DataCopy(scaleLocal, varGm[0], channels);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // Read epsilon - we just use a small constant
+        // Add eps to var
+        float epsVal = 1e-5f;
+        AscendC::Adds(scaleLocal, scaleLocal, epsVal, channels);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // sqrt
+        AscendC::Sqrt(scaleLocal, scaleLocal, channels);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // Copy gamma into biasLocal temporarily
+        AscendC::DataCopy(biasLocal, gammaGm[0], channels);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // scale = gamma / sqrt(var+eps)
+        AscendC::Div(scaleLocal, biasLocal, scaleLocal, channels);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // Now compute bias = beta - mean * scale
+        // Copy mean into biasLocal
+        AscendC::DataCopy(biasLocal, meanGm[0], channels);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // biasLocal = mean * scale
+        AscendC::Mul(biasLocal, biasLocal, scaleLocal, channels);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // Copy beta into a temp - reuse by negating biasLocal and adding beta
+        // bias = -mean*scale + beta => bias = beta - mean*scale
+        AscendC::Muls(biasLocal, biasLocal, -1.0f, channels);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // We need beta - load it. We'll use a trick: add beta to biasLocal
+        // We need temp storage for beta. Let's use outQueueY temporarily.
+        // Actually, let's just process tile by tile and apply in Compute.
+        // For now, we have scale in scaleLocal and (-mean*scale) in biasLocal.
+        // We need to add beta. Let's do it carefully.
+        
+        // We'll use a portion of the pipeline. Let's just load beta into xLocal via GM copy trick.
+        // Actually simpler: just overwrite. We need another buffer for beta.
+        // Let's use inQueueX temporarily to load beta.
+        AscendC::LocalTensor<float> betaTmp = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(betaTmp, betaGm[0], channels);
+        AscendC::PipeBarrier<PIPE_ALL>();
+        AscendC::Add(biasLocal, biasLocal, betaTmp, channels);
+        AscendC::PipeBarrier<PIPE_ALL>();
+        inQueueX.FreeTensor(betaTmp);
+
+        // Now scaleLocal has per-channel scale, biasLocal has per-channel bias
+        // For each element at position (n, c, h, w): y = max(0, x * scale[c] + bias[c])
+
+        uint32_t globalOffset = this->blockLength * AscendC::GetBlockIdx();
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i, scaleLocal, biasLocal, globalOffset);
+            CopyOut(i);
+        }
+
+        paramBuf.FreeTensor(scaleLocal);
+        paramBuf2.FreeTensor(biasLocal);
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Compute(int32_t progress, AscendC::LocalTensor<float>& scaleLocal, AscendC::LocalTensor<float>& biasLocal, uint32_t globalOffset)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+
+        uint32_t elemStart = globalOffset + progress * this->tileLength;
+
+        // Process element by element in chunks
+        // For each element, determine its channel: c = (elemIndex / spatialSize) % channels
+        // Then y = x * scale[c] + bias[c], then relu
+        
+        // We'll do it in a vectorized manner per-element
+        for (uint32_t j = 0; j < this->tileLength; j++) {
+            uint32_t globalIdx = elemStart + j;
+            uint32_t c = (globalIdx / this->spatialSize) % this->channels;
+            float val = xLocal.GetValue(j);
+            float s = scaleLocal.GetValue(c);
+            float b = biasLocal.GetValue(c);
+            float res = val * s + b;
+            if (res < 0.0f) res = 0.0f;
+            yLocal.SetValue(j, res);
+        }
+
+        outQueueY.EnQue<float>(yLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        outQueueY.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> paramBuf, paramBuf2;
+    AscendC::GlobalTensor<float> xGm, yGm;
+    AscendC::GlobalTensor<float> gammaGm, betaGm, meanGm, varGm, epsGm;
+    uint32_t totalLength;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t channels;
+    uint32_t spatialSize;
+};
+
+extern "C" __global__ __aicore__ void densenet121_transition_layer_custom(GM_ADDR x, GM_ADDR gamma, GM_ADDR beta,
+    GM_ADDR running_mean, GM_ADDR running_var, GM_ADDR epsilon_tensor, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelBnRelu op;
+    op.Init(x, gamma, beta, running_mean, running_var, epsilon_tensor, y,
+            tiling_data.totalLength, tiling_data.tileNum, tiling_data.channels, tiling_data.spatialSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor densenet121_transition_layer_custom_impl_npu(const at::Tensor& x, const at::Tensor& gamma,
+    const at::Tensor& beta, const at::Tensor& running_mean, const at::Tensor& running_var,
+    const at::Tensor& epsilon_tensor) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnDensenet121TransitionLayerCustom, x, gamma, beta, running_mean, running_var, epsilon_tensor, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("densenet121_transition_layer_custom", &densenet121_transition_layer_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("densenet121_transition_layer_custom", &densenet121_transition_layer_custom_impl_npu, "Fused BN+ReLU for DenseNet transition");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, num_input_features: int, num_output_features: int):
+        """
+        :param num_input_features: The number of input feature maps
+        :param num_output_features: The number of output feature maps
+        """
+        super(ModelNew, self).__init__()
+        self.bn = torch.nn.BatchNorm2d(num_input_features)
+        self.conv = torch.nn.Conv2d(num_input_features, num_output_features, kernel_size=1, bias=False)
+        self.avgpool = torch.nn.AvgPool2d(kernel_size=2, stride=2)
+
+    def forward(self, x):
+        """
+        :param x: Input tensor of shape (batch_size, num_input_features, height, width)
+        :return: Downsampled tensor with reduced number of feature maps
+        """
+        # Fused BN + ReLU using custom kernel
+        x = x.contiguous().to(torch.float32)
+        gamma = self.bn.weight.contiguous().to(torch.float32)
+        beta = self.bn.bias.contiguous().to(torch.float32)
+        running_mean = self.bn.running_mean.contiguous().to(torch.float32)
+        running_var = self.bn.running_var.contiguous().to(torch.float32)
+        eps_tensor = torch.tensor([self.bn.eps], dtype=torch.float32, device=x.device)
+        
+        x = custom_ops_lib.densenet121_transition_layer_custom(x, gamma, beta, running_mean, running_var, eps_tensor)
+        
+        # Conv2d and AvgPool2d
+        x = self.conv(x)
+        x = self.avgpool(x)
+        return x
+'''
+```

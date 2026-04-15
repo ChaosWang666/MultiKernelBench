@@ -1,0 +1,319 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "RmsNormCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "num_features",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "eps",
+                "param_type": "required",
+                "type": "float"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(RmsNormCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, numFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(float, eps);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(RmsNormCustom, RmsNormCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "rms_norm_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    RmsNormCustomTilingData tiling;
+    
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    int32_t dimCount = xShape->GetStorageShape().GetDimNum();
+    
+    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
+    uint32_t numFeatures = xShape->GetStorageShape().GetDim(1);
+    
+    uint32_t spatialSize = 1;
+    for (int32_t i = 2; i < dimCount; i++) {
+        spatialSize *= xShape->GetStorageShape().GetDim(i);
+    }
+    
+    const auto* attrs = context->GetAttrs();
+    float eps = *(attrs->GetAttrPointer<float>(1));
+    
+    tiling.set_batchSize(batchSize);
+    tiling.set_numFeatures(numFeatures);
+    tiling.set_spatialSize(spatialSize);
+    tiling.set_eps(eps);
+    
+    context->SetBlockDim(BLOCK_DIM);
+    
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class RmsNormCustom : public OpDef {
+public:
+    explicit RmsNormCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("num_features")
+            .Int();
+        this->Attr("eps")
+            .Float();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(RmsNormCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 1;
+
+class KernelRmsNorm {
+public:
+    __aicore__ inline KernelRmsNorm() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t numFeatures, uint32_t spatialSize, float eps)
+    {
+        this->batchSize = batchSize;
+        this->numFeatures = numFeatures;
+        this->spatialSize = spatialSize;
+        this->eps = eps;
+        
+        // Total number of (batch, spatial) positions to process
+        this->totalPositions = batchSize * spatialSize;
+        
+        // Each block processes a portion of the total positions
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        
+        uint32_t posPerBlock = (this->totalPositions + blockNum - 1) / blockNum;
+        this->startPos = blockIdx * posPerBlock;
+        this->endPos = this->startPos + posPerBlock;
+        if (this->endPos > this->totalPositions) {
+            this->endPos = this->totalPositions;
+        }
+        
+        // Align numFeatures to 32 bytes (8 floats)
+        this->alignedFeatures = ((numFeatures + 7) / 8) * 8;
+        
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * numFeatures * spatialSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * numFeatures * spatialSize);
+        
+        // We need buffers for one feature vector at a time
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->alignedFeatures * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->alignedFeatures * sizeof(float));
+        pipe.InitBuffer(tmpBuf, BUFFER_NUM, this->alignedFeatures * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, BUFFER_NUM, this->alignedFeatures * sizeof(float));
+    }
+    
+    __aicore__ inline void Process()
+    {
+        for (uint32_t pos = this->startPos; pos < this->endPos; pos++) {
+            uint32_t b = pos / this->spatialSize;
+            uint32_t s = pos % this->spatialSize;
+            ProcessOnePosition(b, s);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOnePosition(uint32_t b, uint32_t s)
+    {
+        // Gather the feature vector x[b, :, s] where layout is (batch, features, spatial)
+        // x[b, f, s] is at index b * numFeatures * spatialSize + f * spatialSize + s
+        
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> sqLocal = tmpBuf.AllocTensor<float>();
+        AscendC::LocalTensor<float> sumLocal = tmpBuf2.AllocTensor<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+        
+        // Gather feature values with stride
+        uint32_t baseOffset = b * numFeatures * spatialSize + s;
+        for (uint32_t f = 0; f < numFeatures; f++) {
+            float val = *(((__gm__ float*)xGm.GetPhyAddr()) + baseOffset + f * spatialSize);
+            xLocal.SetValue(f, val);
+        }
+        // Zero pad aligned portion
+        for (uint32_t f = numFeatures; f < alignedFeatures; f++) {
+            xLocal.SetValue(f, 0.0f);
+        }
+        
+        // Compute x^2
+        AscendC::Mul(sqLocal, xLocal, xLocal, this->alignedFeatures);
+        
+        // Sum x^2 using ReduceSum
+        float sumVal = 0.0f;
+        for (uint32_t f = 0; f < numFeatures; f++) {
+            sumVal += sqLocal.GetValue(f);
+        }
+        
+        // mean = sum / numFeatures
+        float meanVal = sumVal / (float)numFeatures;
+        
+        // rms = sqrt(mean + eps)
+        float rmsVal = 1.0f / sqrtf(meanVal + eps);
+        
+        // Multiply x by (1/rms)
+        AscendC::Muls(yLocal, xLocal, rmsVal, this->alignedFeatures);
+        
+        // Scatter back to output
+        for (uint32_t f = 0; f < numFeatures; f++) {
+            *(((__gm__ float*)yGm.GetPhyAddr()) + baseOffset + f * spatialSize) = yLocal.GetValue(f);
+        }
+        
+        tmpBuf2.FreeTensor(sumLocal);
+        tmpBuf.FreeTensor(sqLocal);
+        outQueueY.FreeTensor(yLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> tmpBuf;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> tmpBuf2;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t numFeatures;
+    uint32_t spatialSize;
+    uint32_t totalPositions;
+    uint32_t startPos;
+    uint32_t endPos;
+    uint32_t alignedFeatures;
+    float eps;
+};
+
+extern "C" __global__ __aicore__ void rms_norm_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelRmsNorm op;
+    op.Init(x, y, tiling_data.batchSize, tiling_data.numFeatures, tiling_data.spatialSize, tiling_data.eps);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor rms_norm_custom_impl_npu(const at::Tensor& x, int64_t num_features, double eps) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnRmsNormCustom, x, result, num_features, static_cast<float>(eps));
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("rms_norm_custom", &rms_norm_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("rms_norm_custom", &rms_norm_custom_impl_npu, "RMS Normalization custom");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model that performs RMS Normalization using custom AscendC kernel.
+    """
+    def __init__(self, num_features: int, eps: float = 1e-5):
+        super(ModelNew, self).__init__()
+        self.num_features = num_features
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return custom_ops_lib.rms_norm_custom(x, self.num_features, self.eps)
+'''
+```

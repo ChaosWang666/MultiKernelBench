@@ -1,0 +1,3 @@
+all: unet_softmax_custom0
+unet_softmax_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/UnetSoftmaxCustom/build_out/op_kernel/UnetSoftmaxCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/UnetSoftmaxCustom/build_out/op_kernel/UnetSoftmaxCustom_ascend910b/bin_param/UnetSoftmaxCustom-unet_softmax_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

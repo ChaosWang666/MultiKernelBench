@@ -1,0 +1,108 @@
+
+[
+    {
+        "op": "ConvDepthwise2dSquareInputAsymmetricKernelCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "w",
+                "param_type": "required",
+                "format": [
+                    "OHWI"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "stride_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "stride_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "pad_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "pad_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "dilation_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "dilation_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "channel",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "input_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "input_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "output_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "output_w",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]

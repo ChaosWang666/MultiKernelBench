@@ -1,0 +1,45 @@
+{
+  "op_type": "ThreeDimTensorMatrixMultiplicationCustom",
+  "op_list": [
+    {
+      "bin_filename": "ThreeDimTensorMatrixMultiplicationCustom_0577b10ad580b932105f76ccf8e6af1e",
+      "inputs": [
+        {
+          "name": "a",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "b",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "c",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ]
+    }
+  ]
+}

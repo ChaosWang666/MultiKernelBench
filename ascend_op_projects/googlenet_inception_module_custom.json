@@ -1,0 +1,68 @@
+
+[
+    {
+        "op": "GooglenetInceptionModuleCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "in_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_1x1",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "reduce_3x3",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_3x3",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "reduce_5x5",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_5x5",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "pool_proj",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]

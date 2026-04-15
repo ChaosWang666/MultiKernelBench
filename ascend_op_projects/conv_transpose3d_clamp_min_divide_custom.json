@@ -1,0 +1,68 @@
+
+[
+    {
+        "op": "ConvTranspose3dClampMinDivideCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "in_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "stride",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "padding",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "min_value",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "divisor",
+                "param_type": "required",
+                "type": "float"
+            }
+        ]
+    }
+]

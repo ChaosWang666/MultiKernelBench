@@ -1,0 +1,39 @@
+{
+  "Conv2dHardSwishReluCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "z",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "Conv2dHardSwishReluCustom/d=0,p=1/0,2/0,2",
+          "Conv2dHardSwishReluCustom/d=0,p=0/0,2/0,2",
+          "Conv2dHardSwishReluCustom/d=1,p=1/0,2/0,2",
+          "Conv2dHardSwishReluCustom/d=1,p=0/0,2/0,2"
+        ],
+        "binPath": "ascend910b/conv2d_hard_swish_relu_custom/Conv2dHardSwishReluCustom_99d98277330c41d2dafa87a3b336416f.o",
+        "jsonPath": "ascend910b/conv2d_hard_swish_relu_custom/Conv2dHardSwishReluCustom_99d98277330c41d2dafa87a3b336416f.json"
+      }
+    ]
+  }
+}

@@ -1,8 +1,8 @@
-# Install script for directory: /data/w00936672/MultiKernelBench/ascend_op_projects/GeluCustom/framework/tf_plugin
+# Install script for directory: /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GeluCustom/framework/tf_plugin
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
-  set(CMAKE_INSTALL_PREFIX "/data/w00936672/MultiKernelBench/ascend_op_projects/GeluCustom/build_out")
+  set(CMAKE_INSTALL_PREFIX "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GeluCustom/build_out")
 endif()
 string(REGEX REPLACE "/$" "" CMAKE_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
 
@@ -29,7 +29,7 @@ endif()
 
 # Install shared libraries without execute permission?
 if(NOT DEFINED CMAKE_INSTALL_SO_NO_EXE)
-  set(CMAKE_INSTALL_SO_NO_EXE "0")
+  set(CMAKE_INSTALL_SO_NO_EXE "1")
 endif()
 
 # Is this installation the result of a crosscompile?
@@ -49,12 +49,12 @@ if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_
          FILE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/framework/tensorflow/libcust_tf_parsers.so"
          RPATH "")
   endif()
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/framework/tensorflow" TYPE SHARED_LIBRARY FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/GeluCustom/build_out/framework/tf_plugin/libcust_tf_parsers.so")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/framework/tensorflow" TYPE SHARED_LIBRARY FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GeluCustom/build_out/framework/tf_plugin/libcust_tf_parsers.so")
   if(EXISTS "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/framework/tensorflow/libcust_tf_parsers.so" AND
      NOT IS_SYMLINK "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/framework/tensorflow/libcust_tf_parsers.so")
     file(RPATH_CHANGE
          FILE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/framework/tensorflow/libcust_tf_parsers.so"
-         OLD_RPATH "/usr/local/Ascend/cann-8.5.0/lib64:"
+         OLD_RPATH "/home/developer/Ascend/cann-9.0.0/lib64:"
          NEW_RPATH "")
     if(CMAKE_INSTALL_DO_STRIP)
       execute_process(COMMAND "/usr/bin/strip" "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/framework/tensorflow/libcust_tf_parsers.so")

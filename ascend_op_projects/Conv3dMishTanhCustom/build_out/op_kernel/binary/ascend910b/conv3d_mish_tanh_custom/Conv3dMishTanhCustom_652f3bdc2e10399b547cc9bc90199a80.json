@@ -1,0 +1,79 @@
+{
+ "binFileName": "Conv3dMishTanhCustom_652f3bdc2e10399b547cc9bc90199a80",
+ "binFileSuffix": ".o",
+ "blockDim": -1,
+ "coreType": "VectorCore",
+ "core_type": "AIV",
+ "intercoreSync": 0,
+ "kernelName": "Conv3dMishTanhCustom_652f3bdc2e10399b547cc9bc90199a80",
+ "magic": "RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+ "memoryStamping": [],
+ "opParaSize": 16,
+ "parameters": [
+  null,
+  null,
+  null
+ ],
+ "sha256": "e9239e491ed2fe4f48e719e3262f8d4db997fc1f6dc42c66e0d8055222fc5d0b",
+ "workspace": {
+  "num": 1,
+  "size": [
+   -1
+  ],
+  "type": [
+   0
+  ]
+ },
+ "kernelList": [
+  {
+   "kernelName": "Conv3dMishTanhCustom_652f3bdc2e10399b547cc9bc90199a80_0"
+  }
+ ],
+ "optionalInputMode": "gen_placeholder",
+ "optionalOutputMode": "gen_placeholder",
+ "supportSuperKernel": 1,
+ "compileInfo": {},
+ "supportInfo": {
+  "implMode": "high_performance",
+  "int64Mode": false,
+  "simplifiedKeyMode": 0,
+  "simplifiedKey": [
+   "Conv3dMishTanhCustom/d=0,p=1/0,2/0,2",
+   "Conv3dMishTanhCustom/d=0,p=0/0,2/0,2",
+   "Conv3dMishTanhCustom/d=1,p=1/0,2/0,2",
+   "Conv3dMishTanhCustom/d=1,p=0/0,2/0,2"
+  ],
+  "optionalInputMode": "gen_placeholder",
+  "optionalOutputMode": "gen_placeholder",
+  "staticKey": "ed019adc02c4ef2c154076e56faf06976be9b74c8438bfd28b1cccb0b7635e35,174b597c066dd43443d16f1cbf342fb69d122ca8a248e828c078b208c9bfe6f7",
+  "inputs": [
+   {
+    "name": "x",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "y",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "opMode": "dynamic",
+  "deterministic": "ignore"
+ },
+ "filePath": "ascend910b/conv3d_mish_tanh_custom/Conv3dMishTanhCustom_652f3bdc2e10399b547cc9bc90199a80.json"
+}

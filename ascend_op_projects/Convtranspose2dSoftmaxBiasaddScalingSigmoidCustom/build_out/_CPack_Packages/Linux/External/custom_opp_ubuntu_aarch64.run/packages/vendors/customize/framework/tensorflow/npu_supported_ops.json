@@ -1,0 +1,6 @@
+{
+  "Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

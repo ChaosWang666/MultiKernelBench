@@ -1,0 +1,109 @@
+{
+  "binList": [
+    {
+      "implMode": "high_performance",
+      "int64Mode": false,
+      "simplifiedKeyMode": 0,
+      "simplifiedKey": [
+        "AdamCustom/d=0,p=1/0,2/0,2/0,2/0,2/0,2",
+        "AdamCustom/d=0,p=0/0,2/0,2/0,2/0,2/0,2",
+        "AdamCustom/d=1,p=1/0,2/0,2/0,2/0,2/0,2",
+        "AdamCustom/d=1,p=0/0,2/0,2/0,2/0,2/0,2"
+      ],
+      "staticKey": "077b8ff5bf17bc7720dfebdef5b7b2d5358a5e50aa9700da95461aae623d19b2,87800ef423930516dcd17acd11f43c314139c0846b56c5b8aa295a91a7c1a8e1",
+      "inputs": [
+        {
+          "name": "param",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "grad",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "m",
+          "index": 2,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "v",
+          "index": 3,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "param_out",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "beta1",
+          "dtype": "float",
+          "value": 0.0
+        },
+        {
+          "name": "beta2",
+          "dtype": "float",
+          "value": 0.0
+        },
+        {
+          "name": "lr",
+          "dtype": "float",
+          "value": 0.0
+        },
+        {
+          "name": "eps",
+          "dtype": "float",
+          "value": 0.0
+        },
+        {
+          "name": "step",
+          "dtype": "int",
+          "value": 0
+        }
+      ],
+      "opMode": "dynamic",
+      "optionalInputMode": "gen_placeholder",
+      "deterministic": "ignore",
+      "optionalOutputMode": "gen_placeholder",
+      "binInfo": {
+        "jsonFilePath": "ascend910b/adam_custom/AdamCustom_bd5957a98974dd8b46a4e7f1a7b331f5.json"
+      }
+    }
+  ]
+}

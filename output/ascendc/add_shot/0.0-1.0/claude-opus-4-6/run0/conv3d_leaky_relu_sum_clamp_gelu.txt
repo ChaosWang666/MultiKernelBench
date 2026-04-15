@@ -1,0 +1,339 @@
+
+
+Looking at the architecture, I need to fuse the post-convolution operations (LeakyReLU, sum, clamp, GELU) into a single custom AscendC kernel. The Conv3d operation is complex and best left to the existing PyTorch/NPU implementation, but the element-wise operations after it can be fused.
+
+The fused kernel will take the conv output, apply LeakyReLU(0.2), add the sum_tensor (broadcast), clamp to [-1,1], and apply GELU.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv3dLeakyReluSumClampGeluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "sum_tensor",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dLeakyReluSumClampGeluCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dLeakyReluSumClampGeluCustom, Conv3dLeakyReluSumClampGeluCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_leaky_relu_sum_clamp_gelu_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 2048;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dLeakyReluSumClampGeluCustomTilingData tiling;
+    const gert::Shape* xShape = context->GetInputShape(0);
+    uint32_t totalLength = xShape->GetOriginShape().GetShapeSize();
+
+    // x shape is [N, C, D, H, W]
+    uint32_t outChannels = xShape->GetOriginShape().GetDim(1);
+    uint32_t spatialSize = 1;
+    for (int i = 2; i < xShape->GetOriginShape().GetDimNum(); i++) {
+        spatialSize *= xShape->GetOriginShape().GetDim(i);
+    }
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.set_outChannels(outChannels);
+    tiling.set_spatialSize(spatialSize);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Conv3dLeakyReluSumClampGeluCustom : public OpDef {
+public:
+    explicit Conv3dLeakyReluSumClampGeluCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("sum_tensor")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv3dLeakyReluSumClampGeluCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConv3dLeakyReluSumClampGelu {
+public:
+    __aicore__ inline KernelConv3dLeakyReluSumClampGelu() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR sumTensor, GM_ADDR z,
+                                 uint32_t totalLength, uint32_t tileNum,
+                                 uint32_t outChannels, uint32_t spatialSize)
+    {
+        this->outChannels = outChannels;
+        this->spatialSize = spatialSize;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        sumGm.SetGlobalBuffer((__gm__ float *)sumTensor, outChannels);
+        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp1 = tmpBuf1.Get<float>();
+        AscendC::LocalTensor<float> tmp2 = tmpBuf2.Get<float>();
+
+        // LeakyReLU: y = x > 0 ? x : 0.2 * x
+        // Compute 0.2 * x
+        AscendC::Muls(tmp1, xLocal, 0.2f, this->tileLength);
+        // Max(0.2*x, x) gives LeakyReLU for negative_slope=0.2
+        AscendC::Max(zLocal, xLocal, tmp1, this->tileLength);
+
+        // Add sum_tensor with broadcasting: sum_tensor shape is [C,1,1,1]
+        // x shape after conv is [N, C, D, H, W], flattened
+        // Global offset for this block
+        uint32_t globalOffset = this->blockLength * AscendC::GetBlockIdx() + progress * this->tileLength;
+        for (uint32_t i = 0; i < this->tileLength; i++) {
+            uint32_t globalIdx = globalOffset + i;
+            // channel index: (globalIdx / spatialSize) % outChannels
+            uint32_t channelIdx = (globalIdx / this->spatialSize) % this->outChannels;
+            tmp1.SetValue(i, zLocal.GetValue(i) + sumGm.GetValue(channelIdx));
+        }
+
+        // Clamp to [-1, 1]
+        float minVal = -1.0f;
+        float maxVal = 1.0f;
+        // clamp min: max(x, -1)
+        AscendC::Maxs(tmp2, tmp1, minVal, this->tileLength);
+        // clamp max: min(x, 1)
+        AscendC::Mins(tmp1, tmp2, maxVal, this->tileLength);
+
+        // GELU approximation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        // But we can use: x * 0.5 * (1 + erf(x / sqrt(2)))
+        // Use simpler approach with available ops
+
+        // Compute x^2
+        AscendC::Mul(tmp2, tmp1, tmp1, this->tileLength);
+        // Compute x^3
+        AscendC::Mul(zLocal, tmp2, tmp1, this->tileLength);
+        // 0.044715 * x^3
+        AscendC::Muls(zLocal, zLocal, 0.044715f, this->tileLength);
+        // x + 0.044715*x^3
+        AscendC::Add(zLocal, tmp1, zLocal, this->tileLength);
+        // sqrt(2/pi) = 0.7978845608
+        AscendC::Muls(zLocal, zLocal, 0.7978845608f, this->tileLength);
+        // tanh
+        for (uint32_t i = 0; i < this->tileLength; i++) {
+            float val = zLocal.GetValue(i);
+            // tanh approximation
+            float ep = 1.0f;
+            float en = 1.0f;
+            float absval = val > 0 ? val : -val;
+            // Use polynomial approximation for exp for speed, or direct computation
+            // Simple: tanh(x) = (exp(2x)-1)/(exp(2x)+1)
+            float e2x;
+            float tv = 2.0f * val;
+            // Clamp to avoid overflow
+            if (tv > 10.0f) tv = 10.0f;
+            if (tv < -10.0f) tv = -10.0f;
+            // exp approximation using iterations
+            e2x = 1.0f + tv + tv*tv*0.5f + tv*tv*tv/6.0f + tv*tv*tv*tv/24.0f + tv*tv*tv*tv*tv/120.0f + tv*tv*tv*tv*tv*tv/720.0f;
+            if (e2x < 0.0f) e2x = 0.0001f;
+            float tanhVal = (e2x - 1.0f) / (e2x + 1.0f);
+            tmp2.SetValue(i, tanhVal);
+        }
+        // 1 + tanh(...)
+        AscendC::Adds(zLocal, tmp2, 1.0f, this->tileLength);
+        // 0.5 * x
+        AscendC::Muls(tmp2, tmp1, 0.5f, this->tileLength);
+        // result = 0.5*x * (1 + tanh(...))
+        AscendC::Mul(zLocal, tmp2, zLocal, this->tileLength);
+
+        outQueueZ.EnQue<float>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> sumGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t outChannels;
+    uint32_t spatialSize;
+};
+
+extern "C" __global__ __aicore__ void conv3d_leaky_relu_sum_clamp_gelu_custom(GM_ADDR x, GM_ADDR sumTensor, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv3dLeakyReluSumClampGelu op;
+    op.Init(x, sumTensor, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.outChannels, tiling_data.spatialSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_leaky_relu_sum_clamp_gelu_custom_impl_npu(const at::Tensor& x, const at::Tensor& sum_tensor) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnConv3dLeakyReluSumClampGeluCustom, x, sum_tensor, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_leaky_relu_sum_clamp_gelu_custom", &conv3d_leaky_relu_sum_clamp_gelu_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_leaky_relu_sum_clamp_gelu_custom", &conv3d_leaky_relu_sum_clamp_gelu_custom_impl_npu, "fused leaky_relu + sum + clamp + gelu");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model that performs 3D convolution using PyTorch, then applies a fused
+    LeakyReLU + sum + clamp + GELU kernel.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, sum_tensor_shape):
+        super(ModelNew, self).__init__()
+        self.conv = torch.nn.Conv3d(in_channels, out_channels, kernel_size)
+        self.sum_tensor = torch.nn.Parameter(torch.randn(sum_tensor_shape))
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = custom_ops_lib.conv3d_leaky_relu_sum_clamp_gelu_custom(x.contiguous(), self.sum_tensor.contiguous())
+        return x
+'''
+```

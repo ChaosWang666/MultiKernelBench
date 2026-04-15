@@ -1,0 +1,60 @@
+{
+  "binList": [
+    {
+      "implMode": "high_performance",
+      "int64Mode": false,
+      "simplifiedKeyMode": 0,
+      "simplifiedKey": [
+        "AddBiasFourDimBroadcastCustom/d=0,p=1/0,2/0,2/0,2",
+        "AddBiasFourDimBroadcastCustom/d=0,p=0/0,2/0,2/0,2",
+        "AddBiasFourDimBroadcastCustom/d=1,p=1/0,2/0,2/0,2",
+        "AddBiasFourDimBroadcastCustom/d=1,p=0/0,2/0,2/0,2"
+      ],
+      "staticKey": "55e84ffac41fa7325a9f15f74c4d444618458c8c02467f776f20e7d2933e345e,295935613b943d6a71aa3e5b596ee7da1f284cfde70cbf59960f8c546b5d4d30",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "bias",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "z",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "opMode": "dynamic",
+      "optionalInputMode": "gen_placeholder",
+      "deterministic": "ignore",
+      "optionalOutputMode": "gen_placeholder",
+      "binInfo": {
+        "jsonFilePath": "ascend910b/add_bias_four_dim_broadcast_custom/AddBiasFourDimBroadcastCustom_c66e6d67a7f6569f5a1d497a42cec45d.json"
+      }
+    }
+  ]
+}

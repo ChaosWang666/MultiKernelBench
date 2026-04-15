@@ -1,0 +1,51 @@
+{
+  "CrossModalAttentionCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "q",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "k",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "v",
+          "index": 2,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "CrossModalAttentionCustom/d=0,p=1/0,2/0,2/0,2/0,2",
+          "CrossModalAttentionCustom/d=0,p=0/0,2/0,2/0,2/0,2",
+          "CrossModalAttentionCustom/d=1,p=1/0,2/0,2/0,2/0,2",
+          "CrossModalAttentionCustom/d=1,p=0/0,2/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/cross_modal_attention_custom/CrossModalAttentionCustom_c703749356ae985400acc841c218f854.o",
+        "jsonPath": "ascend910b/cross_modal_attention_custom/CrossModalAttentionCustom_c703749356ae985400acc841c218f854.json"
+      }
+    ]
+  }
+}

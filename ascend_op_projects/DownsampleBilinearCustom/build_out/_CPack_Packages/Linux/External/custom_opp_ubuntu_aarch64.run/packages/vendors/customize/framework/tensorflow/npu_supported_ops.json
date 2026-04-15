@@ -1,0 +1,6 @@
+{
+  "DownsampleBilinearCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

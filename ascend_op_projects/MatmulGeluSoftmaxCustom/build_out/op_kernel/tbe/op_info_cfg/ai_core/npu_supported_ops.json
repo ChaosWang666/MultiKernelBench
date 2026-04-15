@@ -1,0 +1,6 @@
+{
+  "MatmulGeluSoftmaxCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

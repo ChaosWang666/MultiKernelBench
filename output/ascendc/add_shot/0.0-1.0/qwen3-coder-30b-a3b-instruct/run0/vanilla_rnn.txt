@@ -1,0 +1,396 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "VanillaRnnCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "hidden",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "i2h_weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "i2h_bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "h2o_weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "h2o_bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "output",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "new_hidden",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(VanillaRnnCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inputSize);
+  TILING_DATA_FIELD_DEF(uint32_t, hiddenSize);
+  TILING_DATA_FIELD_DEF(uint32_t, outputSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(VanillaRnnCustom, VanillaRnnCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "vanilla_rnn_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 4096;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+
+    VanillaRnnCustomTilingData tiling;
+    uint32_t batchSize = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    uint32_t inputSize = context->GetInputShape(0)->GetOriginShape().GetDim(1);
+    uint32_t hiddenSize = context->GetInputShape(1)->GetOriginShape().GetDim(1);
+    uint32_t outputSize = context->GetOutputShape(0)->GetOriginShape().GetDim(1);
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_inputSize(inputSize);
+    tiling.set_hiddenSize(hiddenSize);
+    tiling.set_outputSize(outputSize);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    const gert::Shape* h1_shape = context->GetInputShape(1);
+    gert::Shape* output_shape = context->GetOutputShape(0);
+    gert::Shape* new_hidden_shape = context->GetOutputShape(1);
+    *output_shape = gert::Shape({x1_shape->GetOriginShape().GetDim(0), context->GetInputShape(4)->GetOriginShape().GetDim(0)});
+    *new_hidden_shape = *h1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+context->SetOutputDataType(1, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class VanillaRnnCustom : public OpDef {
+public:
+    explicit VanillaRnnCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("hidden")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("i2h_weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("i2h_bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("h2o_weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("h2o_bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("output")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("new_hidden")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(VanillaRnnCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+
+class KernelVanillaRnn {
+public:
+    __aicore__ inline KernelVanillaRnn() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR hidden, GM_ADDR i2hWeight, GM_ADDR i2hBias, GM_ADDR h2oWeight, GM_ADDR h2oBias, GM_ADDR output, GM_ADDR newHidden,
+                                uint32_t batchSize, uint32_t inputSize, uint32_t hiddenSize, uint32_t outputSize, uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->inputSize = inputSize;
+        this->hiddenSize = hiddenSize;
+        this->outputSize = outputSize;
+        this->tileNum = tileNum;
+        this->blockLength = batchSize * (inputSize + hiddenSize) / AscendC::GetBlockNum();
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x, this->blockLength);
+        hiddenGm.SetGlobalBuffer((__gm__ DTYPE_HIDDEN *)hidden, this->blockLength);
+        i2hWeightGm.SetGlobalBuffer((__gm__ DTYPE_I2H_WEIGHT *)i2hWeight, (inputSize + hiddenSize) * hiddenSize * sizeof(DTYPE_I2H_WEIGHT));
+        i2hBiasGm.SetGlobalBuffer((__gm__ DTYPE_I2H_BIAS *)i2hBias, hiddenSize * sizeof(DTYPE_I2H_BIAS));
+        h2oWeightGm.SetGlobalBuffer((__gm__ DTYPE_H2O_WEIGHT *)h2oWeight, hiddenSize * outputSize * sizeof(DTYPE_H2O_WEIGHT));
+        h2oBiasGm.SetGlobalBuffer((__gm__ DTYPE_H2O_BIAS *)h2oBias, outputSize * sizeof(DTYPE_H2O_BIAS));
+        outputGm.SetGlobalBuffer((__gm__ DTYPE_OUTPUT *)output, batchSize * outputSize * sizeof(DTYPE_OUTPUT));
+        newHiddenGm.SetGlobalBuffer((__gm__ DTYPE_NEW_HIDDEN *)newHidden, batchSize * hiddenSize * sizeof(DTYPE_NEW_HIDDEN));
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(inQueueHidden, BUFFER_NUM, this->tileLength * sizeof(DTYPE_HIDDEN));
+        pipe.InitBuffer(inQueueI2hWeight, BUFFER_NUM, (inputSize + hiddenSize) * hiddenSize * sizeof(DTYPE_I2H_WEIGHT));
+        pipe.InitBuffer(inQueueI2hBias, BUFFER_NUM, hiddenSize * sizeof(DTYPE_I2H_BIAS));
+        pipe.InitBuffer(inQueueH2oWeight, BUFFER_NUM, hiddenSize * outputSize * sizeof(DTYPE_H2O_WEIGHT));
+        pipe.InitBuffer(inQueueH2oBias, BUFFER_NUM, outputSize * sizeof(DTYPE_H2O_BIAS));
+        pipe.InitBuffer(outQueueOutput, BUFFER_NUM, batchSize * outputSize * sizeof(DTYPE_OUTPUT));
+        pipe.InitBuffer(outQueueNewHidden, BUFFER_NUM, batchSize * hiddenSize * sizeof(DTYPE_NEW_HIDDEN));
+    }
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_HIDDEN> hiddenLocal = inQueueHidden.AllocTensor<DTYPE_HIDDEN>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(hiddenLocal, hiddenGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+        inQueueHidden.EnQue(hiddenLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_HIDDEN> hiddenLocal = inQueueHidden.DeQue<DTYPE_HIDDEN>();
+        AscendC::LocalTensor<DTYPE_I2H_WEIGHT> i2hWeightLocal = inQueueI2hWeight.AllocTensor<DTYPE_I2H_WEIGHT>();
+        AscendC::LocalTensor<DTYPE_I2H_BIAS> i2hBiasLocal = inQueueI2hBias.AllocTensor<DTYPE_I2H_BIAS>();
+        AscendC::LocalTensor<DTYPE_H2O_WEIGHT> h2oWeightLocal = inQueueH2oWeight.AllocTensor<DTYPE_H2O_WEIGHT>();
+        AscendC::LocalTensor<DTYPE_H2O_BIAS> h2oBiasLocal = inQueueH2oBias.AllocTensor<DTYPE_H2O_BIAS>();
+        AscendC::LocalTensor<DTYPE_NEW_HIDDEN> newHiddenLocal = outQueueNewHidden.AllocTensor<DTYPE_NEW_HIDDEN>();
+        AscendC::LocalTensor<DTYPE_OUTPUT> outputLocal = outQueueOutput.AllocTensor<DTYPE_OUTPUT>();
+
+        // Concatenate x and hidden
+        AscendC::LocalTensor<DTYPE_X> concatLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::Concat(concatLocal, xLocal, hiddenLocal, this->tileLength, this->inputSize, this->hiddenSize);
+
+        // Linear transform: i2h
+        AscendC::MatMul(newHiddenLocal, concatLocal, i2hWeightLocal, i2hBiasLocal, this->tileLength, this->inputSize + this->hiddenSize, this->hiddenSize);
+
+        // Tanh activation
+        AscendC::Tanh(newHiddenLocal, newHiddenLocal, this->tileLength);
+
+        // Linear transform: h2o
+        AscendC::MatMul(outputLocal, newHiddenLocal, h2oWeightLocal, h2oBiasLocal, this->batchSize, this->hiddenSize, this->outputSize);
+
+        outQueueNewHidden.EnQue<DTYPE_NEW_HIDDEN>(newHiddenLocal);
+        outQueueOutput.EnQue<DTYPE_OUTPUT>(outputLocal);
+        inQueueX.FreeTensor(xLocal);
+        inQueueHidden.FreeTensor(hiddenLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_OUTPUT> outputLocal = outQueueOutput.DeQue<DTYPE_OUTPUT>();
+        AscendC::LocalTensor<DTYPE_NEW_HIDDEN> newHiddenLocal = outQueueNewHidden.DeQue<DTYPE_NEW_HIDDEN>();
+        AscendC::DataCopy(outputGm[progress * this->tileLength], outputLocal, this->tileLength);
+        AscendC::DataCopy(newHiddenGm[progress * this->tileLength], newHiddenLocal, this->tileLength);
+        outQueueOutput.FreeTensor(outputLocal);
+        outQueueNewHidden.FreeTensor(newHiddenLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueHidden, inQueueI2hWeight, inQueueI2hBias, inQueueH2oWeight, inQueueH2oBias;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueOutput, outQueueNewHidden;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_HIDDEN> hiddenGm;
+    AscendC::GlobalTensor<DTYPE_I2H_WEIGHT> i2hWeightGm;
+    AscendC::GlobalTensor<DTYPE_I2H_BIAS> i2hBiasGm;
+    AscendC::GlobalTensor<DTYPE_H2O_WEIGHT> h2oWeightGm;
+    AscendC::GlobalTensor<DTYPE_H2O_BIAS> h2oBiasGm;
+    AscendC::GlobalTensor<DTYPE_OUTPUT> outputGm;
+    AscendC::GlobalTensor<DTYPE_NEW_HIDDEN> newHiddenGm;
+    uint32_t batchSize;
+    uint32_t inputSize;
+    uint32_t hiddenSize;
+    uint32_t outputSize;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void vanilla_rnn_custom(GM_ADDR x, GM_ADDR hidden, GM_ADDR i2hWeight, GM_ADDR i2hBias, GM_ADDR h2oWeight, GM_ADDR h2oBias, GM_ADDR output, GM_ADDR newHidden, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelVanillaRnn op;
+    op.Init(x, hidden, i2hWeight, i2hBias, h2oWeight, h2oBias, output, newHidden, tiling_data.batchSize, tiling_data.inputSize, tiling_data.hiddenSize, tiling_data.outputSize, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor vanilla_rnn_custom_impl_npu(const at::Tensor& x, const at::Tensor& hidden, const at::Tensor& i2h_weight, const at::Tensor& i2h_bias, const at::Tensor& h2o_weight, const at::Tensor& h2o_bias) {
+    at::Tensor output = at::empty({x.size(0), h2o_weight.size(0)}, at::TensorOptions().dtype(at::kFloat).device(at::kNPU));
+    at::Tensor new_hidden = at::empty_like(hidden);
+    EXEC_NPU_CMD(aclnnVanillaRnnCustom, x, hidden, i2h_weight, i2h_bias, h2o_weight, h2o_bias, output, new_hidden);
+    return output;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("vanilla_rnn_custom", &vanilla_rnn_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("vanilla_rnn_custom", &vanilla_rnn_custom_impl_npu, "Vanilla RNN forward pass");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, input_size: int, hidden_size: int, output_size: int):
+        super(ModelNew, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.hidden = torch.randn((batch_size, hidden_size))
+        
+        # Define the RNN cell components (input to hidden, hidden to hidden, and hidden to output)
+        self.i2h = torch.nn.Linear(input_size + hidden_size, hidden_size)  # Input to hidden
+        self.h2o = torch.nn.Linear(hidden_size, output_size)  # Hidden to output
+        self.tanh = torch.nn.Tanh()  # Activation function for hidden state
+    
+    def forward(self, x: torch.Tensor, initial_hidden=None) -> torch.Tensor:
+        if initial_hidden is not None:
+            self.hidden.copy_(initial_hidden)
+        self.hidden = self.hidden.to(x.device)
+        combined = torch.cat((x, self.hidden), dim=1)  # Concatenate input and hidden state
+        self.hidden = self.tanh(custom_ops_lib.vanilla_rnn_custom(x, self.hidden, self.i2h.weight, self.i2h.bias, self.h2o.weight, self.h2o.bias))
+        output = self.h2o(self.hidden)  # Compute output
+        return output
+'''
+```

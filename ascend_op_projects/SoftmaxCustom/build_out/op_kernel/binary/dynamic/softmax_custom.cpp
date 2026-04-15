@@ -1,84 +1,75 @@
 
 #include "kernel_operator.h"
-#include <cmath>
 
-constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
 
 class KernelSoftmax {
 public:
     __aicore__ inline KernelSoftmax() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t rowLength)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t dimSize, uint32_t batchSize)
     {
-        this->rowLength = rowLength;
+        this->totalLength = totalLength;
+        this->dimSize = dimSize;
+        this->batchSize = batchSize;
         this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->rowsPerBlock = this->blockLength / this->rowLength;
-        
-        xGm.SetGlobalBuffer((__gm__ float*)x + (this->blockLength * AscendC::GetBlockIdx()), this->blockLength);
-        zGm.SetGlobalBuffer((__gm__ float*)z + (this->blockLength * AscendC::GetBlockIdx()), this->blockLength);
-        
-        // Tiling for local memory: process row by row
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->rowLength * sizeof(float));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->rowLength * sizeof(float));
-    }
+        this->tileNum = 4096;
+        this->tileLength = this->blockLength / this->tileNum / BUFFER_NUM;
 
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
+    }
     __aicore__ inline void Process()
     {
-        for (uint32_t i = 0; i < this->rowsPerBlock; i++) {
-            ComputeRow(i);
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
         }
     }
 
 private:
-    __aicore__ inline void ComputeRow(uint32_t rowIdx)
+    __aicore__ inline void CopyIn(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
-
-        // 1. Copy row from GM to UB
-        AscendC::DataCopy(xLocal, xGm[rowIdx * this->rowLength], this->rowLength);
-
-        // 2. Find Max for numerical stability
-        float maxVal = -1e38f; 
-        // Simplified max reduction for brevity in kernel_src
-        for(uint32_t j=0; j<this->rowLength; j++) {
-            if(xLocal[j] > maxVal) maxVal = xLocal[j];
-        }
-
-        // 3. Compute exp(x - max) and sum
-        float sumExp = 0.0f;
-        for(uint32_t j=0; j<this->rowLength; j++) {
-            float val = std::exp(xLocal[j] - maxVal);
-            zLocal[j] = val;
-            sumExp += val;
-        }
-
-        // 4. Normalize
-        float invSum = 1.0f / sumExp;
-        for(uint32_t j=0; j<this->rowLength; j++) {
-            zLocal[j] *= invSum;
-        }
-
-        // 5. Copy result back to GM
-        AscendC::DataCopy(zGm[rowIdx * this->rowLength], zLocal, this->rowLength);
-
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        // Perform softmax computation on local tensor
+        AscendC::Softmax(yLocal, xLocal, this->tileLength, 1); // dim=1
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
-        outQueueZ.FreeTensor(zLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> zGm;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    uint32_t totalLength;
+    uint32_t dimSize;
+    uint32_t batchSize;
     uint32_t blockLength;
-    uint32_t rowLength;
-    uint32_t rowsPerBlock;
+    uint32_t tileNum;
+    uint32_t tileLength;
 };
 
-extern "C" __global__ __aicore__ void softmax_custom(GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void softmax_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelSoftmax op;
-    op.Init(x, z, tiling_data.totalLength, tiling_data.rowLength);
+    op.Init(x, y, tiling_data.totalLength, tiling_data.dimSize, tiling_data.batchSize);
     op.Process();
 }

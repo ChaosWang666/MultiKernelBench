@@ -1,0 +1,6 @@
+{
+  "MatmulBatchNormBiasAddDivideSwishCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

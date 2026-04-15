@@ -1,0 +1,39 @@
+{
+  "ShufflenetCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "ShufflenetCustom/d=0,p=1/0,0/0,0",
+          "ShufflenetCustom/d=0,p=0/0,0/0,0",
+          "ShufflenetCustom/d=1,p=1/0,0/0,0",
+          "ShufflenetCustom/d=1,p=0/0,0/0,0"
+        ],
+        "binPath": "ascend910b/shufflenet_custom/ShufflenetCustom_df5dc3929a72184ee16e8396e7662590.o",
+        "jsonPath": "ascend910b/shufflenet_custom/ShufflenetCustom_df5dc3929a72184ee16e8396e7662590.json"
+      }
+    ]
+  }
+}

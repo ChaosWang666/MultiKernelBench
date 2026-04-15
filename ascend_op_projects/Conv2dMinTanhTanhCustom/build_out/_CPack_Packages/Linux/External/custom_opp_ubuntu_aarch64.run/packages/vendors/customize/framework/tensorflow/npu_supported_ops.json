@@ -1,0 +1,6 @@
+{
+  "Conv2dMinTanhTanhCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

@@ -1,0 +1,3 @@
+all: gemm_batch_norm_scaling_softmax_custom0
+gemm_batch_norm_scaling_softmax_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmBatchNormScalingSoftmaxCustom/build_out/op_kernel/GemmBatchNormScalingSoftmaxCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmBatchNormScalingSoftmaxCustom/build_out/op_kernel/GemmBatchNormScalingSoftmaxCustom_ascend910b/bin_param/GemmBatchNormScalingSoftmaxCustom-gemm_batch_norm_scaling_softmax_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

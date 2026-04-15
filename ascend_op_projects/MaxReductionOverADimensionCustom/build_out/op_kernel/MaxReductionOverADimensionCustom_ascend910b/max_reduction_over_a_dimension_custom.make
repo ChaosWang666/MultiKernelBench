@@ -1,0 +1,3 @@
+all: max_reduction_over_a_dimension_custom0
+max_reduction_over_a_dimension_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MaxReductionOverADimensionCustom/build_out/op_kernel/MaxReductionOverADimensionCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MaxReductionOverADimensionCustom/build_out/op_kernel/MaxReductionOverADimensionCustom_ascend910b/bin_param/MaxReductionOverADimensionCustom-max_reduction_over_a_dimension_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

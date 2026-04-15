@@ -13,9 +13,11 @@
                 "type": [
                     "float"
                 ]
-            },
+            }
+        ],
+        "output_desc": [
             {
-                "name": "alpha",
+                "name": "y",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -25,16 +27,11 @@
                 ]
             }
         ],
-        "output_desc": [
+        "attr": [
             {
-                "name": "z",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "name": "alpha",
+                "type": "float",
+                "default_value": "1.0"
             }
         ]
     }

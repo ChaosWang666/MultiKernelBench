@@ -1,0 +1,3 @@
+all: matmul_with_small_k_dimension_custom0
+matmul_with_small_k_dimension_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MatmulWithSmallKDimensionCustom/build_out/op_kernel/MatmulWithSmallKDimensionCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MatmulWithSmallKDimensionCustom/build_out/op_kernel/MatmulWithSmallKDimensionCustom_ascend910b/bin_param/MatmulWithSmallKDimensionCustom-matmul_with_small_k_dimension_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

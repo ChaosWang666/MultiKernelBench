@@ -1,0 +1,329 @@
+
+
+Looking at this architecture, I need to analyze the operations:
+1. 3D Convolution
+2. Division by constant
+3. Max Pooling 3D
+4. Global Average Pooling 3D
+5. Bias addition
+6. Sum along dimension
+
+The convolution and max pooling are complex operations best left to existing NPU implementations. I'll create a custom kernel that fuses the post-pooling operations: division (can be folded), global average pooling output processing, bias addition, and sum along dimension. However, given the complexity, a practical approach is to fuse the operations after max pooling: global_avg_pool → bias_add → sum. But global_avg_pool is also complex on 3D data.
+
+A more feasible approach: fuse the operations after conv3d: divide + max_pool + global_avg_pool + bias_add + sum. But realistically, I'll fuse the simpler element-wise operations: after getting the global_avg_pool result (shape [B, C, 1, 1, 1]), fuse bias_add + sum_dim into a custom kernel.
+
+The input to the fused kernel is tensor of shape [128, 16, 1, 1, 1] and bias of shape [16, 1, 1, 1], sum_dim=1. Output shape is [128, 1, 1, 1] → effectively [128].
+
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv3dDivideMaxGlobalAvgPoolBiasAddSumCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dDivideMaxGlobalAvgPoolBiasAddSumCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dDivideMaxGlobalAvgPoolBiasAddSumCustom, Conv3dDivideMaxGlobalAvgPoolBiasAddSumCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_divide_max_global_avg_pool_bias_add_sum_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dDivideMaxGlobalAvgPoolBiasAddSumCustomTilingData tiling;
+    // x shape: [batch, channels, 1, 1, 1] flattened as [batch, channels]
+    auto x_shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = x_shape.GetDim(0);
+    uint32_t channels = x_shape.GetDim(1);
+    
+    uint32_t blockDim = batchSize < 32 ? batchSize : 32;
+    context->SetBlockDim(blockDim);
+    tiling.set_batchSize(batchSize);
+    tiling.set_channels(channels);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    // output shape: [batch]
+    y_shape->SetDimNum(1);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Conv3dDivideMaxGlobalAvgPoolBiasAddSumCustom : public OpDef {
+public:
+    explicit Conv3dDivideMaxGlobalAvgPoolBiasAddSumCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv3dDivideMaxGlobalAvgPoolBiasAddSumCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelBiasAddSum {
+public:
+    __aicore__ inline KernelBiasAddSum() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR z, uint32_t batchSize, uint32_t channels)
+    {
+        this->batchSize = batchSize;
+        this->channels = channels;
+        
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        
+        // Each block processes a portion of the batch
+        this->batchPerBlock = (batchSize + blockNum - 1) / blockNum;
+        this->startBatch = blockIdx * this->batchPerBlock;
+        this->endBatch = this->startBatch + this->batchPerBlock;
+        if (this->endBatch > batchSize) {
+            this->endBatch = batchSize;
+        }
+        this->actualBatch = (this->startBatch < this->endBatch) ? (this->endBatch - this->startBatch) : 0;
+        
+        // Align channels to 8 for float (32 bytes)
+        this->alignedChannels = ((channels + 7) / 8) * 8;
+        
+        xGm.SetGlobalBuffer((__gm__ float*)x + this->startBatch * channels, this->actualBatch * channels);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias, channels);
+        zGm.SetGlobalBuffer((__gm__ float*)z + this->startBatch, this->actualBatch);
+        
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->alignedChannels * sizeof(float));
+        pipe.InitBuffer(inQueueBias, 1, this->alignedChannels * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->alignedChannels * sizeof(float));
+        pipe.InitBuffer(tmpBuf, 1, this->alignedChannels * sizeof(float));
+    }
+    
+    __aicore__ inline void Process()
+    {
+        if (this->actualBatch == 0) return;
+        
+        // Load bias once
+        AscendC::LocalTensor<float> biasLocal = inQueueBias.AllocTensor<float>();
+        AscendC::DataCopy(biasLocal, biasGm[0], this->alignedChannels);
+        inQueueBias.EnQue(biasLocal);
+        biasLocal = inQueueBias.DeQue<float>();
+        
+        for (uint32_t i = 0; i < this->actualBatch; i++) {
+            CopyIn(i);
+            Compute(i, biasLocal);
+            CopyOut(i);
+        }
+        
+        inQueueBias.FreeTensor(biasLocal);
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint32_t idx)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[idx * this->channels], this->alignedChannels);
+        inQueueX.EnQue(xLocal);
+    }
+    
+    __aicore__ inline void Compute(uint32_t idx, const AscendC::LocalTensor<float>& biasLocal)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::LocalTensor<float> workLocal = tmpBuf.AllocTensor<float>();
+        
+        // x + bias
+        AscendC::Add(zLocal, xLocal, biasLocal, this->alignedChannels);
+        
+        // Sum reduction over channels
+        // ReduceSum: reduce channels dimension
+        AscendC::ReduceSum(workLocal, zLocal, workLocal, this->alignedChannels);
+        // workLocal[0] now contains the sum
+        // We just need workLocal[0] as output scalar, store it
+        // Copy result to zLocal[0]
+        zLocal.SetValue(0, workLocal.GetValue(0));
+        
+        outQueueZ.EnQue(zLocal);
+        inQueueX.FreeTensor(xLocal);
+        tmpBuf.FreeTensor(workLocal);
+    }
+    
+    __aicore__ inline void CopyOut(uint32_t idx)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        // Copy only 8 elements (aligned minimum), but we only need 1
+        AscendC::DataCopy(zGm[idx], zLocal, 8);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueBias;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t batchSize;
+    uint32_t channels;
+    uint32_t alignedChannels;
+    uint32_t batchPerBlock;
+    uint32_t startBatch;
+    uint32_t endBatch;
+    uint32_t actualBatch;
+};
+
+extern "C" __global__ __aicore__ void conv3d_divide_max_global_avg_pool_bias_add_sum_custom(GM_ADDR x, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelBiasAddSum op;
+    op.Init(x, bias, z, tiling_data.batchSize, tiling_data.channels);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_divide_max_global_avg_pool_bias_add_sum_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias) {
+    auto x_cont = x.contiguous();
+    auto bias_cont = bias.contiguous().view({-1});
+    int64_t batch = x_cont.size(0);
+    at::Tensor result = at::empty({batch}, x_cont.options());
+    
+    // Reshape x to [batch, channels] for the kernel
+    auto x_flat = x_cont.view({batch, -1});
+    
+    EXEC_NPU_CMD(aclnnConv3dDivideMaxGlobalAvgPoolBiasAddSumCustom, x_flat, bias_cont, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_divide_max_global_avg_pool_bias_add_sum_custom", &conv3d_divide_max_global_avg_pool_bias_add_sum_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_divide_max_global_avg_pool_bias_add_sum_custom", &conv3d_divide_max_global_avg_pool_bias_add_sum_custom_impl_npu, "fused bias add and sum");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    """
+    Optimized model that performs 3D convolution, divides by constant, applies max pooling,
+    global average pooling using PyTorch, then uses custom AscendC kernel for bias add + sum.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, divisor, pool_size, bias_shape, sum_dim):
+        super(ModelNew, self).__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size)
+        self.divisor = divisor
+        self.max_pool = nn.MaxPool3d(pool_size)
+        self.global_avg_pool = nn.AdaptiveAvgPool3d((1, 1, 1))
+        self.bias = nn.Parameter(torch.randn(bias_shape))
+        self.sum_dim = sum_dim
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = x / self.divisor
+        x = self.max_pool(x)
+        x = self.global_avg_pool(x)
+        # x shape: [batch, channels, 1, 1, 1]
+        # Custom kernel fuses: bias add + sum over dim=1
+        result = custom_ops_lib.conv3d_divide_max_global_avg_pool_bias_add_sum_custom(x, self.bias)
+        return result
+'''
+```

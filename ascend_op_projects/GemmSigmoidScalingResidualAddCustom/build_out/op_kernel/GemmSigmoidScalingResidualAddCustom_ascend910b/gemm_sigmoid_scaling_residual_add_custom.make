@@ -1,0 +1,3 @@
+all: gemm_sigmoid_scaling_residual_add_custom0
+gemm_sigmoid_scaling_residual_add_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmSigmoidScalingResidualAddCustom/build_out/op_kernel/GemmSigmoidScalingResidualAddCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmSigmoidScalingResidualAddCustom/build_out/op_kernel/GemmSigmoidScalingResidualAddCustom_ascend910b/bin_param/GemmSigmoidScalingResidualAddCustom-gemm_sigmoid_scaling_residual_add_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

@@ -1,0 +1,121 @@
+
+[
+    {
+        "op": "EfficientnetMbConvCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "expand_weight",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "depthwise_weight",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "project_weight",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "expand_bn_weight",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "expand_bn_bias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "depthwise_bn_weight",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "depthwise_bn_bias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "project_bn_weight",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "project_bn_bias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]

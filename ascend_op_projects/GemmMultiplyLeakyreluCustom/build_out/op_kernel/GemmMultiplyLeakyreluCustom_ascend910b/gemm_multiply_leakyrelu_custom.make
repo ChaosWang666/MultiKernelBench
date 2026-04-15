@@ -1,0 +1,3 @@
+all: gemm_multiply_leakyrelu_custom0
+gemm_multiply_leakyrelu_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmMultiplyLeakyreluCustom/build_out/op_kernel/GemmMultiplyLeakyreluCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmMultiplyLeakyreluCustom/build_out/op_kernel/GemmMultiplyLeakyreluCustom_ascend910b/bin_param/GemmMultiplyLeakyreluCustom-gemm_multiply_leakyrelu_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

@@ -1,0 +1,522 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvPointwise2dCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "optional",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "batch_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "height",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "width",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "has_bias",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvPointwise2dCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, height);
+  TILING_DATA_FIELD_DEF(uint32_t, width);
+  TILING_DATA_FIELD_DEF(uint32_t, hasBias);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(uint32_t, totalSpatial);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialPerBlock);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, tileSpatial);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvPointwise2dCustom, ConvPointwise2dCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_pointwise_2d_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 8;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvPointwise2dCustomTilingData tiling;
+
+    auto attrs = context->GetAttrs();
+    uint32_t batchSize = *(attrs->GetAttrPointer<int>(0));
+    uint32_t inChannels = *(attrs->GetAttrPointer<int>(1));
+    uint32_t outChannels = *(attrs->GetAttrPointer<int>(2));
+    uint32_t height = *(attrs->GetAttrPointer<int>(3));
+    uint32_t width = *(attrs->GetAttrPointer<int>(4));
+    uint32_t hasBias = *(attrs->GetAttrPointer<int>(5));
+
+    uint32_t spatialSize = height * width;
+    uint32_t totalSpatial = batchSize * spatialSize;
+
+    uint32_t blockDim = BLOCK_DIM;
+    if (totalSpatial < blockDim) {
+        blockDim = totalSpatial;
+    }
+
+    uint32_t spatialPerBlock = (totalSpatial + blockDim - 1) / blockDim;
+    uint32_t tileNum = TILE_NUM;
+    if (spatialPerBlock < tileNum) {
+        tileNum = spatialPerBlock;
+    }
+    uint32_t tileSpatial = (spatialPerBlock + tileNum - 1) / tileNum;
+    // Align to 8 elements (32 bytes for float)
+    tileSpatial = ((tileSpatial + 7) / 8) * 8;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_height(height);
+    tiling.set_width(width);
+    tiling.set_hasBias(hasBias);
+    tiling.set_spatialSize(spatialSize);
+    tiling.set_totalSpatial(totalSpatial);
+    tiling.set_spatialPerBlock(spatialPerBlock);
+    tiling.set_tileNum(tileNum);
+    tiling.set_tileSpatial(tileSpatial);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+
+    // Workspace: we need temporary space for input tile and output tile
+    // input tile: tileSpatial * inChannels floats
+    // output tile: tileSpatial * outChannels floats
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    // x: (batch, in_channels, H, W) -> y: (batch, out_channels, H, W)
+    // We get out_channels from weight shape
+    const gert::Shape* w_shape = context->GetInputShape(1);
+    *y_shape = *x_shape;
+    y_shape->SetDim(1, w_shape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvPointwise2dCustom : public OpDef {
+public:
+    explicit ConvPointwise2dCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Attr("batch_size").AttrType(REQUIRED).Int();
+        this->Attr("in_channels").AttrType(REQUIRED).Int();
+        this->Attr("out_channels").AttrType(REQUIRED).Int();
+        this->Attr("height").AttrType(REQUIRED).Int();
+        this->Attr("width").AttrType(REQUIRED).Int();
+        this->Attr("has_bias").AttrType(REQUIRED).Int();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvPointwise2dCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConvPointwise2d {
+public:
+    __aicore__ inline KernelConvPointwise2d() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t inChannels, uint32_t outChannels,
+                                 uint32_t height, uint32_t width, uint32_t hasBias,
+                                 uint32_t spatialSize, uint32_t totalSpatial,
+                                 uint32_t spatialPerBlock, uint32_t tileNum, uint32_t tileSpatial)
+    {
+        this->batchSize = batchSize;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->height = height;
+        this->width = width;
+        this->hasBias = hasBias;
+        this->spatialSize = spatialSize;
+        this->totalSpatial = totalSpatial;
+        this->tileSpatial = tileSpatial;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->startSpatial = blockIdx * spatialPerBlock;
+        this->endSpatial = this->startSpatial + spatialPerBlock;
+        if (this->endSpatial > totalSpatial) {
+            this->endSpatial = totalSpatial;
+        }
+        this->actualSpatial = (this->endSpatial > this->startSpatial) ? (this->endSpatial - this->startSpatial) : 0;
+        this->loopCount = (this->actualSpatial + tileSpatial - 1) / tileSpatial;
+
+        // x: (batch, inChannels, H, W) flattened
+        // weight: (outChannels, inChannels, 1, 1) flattened
+        // bias: (outChannels,)
+        // y: (batch, outChannels, H, W) flattened
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inChannels * spatialSize);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, outChannels * inChannels);
+        if (hasBias) {
+            bGm.SetGlobalBuffer((__gm__ float *)bias, outChannels);
+        }
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * outChannels * spatialSize);
+
+        // Allocate buffers for one tile of spatial positions
+        // For input: tileSpatial floats (one channel at a time)
+        // For output accumulation: tileSpatial floats
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileSpatial * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileSpatial * sizeof(float));
+        pipe.InitBuffer(tmpBuf, 1, this->tileSpatial * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (this->actualSpatial == 0) return;
+
+        for (int32_t t = 0; t < this->loopCount; t++) {
+            uint32_t tileStart = this->startSpatial + t * this->tileSpatial;
+            uint32_t tileEnd = tileStart + this->tileSpatial;
+            if (tileEnd > this->endSpatial) {
+                tileEnd = this->endSpatial;
+            }
+            uint32_t curTileLen = tileEnd - tileStart;
+            // Align to 8
+            uint32_t alignedLen = ((curTileLen + 7) / 8) * 8;
+
+            for (uint32_t oc = 0; oc < this->outChannels; oc++) {
+                // Accumulate output for this output channel
+                AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+                // Initialize to zero
+                AscendC::Duplicate(zLocal, (float)0.0f, alignedLen);
+
+                for (uint32_t ic = 0; ic < this->inChannels; ic++) {
+                    // Load input tile for this input channel
+                    AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+
+                    // For each spatial position in [tileStart, tileEnd),
+                    // compute which batch and spatial offset
+                    // x layout: (batch, inChannels, H*W)
+                    // spatial index s maps to batch = s / spatialSize, offset = s % spatialSize
+                    // x address = batch * inChannels * spatialSize + ic * spatialSize + offset
+
+                    // Since spatial positions are contiguous, and if they belong to same batch:
+                    // We need to handle batch boundaries.
+                    // For simplicity, gather element by element for positions spanning batch boundaries
+                    // But for performance, if all in same batch, do contiguous copy.
+
+                    uint32_t batchStart = tileStart / this->spatialSize;
+                    uint32_t batchEnd = (tileEnd - 1) / this->spatialSize;
+
+                    if (batchStart == batchEnd) {
+                        // All in same batch - contiguous copy
+                        uint32_t offsetStart = tileStart - batchStart * this->spatialSize;
+                        uint32_t srcIdx = batchStart * this->inChannels * this->spatialSize + ic * this->spatialSize + offsetStart;
+                        AscendC::DataCopy(xLocal, xGm[srcIdx], alignedLen);
+                    } else {
+                        // Spans multiple batches - copy per batch segment
+                        uint32_t copied = 0;
+                        for (uint32_t b = batchStart; b <= batchEnd; b++) {
+                            uint32_t segStart = (b == batchStart) ? (tileStart - b * this->spatialSize) : 0;
+                            uint32_t segEnd = (b == batchEnd) ? (tileEnd - b * this->spatialSize) : this->spatialSize;
+                            uint32_t segLen = segEnd - segStart;
+                            uint32_t alignedSegLen = ((segLen + 7) / 8) * 8;
+                            uint32_t srcIdx = b * this->inChannels * this->spatialSize + ic * this->spatialSize + segStart;
+                            // We copy aligned but might overshoot - that's ok for intermediate calc
+                            AscendC::DataCopy(xLocal[copied], xGm[srcIdx], alignedSegLen);
+                            copied += segLen;
+                        }
+                    }
+                    AscendC::PipeBarrier<PIPE_ALL>();
+
+                    // Multiply by weight[oc, ic]
+                    float w_val = 0.0f;
+                    // Read weight from GM - weight layout: (outChannels, inChannels)
+                    AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+                    // We'll use Muls to scale xLocal by the weight
+                    // First we need the weight value. Copy 8 floats from weight GM (aligned).
+                    // weight index = oc * inChannels + ic
+                    uint32_t wIdx = oc * this->inChannels + ic;
+                    // Copy aligned block containing our weight
+                    uint32_t wAlignedStart = (wIdx / 8) * 8;
+                    AscendC::DataCopy(tmpLocal, wGm[wAlignedStart], 8);
+                    AscendC::PipeBarrier<PIPE_ALL>();
+                    w_val = tmpLocal.GetValue(wIdx - wAlignedStart);
+
+                    // zLocal += xLocal * w_val
+                    AscendC::Muls(tmpLocal, xLocal, w_val, alignedLen);
+                    AscendC::PipeBarrier<PIPE_ALL>();
+                    AscendC::Add(zLocal, zLocal, tmpLocal, alignedLen);
+                    AscendC::PipeBarrier<PIPE_ALL>();
+
+                    inQueueX.FreeTensor(xLocal);
+                }
+
+                // Add bias if present
+                if (this->hasBias) {
+                    AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+                    uint32_t bAlignedStart = (oc / 8) * 8;
+                    AscendC::DataCopy(tmpLocal, bGm[bAlignedStart], 8);
+                    AscendC::PipeBarrier<PIPE_ALL>();
+                    float b_val = tmpLocal.GetValue(oc - bAlignedStart);
+                    AscendC::Adds(zLocal, zLocal, b_val, alignedLen);
+                    AscendC::PipeBarrier<PIPE_ALL>();
+                }
+
+                // Write output
+                // y layout: (batch, outChannels, H*W)
+                uint32_t batchStart = tileStart / this->spatialSize;
+                uint32_t batchEnd2 = (tileEnd - 1) / this->spatialSize;
+
+                if (batchStart == batchEnd2) {
+                    uint32_t offsetStart = tileStart - batchStart * this->spatialSize;
+                    uint32_t dstIdx = batchStart * this->outChannels * this->spatialSize + oc * this->spatialSize + offsetStart;
+                    AscendC::DataCopy(yGm[dstIdx], zLocal, alignedLen);
+                } else {
+                    uint32_t copied = 0;
+                    for (uint32_t b = batchStart; b <= batchEnd2; b++) {
+                        uint32_t segStart = (b == batchStart) ? (tileStart - b * this->spatialSize) : 0;
+                        uint32_t segEnd = (b == batchEnd2) ? (tileEnd - b * this->spatialSize) : this->spatialSize;
+                        uint32_t segLen = segEnd - segStart;
+                        uint32_t alignedSegLen = ((segLen + 7) / 8) * 8;
+                        uint32_t dstIdx = b * this->outChannels * this->spatialSize + oc * this->spatialSize + segStart;
+                        AscendC::DataCopy(yGm[dstIdx], zLocal[copied], alignedSegLen);
+                        copied += segLen;
+                    }
+                }
+                AscendC::PipeBarrier<PIPE_ALL>();
+
+                outQueueZ.FreeTensor(zLocal);
+            }
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> wGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t inChannels;
+    uint32_t outChannels;
+    uint32_t height;
+    uint32_t width;
+    uint32_t hasBias;
+    uint32_t spatialSize;
+    uint32_t totalSpatial;
+    uint32_t tileSpatial;
+    uint32_t startSpatial;
+    uint32_t endSpatial;
+    uint32_t actualSpatial;
+    uint32_t loopCount;
+};
+
+extern "C" __global__ __aicore__ void conv_pointwise_2d_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConvPointwise2d op;
+    op.Init(x, weight, bias, y,
+            tiling_data.batchSize, tiling_data.inChannels, tiling_data.outChannels,
+            tiling_data.height, tiling_data.width, tiling_data.hasBias,
+            tiling_data.spatialSize, tiling_data.totalSpatial,
+            tiling_data.spatialPerBlock, tiling_data.tileNum, tiling_data.tileSpatial);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_pointwise_2d_custom_impl_npu(const at::Tensor& x, const at::Tensor& weight,
+                                              const c10::optional<at::Tensor>& bias,
+                                              int64_t batch_size, int64_t in_channels,
+                                              int64_t out_channels, int64_t height, int64_t width,
+                                              int64_t has_bias) {
+    auto output = at::empty({batch_size, out_channels, height, width}, x.options());
+
+    if (bias.has_value() && has_bias) {
+        EXEC_NPU_CMD(aclnnConvPointwise2dCustom, x, weight, bias.value(), output,
+                      batch_size, in_channels, out_channels, height, width, has_bias);
+    } else {
+        // Create a dummy bias tensor
+        auto dummy_bias = at::empty({0}, x.options());
+        EXEC_NPU_CMD(aclnnConvPointwise2dCustom, x, weight, dummy_bias, output,
+                      batch_size, in_channels, out_channels, height, width, has_bias);
+    }
+    return output;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_pointwise_2d_custom", &conv_pointwise_2d_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_pointwise_2d_custom", &conv_pointwise_2d_custom_impl_npu,
+          "Pointwise 2D convolution custom op");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, bias: bool = False):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.has_bias = bias
+        # Initialize weight with same shape as nn.Conv2d with kernel_size=1
+        self.weight = torch.nn.Parameter(torch.empty(out_channels, in_channels, 1, 1))
+        if bias:
+            self.bias = torch.nn.Parameter(torch.empty(out_channels))
+        else:
+            self.bias = None
+        # Initialize using kaiming uniform like nn.Conv2d
+        torch.nn.init.kaiming_uniform_(self.weight, a=5**0.5)
+        if self.bias is not None:
+            import math
+            fan_in = in_channels
+            bound = 1 / math.sqrt(fan_in)
+            torch.nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.shape[0]
+        height = x.shape[2]
+        width = x.shape[3]
+        # weight is (out_channels, in_channels, 1, 1), reshape to (out_channels, in_channels)
+        weight_2d = self.weight.view(self.out_channels, self.in_channels)
+        has_bias = 1 if self.has_bias else 0
+        bias_param = self.bias if self.bias is not None else None
+        return custom_ops_lib.conv_pointwise_2d_custom(
+            x, weight_2d, bias_param,
+            batch_size, self.in_channels, self.out_channels,
+            height, width, has_bias
+        )
+'''
+```

@@ -1,0 +1,58 @@
+
+[
+    {
+        "op": "Conv3dMaxLogSumExpReluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "in_channels",
+                "type": "int",
+                "param_type": "required"
+            },
+            {
+                "name": "out_channels",
+                "type": "int",
+                "param_type": "required"
+            },
+            {
+                "name": "kernel_size",
+                "type": "int",
+                "param_type": "required"
+            },
+            {
+                "name": "stride",
+                "type": "int",
+                "param_type": "required"
+            },
+            {
+                "name": "padding",
+                "type": "int",
+                "param_type": "required"
+            }
+        ]
+    }
+]

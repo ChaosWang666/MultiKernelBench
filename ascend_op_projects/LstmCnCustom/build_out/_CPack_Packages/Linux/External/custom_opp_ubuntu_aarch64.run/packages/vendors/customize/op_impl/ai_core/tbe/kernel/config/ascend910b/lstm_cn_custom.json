@@ -1,0 +1,82 @@
+{
+  "binList": [
+    {
+      "implMode": "high_performance",
+      "int64Mode": false,
+      "simplifiedKeyMode": 0,
+      "simplifiedKey": [
+        "LstmCnCustom/d=0,p=1/0,2/0,2/0,2/0,2/0,2",
+        "LstmCnCustom/d=0,p=0/0,2/0,2/0,2/0,2/0,2",
+        "LstmCnCustom/d=1,p=1/0,2/0,2/0,2/0,2/0,2",
+        "LstmCnCustom/d=1,p=0/0,2/0,2/0,2/0,2/0,2"
+      ],
+      "staticKey": "0f9e0c96f6beb4f06b21170935ec08c8dca52bb76a2660e909424d28dcf0cd8e,3f30e2c2f9e56254b5af70a341711cd9b3303599fe354f41bb7ce767b004ebe3",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "h0",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "c0",
+          "index": 2,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "hn",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "cn",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "opMode": "dynamic",
+      "optionalInputMode": "gen_placeholder",
+      "deterministic": "ignore",
+      "optionalOutputMode": "gen_placeholder",
+      "binInfo": {
+        "jsonFilePath": "ascend910b/lstm_cn_custom/LstmCnCustom_1d81121f9e82a8f0f22e49d7e763de42.json"
+      }
+    }
+  ]
+}

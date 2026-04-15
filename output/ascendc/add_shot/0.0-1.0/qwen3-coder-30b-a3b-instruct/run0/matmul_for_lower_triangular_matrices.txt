@@ -1,0 +1,303 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "MatmulForLowerTriangularMatricesCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "a",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "b",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "c",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulForLowerTriangularMatricesCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, m);
+  TILING_DATA_FIELD_DEF(uint32_t, n);
+  TILING_DATA_FIELD_DEF(uint32_t, k);
+  TILING_DATA_FIELD_DEF(uint32_t, tileM);
+  TILING_DATA_FIELD_DEF(uint32_t, tileN);
+  TILING_DATA_FIELD_DEF(uint32_t, tileK);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulForLowerTriangularMatricesCustom, MatmulForLowerTriangularMatricesCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_for_lower_triangular_matrices_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_M = 128;
+const uint32_t TILE_N = 128;
+const uint32_t TILE_K = 64;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+
+    MatmulForLowerTriangularMatricesCustomTilingData tiling;
+    const gert::Shape* a_shape = context->GetInputShape(0);
+    const gert::Shape* b_shape = context->GetInputShape(1);
+    uint32_t m = a_shape->GetOriginShape().GetDim(0);
+    uint32_t n = b_shape->GetOriginShape().GetDim(1);
+    uint32_t k = a_shape->GetOriginShape().GetDim(1);
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_m(m);
+    tiling.set_n(n);
+    tiling.set_k(k);
+    tiling.set_tileM(TILE_M);
+    tiling.set_tileN(TILE_N);
+    tiling.set_tileK(TILE_K);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* a_shape = context->GetInputShape(0);
+    const gert::Shape* b_shape = context->GetInputShape(1);
+    gert::Shape* c_shape = context->GetOutputShape(0);
+    *c_shape = *a_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class MatmulForLowerTriangularMatricesCustom : public OpDef {
+public:
+    explicit MatmulForLowerTriangularMatricesCustom(const char* name) : OpDef(name)
+    {
+        this->Input("a")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("b")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("c")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(MatmulForLowerTriangularMatricesCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+
+class KernelMatmulForLowerTriangularMatrices {
+public:
+    __aicore__ inline KernelMatmulForLowerTriangularMatrices() {}
+    __aicore__ inline void Init(GM_ADDR a, GM_ADDR b, GM_ADDR c, uint32_t m, uint32_t n, uint32_t k, uint32_t tileM, uint32_t tileN, uint32_t tileK)
+    {
+        this->m = m;
+        this->n = n;
+        this->k = k;
+        this->tileM = tileM;
+        this->tileN = tileN;
+        this->tileK = tileK;
+        this->blockNum = AscendC::GetBlockNum();
+        this->blockIdx = AscendC::GetBlockIdx();
+
+        aGm.SetGlobalBuffer((__gm__ DTYPE_A *)a, m * k);
+        bGm.SetGlobalBuffer((__gm__ DTYPE_B *)b, k * n);
+        cGm.SetGlobalBuffer((__gm__ DTYPE_C *)c, m * n);
+        pipe.InitBuffer(inQueueA, BUFFER_NUM, tileM * tileK * sizeof(DTYPE_A));
+        pipe.InitBuffer(inQueueB, BUFFER_NUM, tileK * tileN * sizeof(DTYPE_B));
+        pipe.InitBuffer(outQueueC, BUFFER_NUM, tileM * tileN * sizeof(DTYPE_C));
+    }
+    __aicore__ inline void Process()
+    {
+        uint32_t numTileM = (m + tileM - 1) / tileM;
+        uint32_t numTileN = (n + tileN - 1) / tileN;
+        uint32_t numTileK = (k + tileK - 1) / tileK;
+        uint32_t totalLoop = numTileM * numTileN * numTileK;
+        for (uint32_t i = 0; i < totalLoop; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint32_t progress)
+    {
+        uint32_t tileMIdx = progress % numTileM;
+        uint32_t tileNIdx = (progress / numTileM) % numTileN;
+        uint32_t tileKIdx = progress / (numTileM * numTileN);
+        if (tileKIdx >= numTileK) return;
+
+        uint32_t aOffset = tileMIdx * tileM * k + tileKIdx * tileK;
+        uint32_t bOffset = tileKIdx * tileK * n + tileNIdx * tileN;
+        uint32_t aSize = tileM * tileK;
+        uint32_t bSize = tileK * tileN;
+        if (tileMIdx == numTileM - 1) {
+            aSize = (m - tileMIdx * tileM) * k;
+        }
+        if (tileNIdx == numTileN - 1) {
+            bSize = (n - tileNIdx * tileN) * k;
+        }
+        if (tileKIdx == numTileK - 1) {
+            aSize = tileM * (k - tileKIdx * tileK);
+            bSize = (k - tileKIdx * tileK) * tileN;
+        }
+
+        AscendC::LocalTensor<DTYPE_A> aLocal = inQueueA.AllocTensor<DTYPE_A>();
+        AscendC::LocalTensor<DTYPE_B> bLocal = inQueueB.AllocTensor<DTYPE_B>();
+        AscendC::DataCopy(aLocal, aGm[aOffset], aSize);
+        AscendC::DataCopy(bLocal, bGm[bOffset], bSize);
+        inQueueA.EnQue(aLocal);
+        inQueueB.EnQue(bLocal);
+    }
+    __aicore__ inline void Compute(uint32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_A> aLocal = inQueueA.DeQue<DTYPE_A>();
+        AscendC::LocalTensor<DTYPE_B> bLocal = inQueueB.DeQue<DTYPE_B>();
+        AscendC::LocalTensor<DTYPE_C> cLocal = outQueueC.AllocTensor<DTYPE_C>();
+        AscendC::MatMul(cLocal, aLocal, bLocal, tileM, tileN, tileK);
+        outQueueC.EnQue<DTYPE_C>(cLocal);
+        inQueueA.FreeTensor(aLocal);
+        inQueueB.FreeTensor(bLocal);
+    }
+    __aicore__ inline void CopyOut(uint32_t progress)
+    {
+        uint32_t tileMIdx = progress % numTileM;
+        uint32_t tileNIdx = (progress / numTileM) % numTileN;
+        uint32_t tileKIdx = progress / (numTileM * numTileN);
+        if (tileKIdx >= numTileK) return;
+
+        uint32_t cOffset = tileMIdx * tileM * n + tileNIdx * tileN;
+        uint32_t cSize = tileM * tileN;
+        if (tileMIdx == numTileM - 1) {
+            cSize = (m - tileMIdx * tileM) * n;
+        }
+        if (tileNIdx == numTileN - 1) {
+            cSize = (n - tileNIdx * tileN) * m;
+        }
+
+        AscendC::LocalTensor<DTYPE_C> cLocal = outQueueC.DeQue<DTYPE_C>();
+        AscendC::DataCopy(cGm[cOffset], cLocal, cSize);
+        outQueueC.FreeTensor(cLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueA, inQueueB;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueC;
+    AscendC::GlobalTensor<DTYPE_A> aGm;
+    AscendC::GlobalTensor<DTYPE_B> bGm;
+    AscendC::GlobalTensor<DTYPE_C> cGm;
+    uint32_t m, n, k;
+    uint32_t tileM, tileN, tileK;
+    uint32_t blockNum, blockIdx;
+    uint32_t numTileM, numTileN, numTileK;
+};
+
+extern "C" __global__ __aicore__ void matmul_for_lower_triangular_matrices_custom(GM_ADDR a, GM_ADDR b, GM_ADDR c, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMatmulForLowerTriangularMatrices op;
+    op.Init(a, b, c, tiling_data.m, tiling_data.n, tiling_data.k, tiling_data.tileM, tiling_data.tileN, tiling_data.tileK);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_for_lower_triangular_matrices_custom_impl_npu(const at::Tensor& a, const at::Tensor& b) {
+    at::Tensor result = at::empty_like(a);
+    EXEC_NPU_CMD(aclnnMatmulForLowerTriangularMatricesCustom, a, b, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_for_lower_triangular_matrices_custom", &matmul_for_lower_triangular_matrices_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_for_lower_triangular_matrices_custom", &matmul_for_lower_triangular_matrices_custom_impl_npu, "matrix multiplication of lower triangular matrices");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, A, B):
+        return torch.tril(custom_ops_lib.matmul_for_lower_triangular_matrices_custom(A, B))
+'''
+```

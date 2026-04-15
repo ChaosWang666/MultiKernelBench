@@ -1,0 +1,3 @@
+all: cosine_similarity_loss_custom0
+cosine_similarity_loss_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/CosineSimilarityLossCustom/build_out/op_kernel/CosineSimilarityLossCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/CosineSimilarityLossCustom/build_out/op_kernel/CosineSimilarityLossCustom_ascend910b/bin_param/CosineSimilarityLossCustom-cosine_similarity_loss_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

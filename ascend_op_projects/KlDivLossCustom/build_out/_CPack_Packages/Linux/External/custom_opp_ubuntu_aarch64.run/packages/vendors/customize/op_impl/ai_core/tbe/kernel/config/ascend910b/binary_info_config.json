@@ -1,0 +1,45 @@
+{
+  "KlDivLossCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "log_predictions",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "targets",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "loss",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "KlDivLossCustom/d=0,p=1/0,2/0,2/0,2",
+          "KlDivLossCustom/d=0,p=0/0,2/0,2/0,2",
+          "KlDivLossCustom/d=1,p=1/0,2/0,2/0,2",
+          "KlDivLossCustom/d=1,p=0/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/kl_div_loss_custom/KlDivLossCustom_c7f8e6d535767201d8649c54015a13ea.o",
+        "jsonPath": "ascend910b/kl_div_loss_custom/KlDivLossCustom_c7f8e6d535767201d8649c54015a13ea.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "AveragePooling2dCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

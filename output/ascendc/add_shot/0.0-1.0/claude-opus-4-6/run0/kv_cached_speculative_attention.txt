@@ -1,0 +1,428 @@
+
+
+Looking at this architecture, I need to implement a custom AscendC kernel for scaled dot-product attention with KV caching for speculative decoding scenarios (small Q length, large KV length).
+
+The operation is: `output = softmax(Q @ K^T / sqrt(d_model)) @ V`
+
+With shapes: Q(batch_size, q_len, d_model), K(batch_size, kv_len, d_model), V(batch_size, kv_len, d_model)
+
+```python
+project_json_src='''
+[
+    {
+        "op": "KvCachedSpeculativeAttentionCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "query",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "key_cache",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "value_cache",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "output",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(KvCachedSpeculativeAttentionCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, qLen);
+  TILING_DATA_FIELD_DEF(uint32_t, kvLen);
+  TILING_DATA_FIELD_DEF(uint32_t, dModel);
+  TILING_DATA_FIELD_DEF(float, scale);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(KvCachedSpeculativeAttentionCustom, KvCachedSpeculativeAttentionCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "kv_cached_speculative_attention_custom_tiling.h"
+#include "register/op_def_registry.h"
+#include <cmath>
+
+namespace optiling {
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    KvCachedSpeculativeAttentionCustomTilingData tiling;
+
+    const gert::StorageShape* qShape = context->GetInputShape(0);
+    const gert::StorageShape* kShape = context->GetInputShape(1);
+
+    uint32_t batchSize = qShape->GetStorageShape().GetDim(0);
+    uint32_t qLen = qShape->GetStorageShape().GetDim(1);
+    uint32_t dModel = qShape->GetStorageShape().GetDim(2);
+    uint32_t kvLen = kShape->GetStorageShape().GetDim(1);
+
+    float scale = 1.0f / std::sqrt((float)dModel);
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_qLen(qLen);
+    tiling.set_kvLen(kvLen);
+    tiling.set_dModel(dModel);
+    tiling.set_scale(scale);
+
+    // Use batchSize * qLen as block dim, each block handles one query vector
+    uint32_t blockDim = batchSize * qLen;
+    if (blockDim > 32) blockDim = 32;
+    context->SetBlockDim(blockDim);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* qShape = context->GetInputShape(0);
+    gert::Shape* outShape = context->GetOutputShape(0);
+    *outShape = *qShape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class KvCachedSpeculativeAttentionCustom : public OpDef {
+public:
+    explicit KvCachedSpeculativeAttentionCustom(const char* name) : OpDef(name)
+    {
+        this->Input("query")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("key_cache")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("value_cache")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("output")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(KvCachedSpeculativeAttentionCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+using namespace AscendC;
+
+constexpr int32_t BUFFER_NUM = 1;
+
+class KernelAttention {
+public:
+    __aicore__ inline KernelAttention() {}
+    __aicore__ inline void Init(GM_ADDR query, GM_ADDR key_cache, GM_ADDR value_cache, GM_ADDR output,
+                                 uint32_t batchSize, uint32_t qLen, uint32_t kvLen, uint32_t dModel, float scale)
+    {
+        this->batchSize = batchSize;
+        this->qLen = qLen;
+        this->kvLen = kvLen;
+        this->dModel = dModel;
+        this->scale = scale;
+
+        uint32_t totalQueries = batchSize * qLen;
+        uint32_t numBlocks = GetBlockNum();
+        uint32_t blockIdx = GetBlockIdx();
+
+        // Distribute queries across blocks
+        uint32_t queriesPerBlock = (totalQueries + numBlocks - 1) / numBlocks;
+        this->startQuery = blockIdx * queriesPerBlock;
+        this->endQuery = startQuery + queriesPerBlock;
+        if (this->endQuery > totalQueries) this->endQuery = totalQueries;
+
+        qGm.SetGlobalBuffer((__gm__ float*)query, batchSize * qLen * dModel);
+        kGm.SetGlobalBuffer((__gm__ float*)key_cache, batchSize * kvLen * dModel);
+        vGm.SetGlobalBuffer((__gm__ float*)value_cache, batchSize * kvLen * dModel);
+        oGm.SetGlobalBuffer((__gm__ float*)output, batchSize * qLen * dModel);
+
+        // We process tiles of dModel dimension for dot products
+        // and tiles of kvLen for softmax
+        // Tile size for dModel dimension
+        this->dTileSize = 256;
+        if (this->dTileSize > dModel) this->dTileSize = dModel;
+        
+        // Tile size for kvLen dimension  
+        this->kvTileSize = 256;
+        if (this->kvTileSize > kvLen) this->kvTileSize = kvLen;
+
+        // Buffers: we need space for q tile, k tile, score accumulation, softmax, v tile, output accumulation
+        // q tile: dTileSize floats
+        // k tile: dTileSize floats  
+        // scores: kvLen floats (aligned)
+        // v tile: dTileSize floats
+        // out: dModel floats
+
+        uint32_t kvLenAligned = ((kvLen + 63) / 64) * 64;
+        uint32_t dModelAligned = ((dModel + 63) / 64) * 64;
+        uint32_t dTileSizeAligned = ((dTileSize + 63) / 64) * 64;
+
+        pipe.InitBuffer(qBuf, BUFFER_NUM, dTileSizeAligned * sizeof(float));
+        pipe.InitBuffer(kBuf, BUFFER_NUM, dTileSizeAligned * sizeof(float));
+        pipe.InitBuffer(scoreBuf, BUFFER_NUM, kvLenAligned * sizeof(float));
+        pipe.InitBuffer(vBuf, BUFFER_NUM, dTileSizeAligned * sizeof(float));
+        pipe.InitBuffer(outBuf, BUFFER_NUM, dModelAligned * sizeof(float));
+        pipe.InitBuffer(tempBuf, BUFFER_NUM, kvLenAligned * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t qi = startQuery; qi < endQuery; qi++) {
+            ProcessOneQuery(qi);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOneQuery(uint32_t queryIdx)
+    {
+        uint32_t b = queryIdx / qLen;
+        uint32_t q = queryIdx % qLen;
+
+        uint32_t qOffset = b * qLen * dModel + q * dModel;
+        uint32_t kBaseOffset = b * kvLen * dModel;
+        uint32_t vBaseOffset = b * kvLen * dModel;
+        uint32_t oOffset = b * qLen * dModel + q * dModel;
+
+        uint32_t kvLenAligned = ((kvLen + 63) / 64) * 64;
+        uint32_t dModelAligned = ((dModel + 63) / 64) * 64;
+
+        // Step 1: Compute attention scores = Q * K^T for all kv positions
+        LocalTensor<float> scoreLocal = scoreBuf.AllocTensor<float>();
+        // Initialize scores to 0
+        Duplicate(scoreLocal, (float)0.0f, kvLenAligned);
+
+        // For each kv position, compute dot product of q and k
+        // Process in tiles over dModel dimension
+        for (uint32_t kvStart = 0; kvStart < kvLen; kvStart += kvTileSize) {
+            uint32_t kvEnd = kvStart + kvTileSize;
+            if (kvEnd > kvLen) kvEnd = kvLen;
+            uint32_t curKvTile = kvEnd - kvStart;
+
+            // For each kv in this tile
+            for (uint32_t kvi = kvStart; kvi < kvEnd; kvi++) {
+                float dotProduct = 0.0f;
+                uint32_t kOffset = kBaseOffset + kvi * dModel;
+
+                // Compute dot product in tiles over dModel
+                for (uint32_t dStart = 0; dStart < dModel; dStart += dTileSize) {
+                    uint32_t dEnd = dStart + dTileSize;
+                    if (dEnd > dModel) dEnd = dModel;
+                    uint32_t curDTile = dEnd - dStart;
+                    uint32_t curDTileAligned = ((curDTile + 63) / 64) * 64;
+
+                    LocalTensor<float> qLocal = qBuf.AllocTensor<float>();
+                    LocalTensor<float> kLocal = kBuf.AllocTensor<float>();
+
+                    DataCopy(qLocal, qGm[qOffset + dStart], curDTileAligned);
+                    DataCopy(kLocal, kGm[kOffset + dStart], curDTileAligned);
+
+                    // Zero out padding if needed
+                    if (curDTile < curDTileAligned) {
+                        for (uint32_t p = curDTile; p < curDTileAligned; p++) {
+                            qLocal.SetValue(p, 0.0f);
+                            kLocal.SetValue(p, 0.0f);
+                        }
+                    }
+
+                    // Element-wise multiply
+                    Mul(qLocal, qLocal, kLocal, curDTileAligned);
+
+                    // Reduce sum
+                    float partialSum = 0.0f;
+                    for (uint32_t idx = 0; idx < curDTile; idx++) {
+                        partialSum += qLocal.GetValue(idx);
+                    }
+                    dotProduct += partialSum;
+
+                    qBuf.FreeTensor(qLocal);
+                    kBuf.FreeTensor(kLocal);
+                }
+                scoreLocal.SetValue(kvi, dotProduct * scale);
+            }
+        }
+
+        // Step 2: Softmax over scores
+        // Find max
+        float maxVal = scoreLocal.GetValue(0);
+        for (uint32_t i = 1; i < kvLen; i++) {
+            float v = scoreLocal.GetValue(i);
+            if (v > maxVal) maxVal = v;
+        }
+
+        // Subtract max and exp
+        float sumExp = 0.0f;
+        for (uint32_t i = 0; i < kvLen; i++) {
+            float v = scoreLocal.GetValue(i);
+            // Simple exp approximation or use built-in
+            v = v - maxVal;
+            // Use exp
+            float ev;
+            // Manual exp since we're doing scalar
+            // Use a rough exp: we'll store back and use vector Exp
+            scoreLocal.SetValue(i, v);
+        }
+
+        // Use vector Exp
+        LocalTensor<float> tempLocal = tempBuf.AllocTensor<float>();
+        Exp(tempLocal, scoreLocal, kvLenAligned);
+
+        // Sum
+        sumExp = 0.0f;
+        for (uint32_t i = 0; i < kvLen; i++) {
+            sumExp += tempLocal.GetValue(i);
+        }
+
+        // Normalize
+        float invSum = 1.0f / sumExp;
+        Muls(scoreLocal, tempLocal, invSum, kvLenAligned);
+        tempBuf.FreeTensor(tempLocal);
+
+        // Step 3: Compute output = scores * V
+        // output[d] = sum_over_kv(score[kv] * V[kv][d])
+        LocalTensor<float> outLocal = outBuf.AllocTensor<float>();
+        Duplicate(outLocal, (float)0.0f, dModelAligned);
+
+        for (uint32_t kvi = 0; kvi < kvLen; kvi++) {
+            float w = scoreLocal.GetValue(kvi);
+            if (w == 0.0f) continue;
+
+            uint32_t vOffset = vBaseOffset + kvi * dModel;
+
+            for (uint32_t dStart = 0; dStart < dModel; dStart += dTileSize) {
+                uint32_t dEnd = dStart + dTileSize;
+                if (dEnd > dModel) dEnd = dModel;
+                uint32_t curDTile = dEnd - dStart;
+                uint32_t curDTileAligned = ((curDTile + 63) / 64) * 64;
+
+                LocalTensor<float> vLocal = vBuf.AllocTensor<float>();
+                DataCopy(vLocal, vGm[vOffset + dStart], curDTileAligned);
+
+                // Multiply by weight
+                Muls(vLocal, vLocal, w, curDTileAligned);
+
+                // Add to output - we need to read outLocal segment, add, write back
+                // Since outLocal is already allocated, we can do element-wise
+                for (uint32_t idx = 0; idx < curDTile; idx++) {
+                    float cur = outLocal.GetValue(dStart + idx);
+                    cur += vLocal.GetValue(idx);
+                    outLocal.SetValue(dStart + idx, cur);
+                }
+
+                vBuf.FreeTensor(vLocal);
+            }
+        }
+
+        scoreBuf.FreeTensor(scoreLocal);
+
+        // Copy output to global memory
+        DataCopy(oGm[oOffset], outLocal, dModelAligned);
+        outBuf.FreeTensor(outLocal);
+    }
+
+private:
+    TPipe pipe;
+    TQue<TPosition::VECIN, BUFFER_NUM> qBuf, kBuf, vBuf;
+    TQue<TPosition::VECOUT, BUFFER_NUM> scoreBuf, outBuf, tempBuf;
+    GlobalTensor<float> qGm, kGm, vGm, oGm;
+    uint32_t batchSize, qLen, kvLen, dModel;
+    uint32_t dTileSize, kvTileSize;
+    uint32_t startQuery, endQuery;
+    float scale;
+};
+
+extern "C" __global__ __aicore__ void kv_cached_speculative_attention_custom(GM_ADDR query, GM_ADDR key_cache, GM_ADDR value_cache, GM_ADDR output, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelAttention op;
+    op.Init(query, key_cache, value_cache, output,
+            tiling_data.batchSize, tiling_data.qLen, tiling_data.kvLen, tiling_data.dModel, tiling_data.scale);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor kv_cached_speculative_attention_custom_impl_npu(const at::Tensor& query, const at::Tensor& key_cache, const at::Tensor& value_cache) {
+    at::Tensor result = at::empty_like(query);
+    EXEC_NPU_CMD(aclnnKvCachedSpeculativeAttentionCustom, query, key_cache, value_cache, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("kv_cached_speculative_attention_custom", &kv_cached_speculative_attention_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("kv_cached_speculative_attention_custom", &kv_cached_speculative_attention_custom_impl_npu, "KV cached speculative attention");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, Q, K_cache, V_cache):
+        return custom_ops_lib.kv_cached_speculative_attention_custom(Q, K_cache, V_cache)
+'''
+```

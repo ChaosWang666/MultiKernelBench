@@ -1,8 +1,8 @@
-# Install script for directory: /data/w00936672/MultiKernelBench/ascend_op_projects/SoftsignCustom/framework
+# Install script for directory: /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftsignCustom/framework
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
-  set(CMAKE_INSTALL_PREFIX "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftsignCustom/build_out")
+  set(CMAKE_INSTALL_PREFIX "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftsignCustom/build_out")
 endif()
 string(REGEX REPLACE "/$" "" CMAKE_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
 
@@ -29,7 +29,7 @@ endif()
 
 # Install shared libraries without execute permission?
 if(NOT DEFINED CMAKE_INSTALL_SO_NO_EXE)
-  set(CMAKE_INSTALL_SO_NO_EXE "0")
+  set(CMAKE_INSTALL_SO_NO_EXE "1")
 endif()
 
 # Is this installation the result of a crosscompile?
@@ -44,6 +44,6 @@ endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
-  include("/data/w00936672/MultiKernelBench/ascend_op_projects/SoftsignCustom/build_out/framework/tf_plugin/cmake_install.cmake")
+  include("/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftsignCustom/build_out/framework/tf_plugin/cmake_install.cmake")
 endif()
 

@@ -1,0 +1,325 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "MatmulWithSmallKDimensionCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "a",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "b",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "c",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulWithSmallKDimensionCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, M);
+  TILING_DATA_FIELD_DEF(uint32_t, N);
+  TILING_DATA_FIELD_DEF(uint32_t, K);
+  TILING_DATA_FIELD_DEF(uint32_t, tileM);
+  TILING_DATA_FIELD_DEF(uint32_t, tileN);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulWithSmallKDimensionCustom, MatmulWithSmallKDimensionCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_with_small_k_dimension_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulWithSmallKDimensionCustomTilingData tiling;
+    
+    const gert::StorageShape* aShape = context->GetInputShape(0);
+    const gert::StorageShape* bShape = context->GetInputShape(1);
+    
+    uint32_t M = aShape->GetOriginShape().GetDim(0);
+    uint32_t K = aShape->GetOriginShape().GetDim(1);
+    uint32_t N = bShape->GetOriginShape().GetDim(1);
+    
+    // Each block processes a chunk of rows of the output
+    // We tile along M and N dimensions
+    uint32_t tileM = (M + BLOCK_DIM - 1) / BLOCK_DIM; // rows per block
+    
+    // For N, we process in tiles that fit in local memory
+    // With K=64, each row of A is 64 floats = 256 bytes
+    // We want to tile N so that B tile (K x tileN) and partial results fit
+    // Local memory ~256KB per buffer, so tileN can be generous
+    uint32_t tileN = 128; // process 128 columns of N at a time
+    
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_M(M);
+    tiling.set_N(N);
+    tiling.set_K(K);
+    tiling.set_tileM(tileM);
+    tiling.set_tileN(tileN);
+    
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* aShape = context->GetInputShape(0);
+    const gert::Shape* bShape = context->GetInputShape(1);
+    gert::Shape* cShape = context->GetOutputShape(0);
+    cShape->SetDimNum(2);
+    cShape->SetDim(0, aShape->GetDim(0));
+    cShape->SetDim(1, bShape->GetDim(1));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MatmulWithSmallKDimensionCustom : public OpDef {
+public:
+    explicit MatmulWithSmallKDimensionCustom(const char* name) : OpDef(name)
+    {
+        this->Input("a")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("b")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("c")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MatmulWithSmallKDimensionCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 1;
+
+class KernelMatmul {
+public:
+    __aicore__ inline KernelMatmul() {}
+    __aicore__ inline void Init(GM_ADDR a, GM_ADDR b, GM_ADDR c, 
+                                 uint32_t M, uint32_t N, uint32_t K,
+                                 uint32_t tileM, uint32_t tileN)
+    {
+        this->M = M;
+        this->N = N;
+        this->K = K;
+        this->tileM = tileM;
+        this->tileN = tileN;
+        
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+        
+        // Each block handles a contiguous chunk of rows
+        this->startRow = blockIdx * tileM;
+        this->endRow = (blockIdx + 1) * tileM;
+        if (this->endRow > M) {
+            this->endRow = M;
+        }
+        this->myRows = (this->endRow > this->startRow) ? (this->endRow - this->startRow) : 0;
+        
+        aGm.SetGlobalBuffer((__gm__ float *)a, M * K);
+        bGm.SetGlobalBuffer((__gm__ float *)b, K * N);
+        cGm.SetGlobalBuffer((__gm__ float *)c, M * N);
+        
+        // We need buffers for:
+        // A tile: myRows x K (but we process row by row or small chunks)
+        // B tile: K x tileN
+        // C tile: tileN (accumulator for one row)
+        // Process one row at a time, tile over N
+        // For each row: load A row (K floats), then for each N tile load B columns and compute
+        
+        // Align tileN to 8 (32 bytes / 4 bytes per float)
+        if (this->tileN % 8 != 0) {
+            this->tileN = ((this->tileN + 7) / 8) * 8;
+        }
+        
+        // Buffer sizes
+        uint32_t aRowSize = ((K + 7) / 8) * 8; // aligned K
+        this->alignedK = aRowSize;
+        
+        pipe.InitBuffer(inQueueA, BUFFER_NUM, aRowSize * sizeof(float));
+        pipe.InitBuffer(inQueueB, BUFFER_NUM, this->tileN * sizeof(float));
+        pipe.InitBuffer(outQueueC, BUFFER_NUM, this->tileN * sizeof(float));
+        pipe.InitBuffer(tmpBuf, BUFFER_NUM, this->tileN * sizeof(float));
+    }
+    
+    __aicore__ inline void Process()
+    {
+        if (this->myRows == 0) return;
+        
+        for (uint32_t row = 0; row < this->myRows; row++) {
+            uint32_t globalRow = this->startRow + row;
+            
+            for (uint32_t nStart = 0; nStart < N; nStart += this->tileN) {
+                uint32_t curTileN = this->tileN;
+                if (nStart + curTileN > N) {
+                    curTileN = N - nStart;
+                }
+                uint32_t alignedTileN = ((curTileN + 7) / 8) * 8;
+                
+                // Allocate output buffer and zero it
+                AscendC::LocalTensor<float> cLocal = outQueueC.AllocTensor<float>();
+                AscendC::Duplicate(cLocal, (float)0.0f, alignedTileN);
+                
+                // For each k, load A[row][k] and B[k][nStart:nStart+curTileN]
+                for (uint32_t k = 0; k < K; k++) {
+                    // Load B[k][nStart .. nStart+curTileN-1]
+                    AscendC::LocalTensor<float> bLocal = inQueueB.AllocTensor<float>();
+                    AscendC::DataCopy(bLocal, bGm[k * N + nStart], alignedTileN);
+                    inQueueB.EnQue(bLocal);
+                    bLocal = inQueueB.DeQue<float>();
+                    
+                    // Load scalar A[globalRow][k]
+                    float aVal;
+                    // We need to load A value - load a small aligned block
+                    AscendC::LocalTensor<float> aLocal = inQueueA.AllocTensor<float>();
+                    uint32_t aAlignedOffset = (k / 8) * 8;
+                    AscendC::DataCopy(aLocal, aGm[globalRow * K + aAlignedOffset], this->alignedK <= 8 ? 8 : this->alignedK);
+                    inQueueA.EnQue(aLocal);
+                    aLocal = inQueueA.DeQue<float>();
+                    aVal = aLocal.GetValue(k - aAlignedOffset);
+                    inQueueA.FreeTensor(aLocal);
+                    
+                    // cLocal += aVal * bLocal
+                    AscendC::LocalTensor<float> tLocal = tmpBuf.AllocTensor<float>();
+                    AscendC::Muls(tLocal, bLocal, aVal, alignedTileN);
+                    AscendC::Add(cLocal, cLocal, tLocal, alignedTileN);
+                    tmpBuf.FreeTensor(tLocal);
+                    
+                    inQueueB.FreeTensor(bLocal);
+                }
+                
+                // Write out result
+                outQueueC.EnQue(cLocal);
+                cLocal = outQueueC.DeQue<float>();
+                AscendC::DataCopy(cGm[globalRow * N + nStart], cLocal, alignedTileN);
+                outQueueC.FreeTensor(cLocal);
+            }
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueA, inQueueB;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueC;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<float> aGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> cGm;
+    uint32_t M, N, K;
+    uint32_t tileM, tileN;
+    uint32_t startRow, endRow, myRows;
+    uint32_t alignedK;
+};
+
+extern "C" __global__ __aicore__ void matmul_with_small_k_dimension_custom(GM_ADDR a, GM_ADDR b, GM_ADDR c, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMatmul op;
+    op.Init(a, b, c, tiling_data.M, tiling_data.N, tiling_data.K, tiling_data.tileM, tiling_data.tileN);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_with_small_k_dimension_custom_impl_npu(const at::Tensor& a, const at::Tensor& b) {
+    int64_t M = a.size(0);
+    int64_t K = a.size(1);
+    int64_t N = b.size(1);
+    at::Tensor result = at::empty({M, N}, a.options());
+    EXEC_NPU_CMD(aclnnMatmulWithSmallKDimensionCustom, a, b, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_with_small_k_dimension_custom", &matmul_with_small_k_dimension_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_with_small_k_dimension_custom", &matmul_with_small_k_dimension_custom_impl_npu, "matmul with small K dimension");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, A, B):
+        return custom_ops_lib.matmul_with_small_k_dimension_custom(A, B)
+'''
+```

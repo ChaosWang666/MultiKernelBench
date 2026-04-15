@@ -1,0 +1,74 @@
+{
+  "AdamCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "param",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "grad",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "m",
+          "index": 2,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "v",
+          "index": 3,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "param_out",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "beta1"
+        },
+        {
+          "name": "beta2"
+        },
+        {
+          "name": "lr"
+        },
+        {
+          "name": "eps"
+        },
+        {
+          "name": "step"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "AdamCustom/d=0,p=1/0,2/0,2/0,2/0,2/0,2",
+          "AdamCustom/d=0,p=0/0,2/0,2/0,2/0,2/0,2",
+          "AdamCustom/d=1,p=1/0,2/0,2/0,2/0,2/0,2",
+          "AdamCustom/d=1,p=0/0,2/0,2/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/adam_custom/AdamCustom_bd5957a98974dd8b46a4e7f1a7b331f5.o",
+        "jsonPath": "ascend910b/adam_custom/AdamCustom_bd5957a98974dd8b46a4e7f1a7b331f5.json"
+      }
+    ]
+  }
+}

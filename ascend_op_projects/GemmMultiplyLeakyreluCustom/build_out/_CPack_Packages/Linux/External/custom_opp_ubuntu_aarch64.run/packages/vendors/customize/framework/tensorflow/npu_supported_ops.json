@@ -1,0 +1,6 @@
+{
+  "GemmMultiplyLeakyreluCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

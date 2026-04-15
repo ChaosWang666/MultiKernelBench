@@ -1,0 +1,3 @@
+all: sparse_attention_custom0
+sparse_attention_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SparseAttentionCustom/build_out/op_kernel/SparseAttentionCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SparseAttentionCustom/build_out/op_kernel/SparseAttentionCustom_ascend910b/bin_param/SparseAttentionCustom-sparse_attention_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

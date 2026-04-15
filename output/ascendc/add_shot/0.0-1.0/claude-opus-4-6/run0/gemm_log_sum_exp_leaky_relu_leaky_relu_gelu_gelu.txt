@@ -1,0 +1,330 @@
+
+
+Looking at this architecture, I need to analyze the operations:
+1. Linear (Gemm): x = W*x + b
+2. LogSumExp along dim=1 with keepdim=True
+3. LeakyReLU (negative_slope=0.01)
+4. LeakyReLU (negative_slope=0.01)
+5. GELU
+6. GELU
+
+The Gemm is a large matrix multiply (1024x8192 @ 8192x8192) which is best left to the highly optimized cuBLAS/CANN library. The post-Gemm operations (LogSumExp, 2x LeakyReLU, 2x GELU) reduce along dim=1 then apply element-wise ops on a (1024, 1) tensor. The LogSumExp is the expensive reduction. I'll fuse the post-GEMM operations (LogSumExp + LeakyReLU + LeakyReLU + GELU + GELU) into a single custom kernel.
+
+After LogSumExp, the result is (batch_size, 1), then LeakyReLU and GELU are applied element-wise. Since the output after logsumexp is small (1024 elements), the main work is the reduction across 8192 columns.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "GemmLogSumExpLeakyReluLeakyReluGeluGeluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GemmLogSumExpLeakyReluLeakyReluGeluGeluCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, dimSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GemmLogSumExpLeakyReluLeakyReluGeluGeluCustom, GemmLogSumExpLeakyReluLeakyReluGeluGeluCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    GemmLogSumExpLeakyReluLeakyReluGeluGeluCustomTilingData tiling;
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
+    uint32_t dimSize = xShape->GetStorageShape().GetDim(1);
+
+    uint32_t blockDim = batchSize < 32 ? batchSize : 32;
+    context->SetBlockDim(blockDim);
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_dimSize(dimSize);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    // output shape is (batchSize, 1)
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, 1);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class GemmLogSumExpLeakyReluLeakyReluGeluGeluCustom : public OpDef {
+public:
+    explicit GemmLogSumExpLeakyReluLeakyReluGeluGeluCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(GemmLogSumExpLeakyReluLeakyReluGeluGeluCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 1;
+
+class KernelGemmLogSumExpLeakyReluLeakyReluGeluGelu {
+public:
+    __aicore__ inline KernelGemmLogSumExpLeakyReluLeakyReluGeluGelu() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t dimSize)
+    {
+        this->batchSize = batchSize;
+        this->dimSize = dimSize;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        this->rowsPerBlock = (batchSize + blockNum - 1) / blockNum;
+        this->startRow = blockIdx * this->rowsPerBlock;
+        if (this->startRow + this->rowsPerBlock > batchSize) {
+            this->rowsPerBlock = batchSize > this->startRow ? batchSize - this->startRow : 0;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + this->startRow * dimSize, this->rowsPerBlock * dimSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y + this->startRow, this->rowsPerBlock);
+
+        // We process one row at a time. We need buffer for one row.
+        // Align to 32 bytes = 8 floats
+        uint32_t alignedDim = (dimSize + 7) / 8 * 8;
+        this->alignedDim = alignedDim;
+
+        // For reduction we need: input tile, workspace for exp, workspace for reduce
+        // We'll tile the row if it's too large
+        // Each UB can hold ~196KB typically. Let's use conservative tiling.
+        // For a row of 8192 floats = 32KB, that's fine.
+        this->tileSize = alignedDim;
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileSize * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileSize * sizeof(float));
+        // extra buffer for intermediate
+        pipe.InitBuffer(tmpBuf, BUFFER_NUM, this->tileSize * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t i = 0; i < this->rowsPerBlock; i++) {
+            ProcessRow(i);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessRow(uint32_t rowIdx)
+    {
+        // Step 1: Copy row from GM to local
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[rowIdx * dimSize], this->tileSize);
+        inQueueX.EnQue(xLocal);
+
+        // Step 2: Compute LogSumExp
+        AscendC::LocalTensor<float> xData = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> workLocal = tmpBuf.AllocTensor<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+
+        // Find max for numerical stability
+        // ReduceMax into workLocal[0]
+        AscendC::ReduceMax(workLocal, xData, this->dimSize, false);
+        float maxVal = workLocal.GetValue(0);
+
+        // Subtract max: xData = xData - maxVal
+        AscendC::Adds(xData, xData, -maxVal, this->tileSize);
+
+        // Exp: workLocal = exp(xData)
+        AscendC::Exp(workLocal, xData, this->tileSize);
+
+        // Sum of exp
+        AscendC::ReduceSum(yLocal, workLocal, this->dimSize, false);
+        float sumExp = yLocal.GetValue(0);
+
+        // LogSumExp = log(sumExp) + maxVal
+        float logSumExpVal = AscendC::log(sumExp) + maxVal;
+
+        // Step 3: LeakyReLU twice (negative_slope=0.01)
+        // LeakyReLU: f(x) = x if x >= 0, else 0.01*x
+        float val = logSumExpVal;
+        // First LeakyReLU
+        val = val >= 0.0f ? val : 0.01f * val;
+        // Second LeakyReLU
+        val = val >= 0.0f ? val : 0.01f * val;
+
+        // Step 4: GELU twice
+        // GELU approximation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        // Using simpler approximation: GELU(x) ≈ 0.5 * x * (1 + erf(x / sqrt(2)))
+        // For scalar, let's use the tanh approximation
+        float sqrt2overpi = 0.7978845608f; // sqrt(2/pi)
+        float coeff = 0.044715f;
+
+        // First GELU
+        {
+            float x3 = val * val * val;
+            float inner = sqrt2overpi * (val + coeff * x3);
+            // tanh approximation via exp: tanh(z) = (exp(2z)-1)/(exp(2z)+1)
+            float exp2z = AscendC::exp(2.0f * inner);
+            float tanhVal = (exp2z - 1.0f) / (exp2z + 1.0f);
+            val = 0.5f * val * (1.0f + tanhVal);
+        }
+
+        // Second GELU
+        {
+            float x3 = val * val * val;
+            float inner = sqrt2overpi * (val + coeff * x3);
+            float exp2z = AscendC::exp(2.0f * inner);
+            float tanhVal = (exp2z - 1.0f) / (exp2z + 1.0f);
+            val = 0.5f * val * (1.0f + tanhVal);
+        }
+
+        // Write scalar result
+        yLocal.SetValue(0, val);
+
+        tmpBuf.FreeTensor(workLocal);
+        inQueueX.FreeTensor(xData);
+
+        outQueueY.EnQue(yLocal);
+        AscendC::LocalTensor<float> yOut = outQueueY.DeQue<float>();
+        // Copy just 1 float (need at least 32 bytes = 8 floats for DataCopy alignment)
+        // We'll copy 8 floats but only the first matters
+        AscendC::DataCopy(yGm[rowIdx], yOut, 8);
+        outQueueY.FreeTensor(yOut);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t dimSize;
+    uint32_t alignedDim;
+    uint32_t tileSize;
+    uint32_t rowsPerBlock;
+    uint32_t startRow;
+};
+
+extern "C" __global__ __aicore__ void gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGemmLogSumExpLeakyReluLeakyReluGeluGelu op;
+    op.Init(x, y, tiling_data.batchSize, tiling_data.dimSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu_custom_impl_npu(const at::Tensor& x) {
+    int64_t batchSize = x.size(0);
+    // Output is (batchSize, 1) after logsumexp with keepdim=True
+    at::Tensor result = at::empty({batchSize, 1}, x.options());
+    EXEC_NPU_CMD(aclnnGemmLogSumExpLeakyReluLeakyReluGeluGeluCustom, x, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu_custom", &gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu_custom", &gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu_custom_impl_npu, "fused logsumexp+leakyrelu+leakyrelu+gelu+gelu");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model: Gemm via nn.Linear, then fused LogSumExp+LeakyReLU+LeakyReLU+GELU+GELU
+    via custom AscendC kernel.
+    """
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
+        self.linear = torch.nn.Linear(in_features, out_features, bias=bias)
+
+    def forward(self, x):
+        # Gemm (keep using PyTorch's optimized linear)
+        x = self.linear(x)
+        # Fused LogSumExp + LeakyReLU + LeakyReLU + GELU + GELU
+        x = custom_ops_lib.gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu_custom(x)
+        return x
+'''
+```

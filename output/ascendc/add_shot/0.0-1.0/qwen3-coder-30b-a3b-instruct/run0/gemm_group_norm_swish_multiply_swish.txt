@@ -1,0 +1,491 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "GemmGroupNormSwishMultiplySwishCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "group_norm_weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "group_norm_bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "multiply_weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GemmGroupNormSwishMultiplySwishCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batch_size);
+  TILING_DATA_FIELD_DEF(uint32_t, in_features);
+  TILING_DATA_FIELD_DEF(uint32_t, out_features);
+  TILING_DATA_FIELD_DEF(uint32_t, num_groups);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GemmGroupNormSwishMultiplySwishCustom, GemmGroupNormSwishMultiplySwishCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "gemm_group_norm_swish_multiply_swish_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+
+    GemmGroupNormSwishMultiplySwishCustomTilingData tiling;
+    uint32_t batch_size = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    uint32_t in_features = context->GetInputShape(0)->GetOriginShape().GetDim(1);
+    uint32_t out_features = context->GetInputShape(1)->GetOriginShape().GetDim(0);
+    uint32_t num_groups = context->GetInputShape(3)->GetOriginShape().GetDim(0);
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batch_size(batch_size);
+    tiling.set_in_features(in_features);
+    tiling.set_out_features(out_features);
+    tiling.set_num_groups(num_groups);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class GemmGroupNormSwishMultiplySwishCustom : public OpDef {
+public:
+    explicit GemmGroupNormSwishMultiplySwishCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("group_norm_weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("group_norm_bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("multiply_weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(GemmGroupNormSwishMultiplySwishCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+
+class KernelGemmGroupNormSwishMultiplySwish {
+public:
+    __aicore__ inline KernelGemmGroupNormSwishMultiplySwish() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR group_norm_weight, GM_ADDR group_norm_bias, GM_ADDR multiply_weight, GM_ADDR z,
+                                uint32_t batch_size, uint32_t in_features, uint32_t out_features, uint32_t num_groups)
+    {
+        this->batch_size = batch_size;
+        this->in_features = in_features;
+        this->out_features = out_features;
+        this->num_groups = num_groups;
+        this->blockLength = out_features / AscendC::GetBlockNum();
+        this->tileLength = this->blockLength / BUFFER_NUM;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batch_size * in_features);
+        weightGm.SetGlobalBuffer((__gm__ float *)weight, in_features * out_features);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, out_features);
+        group_norm_weightGm.SetGlobalBuffer((__gm__ float *)group_norm_weight, out_features);
+        group_norm_biasGm.SetGlobalBuffer((__gm__ float *)group_norm_bias, out_features);
+        multiply_weightGm.SetGlobalBuffer((__gm__ float *)multiply_weight, out_features);
+        zGm.SetGlobalBuffer((__gm__ float *)z, batch_size * out_features);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueGroupNormWeight, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueGroupNormBias, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueMultiplyWeight, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        // GEMM
+        for (uint32_t i = 0; i < batch_size; i++) {
+            for (uint32_t j = 0; j < out_features; j += tileLength) {
+                CopyInGemm(i, j);
+                ComputeGemm(i, j);
+                CopyOutGemm(i, j);
+            }
+        }
+
+        // GroupNorm
+        for (uint32_t i = 0; i < batch_size; i++) {
+            for (uint32_t j = 0; j < out_features; j += tileLength) {
+                CopyInGroupNorm(i, j);
+                ComputeGroupNorm(i, j);
+                CopyOutGroupNorm(i, j);
+            }
+        }
+
+        // Swish
+        for (uint32_t i = 0; i < batch_size; i++) {
+            for (uint32_t j = 0; j < out_features; j += tileLength) {
+                CopyInSwish(i, j);
+                ComputeSwish(i, j);
+                CopyOutSwish(i, j);
+            }
+        }
+
+        // Multiply
+        for (uint32_t i = 0; i < batch_size; i++) {
+            for (uint32_t j = 0; j < out_features; j += tileLength) {
+                CopyInMultiply(i, j);
+                ComputeMultiply(i, j);
+                CopyOutMultiply(i, j);
+            }
+        }
+
+        // Swish again
+        for (uint32_t i = 0; i < batch_size; i++) {
+            for (uint32_t j = 0; j < out_features; j += tileLength) {
+                CopyInSwish2(i, j);
+                ComputeSwish2(i, j);
+                CopyOutSwish2(i, j);
+            }
+        }
+    }
+
+private:
+    __aicore__ inline void CopyInGemm(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> weightLocal = inQueueWeight.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[batch_idx * in_features + offset], tileLength);
+        AscendC::DataCopy(weightLocal, weightGm[offset * in_features], tileLength * in_features);
+        inQueueX.EnQue(xLocal);
+        inQueueWeight.EnQue(weightLocal);
+    }
+
+    __aicore__ inline void ComputeGemm(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> weightLocal = inQueueWeight.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::MatMul(zLocal, xLocal, weightLocal, false, true, 1.0f, 0.0f, in_features);
+        outQueueZ.EnQue<float>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+        inQueueWeight.FreeTensor(weightLocal);
+    }
+
+    __aicore__ inline void CopyOutGemm(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[batch_idx * out_features + offset], zLocal, tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+    __aicore__ inline void CopyInGroupNorm(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> group_norm_weightLocal = inQueueGroupNormWeight.AllocTensor<float>();
+        AscendC::LocalTensor<float> group_norm_biasLocal = inQueueGroupNormBias.AllocTensor<float>();
+        AscendC::DataCopy(zLocal, zGm[batch_idx * out_features + offset], tileLength);
+        AscendC::DataCopy(group_norm_weightLocal, group_norm_weightGm[offset], tileLength);
+        AscendC::DataCopy(group_norm_biasLocal, group_norm_biasGm[offset], tileLength);
+        inQueueX.EnQue(zLocal);
+        inQueueGroupNormWeight.EnQue(group_norm_weightLocal);
+        inQueueGroupNormBias.EnQue(group_norm_biasLocal);
+    }
+
+    __aicore__ inline void ComputeGroupNorm(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> group_norm_weightLocal = inQueueGroupNormWeight.DeQue<float>();
+        AscendC::LocalTensor<float> group_norm_biasLocal = inQueueGroupNormBias.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal2 = outQueueZ.AllocTensor<float>();
+        AscendC::GroupNorm(zLocal2, zLocal, group_norm_weightLocal, group_norm_biasLocal, num_groups, tileLength);
+        outQueueZ.EnQue<float>(zLocal2);
+        inQueueX.FreeTensor(zLocal);
+        inQueueGroupNormWeight.FreeTensor(group_norm_weightLocal);
+        inQueueGroupNormBias.FreeTensor(group_norm_biasLocal);
+    }
+
+    __aicore__ inline void CopyOutGroupNorm(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[batch_idx * out_features + offset], zLocal, tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+    __aicore__ inline void CopyInSwish(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(zLocal, zGm[batch_idx * out_features + offset], tileLength);
+        inQueueX.EnQue(zLocal);
+    }
+
+    __aicore__ inline void ComputeSwish(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal2 = outQueueZ.AllocTensor<float>();
+        AscendC::Swish(zLocal2, zLocal, tileLength);
+        outQueueZ.EnQue<float>(zLocal2);
+        inQueueX.FreeTensor(zLocal);
+    }
+
+    __aicore__ inline void CopyOutSwish(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[batch_idx * out_features + offset], zLocal, tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+    __aicore__ inline void CopyInMultiply(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> multiply_weightLocal = inQueueMultiplyWeight.AllocTensor<float>();
+        AscendC::DataCopy(zLocal, zGm[batch_idx * out_features + offset], tileLength);
+        AscendC::DataCopy(multiply_weightLocal, multiply_weightGm[offset], tileLength);
+        inQueueX.EnQue(zLocal);
+        inQueueMultiplyWeight.EnQue(multiply_weightLocal);
+    }
+
+    __aicore__ inline void ComputeMultiply(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> multiply_weightLocal = inQueueMultiplyWeight.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal2 = outQueueZ.AllocTensor<float>();
+        AscendC::Mul(zLocal2, zLocal, multiply_weightLocal, tileLength);
+        outQueueZ.EnQue<float>(zLocal2);
+        inQueueX.FreeTensor(zLocal);
+        inQueueMultiplyWeight.FreeTensor(multiply_weightLocal);
+    }
+
+    __aicore__ inline void CopyOutMultiply(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[batch_idx * out_features + offset], zLocal, tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+    __aicore__ inline void CopyInSwish2(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(zLocal, zGm[batch_idx * out_features + offset], tileLength);
+        inQueueX.EnQue(zLocal);
+    }
+
+    __aicore__ inline void ComputeSwish2(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal2 = outQueueZ.AllocTensor<float>();
+        AscendC::Swish(zLocal2, zLocal, tileLength);
+        outQueueZ.EnQue<float>(zLocal2);
+        inQueueX.FreeTensor(zLocal);
+    }
+
+    __aicore__ inline void CopyOutSwish2(uint32_t batch_idx, uint32_t offset)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[batch_idx * out_features + offset], zLocal, tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueWeight, inQueueBias, inQueueGroupNormWeight, inQueueGroupNormBias, inQueueMultiplyWeight;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> weightGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> group_norm_weightGm;
+    AscendC::GlobalTensor<float> group_norm_biasGm;
+    AscendC::GlobalTensor<float> multiply_weightGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t batch_size;
+    uint32_t in_features;
+    uint32_t out_features;
+    uint32_t num_groups;
+    uint32_t blockLength;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void gemm_group_norm_swish_multiply_swish_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR group_norm_weight, GM_ADDR group_norm_bias, GM_ADDR multiply_weight, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGemmGroupNormSwishMultiplySwish op;
+    op.Init(x, weight, bias, group_norm_weight, group_norm_bias, multiply_weight, z,
+            tiling_data.batch_size, tiling_data.in_features, tiling_data.out_features, tiling_data.num_groups);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gemm_group_norm_swish_multiply_swish_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias,
+    const at::Tensor& group_norm_weight, const at::Tensor& group_norm_bias,
+    const at::Tensor& multiply_weight) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnGemmGroupNormSwishMultiplySwishCustom, x, weight, bias, group_norm_weight, group_norm_bias, multiply_weight, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gemm_group_norm_swish_multiply_swish_custom", &gemm_group_norm_swish_multiply_swish_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_group_norm_swish_multiply_swish_custom", &gemm_group_norm_swish_multiply_swish_custom_impl_npu, "GEMM + GroupNorm + Swish + Multiply + Swish");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_features, out_features, num_groups, multiply_weight_shape):
+        super(ModelNew, self).__init__()
+        self.gemm = torch.nn.Linear(in_features, out_features)
+        self.group_norm = torch.nn.GroupNorm(num_groups, out_features)
+        self.multiply_weight = torch.nn.Parameter(torch.randn(multiply_weight_shape))
+
+    def forward(self, x):
+        x = self.gemm(x)
+        x = self.group_norm(x)
+        x = x * torch.sigmoid(x)
+        x = x * self.multiply_weight
+        x = x * torch.sigmoid(x)
+        return x
+'''
+```

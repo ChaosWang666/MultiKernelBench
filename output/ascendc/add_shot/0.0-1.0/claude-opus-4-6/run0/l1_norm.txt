@@ -1,0 +1,681 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "L1NormCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(L1NormCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, dim);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(L1NormCustom, L1NormCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "l1_norm_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    L1NormCustomTilingData tiling;
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
+    uint32_t dim = xShape->GetStorageShape().GetDim(1);
+
+    // Each block processes some rows
+    uint32_t BLOCK_DIM = 32;
+    // tileNum controls how many tiles we split each row's dim into
+    // We want tileLength to be a multiple of 32 (256 bytes / 4 bytes per float = 64, but 32 is min alignment)
+    // Pick tileNum so that tileLength = dim / tileNum is reasonable
+    uint32_t tileNum = 1;
+    // We want each tile to fit in UB. UB is ~256KB, we need 2 buffers for input + 1 for output + 1 temp
+    // So max tile size ~ 64KB / 4 = 16384 floats
+    uint32_t maxTileSize = 16384;
+    if (dim > maxTileSize) {
+        tileNum = (dim + maxTileSize - 1) / maxTileSize;
+        // Round up tileNum so tileLength is aligned to 32
+        // Actually let's find tileNum such that dim / tileNum is aligned to 8 (32 bytes)
+        // Try to find a good tileNum
+        uint32_t tileLength = (dim + tileNum - 1) / tileNum;
+        // Align tileLength up to 8
+        tileLength = ((tileLength + 7) / 8) * 8;
+        tileNum = (dim + tileLength - 1) / tileLength;
+    }
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_dim(dim);
+    tiling.set_tileNum(tileNum);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class L1NormCustom : public OpDef {
+public:
+    explicit L1NormCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(L1NormCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelL1Norm {
+public:
+    __aicore__ inline KernelL1Norm() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t dim, uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->dim = dim;
+        this->tileNum = tileNum;
+
+        // Each block processes a subset of rows
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->rowsPerBlock = (batchSize + blockNum - 1) / blockNum;
+        this->startRow = blockIdx * this->rowsPerBlock;
+        this->endRow = startRow + rowsPerBlock;
+        if (this->endRow > batchSize) {
+            this->endRow = batchSize;
+        }
+
+        // Tile length for processing dim
+        this->tileLength = (dim + tileNum - 1) / tileNum;
+        // Align to 8 floats (32 bytes)
+        this->tileLength = ((this->tileLength + 7) / 8) * 8;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * (uint64_t)dim);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * (uint64_t)dim);
+
+        // Allocate buffers
+        // We need: inBuf for loading a tile, tmpBuf for abs, sumBuf for partial sum
+        pipe.InitBuffer(inQueue, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueue, BUFFER_NUM, this->tileLength * sizeof(float));
+        // For the reduction sum, we use a work buffer
+        pipe.InitBuffer(workBuf, 1, this->tileLength * sizeof(float));
+        // For scalar broadcasting
+        pipe.InitBuffer(scalarBuf, 1, this->tileLength * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t row = this->startRow; row < this->endRow; row++) {
+            ProcessRow(row);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessRow(uint32_t row)
+    {
+        uint64_t rowOffset = row * (uint64_t)this->dim;
+
+        // First pass: compute sum of abs values
+        AscendC::LocalTensor<float> sumLocal = workBuf.Get<float>();
+        // Initialize sum to 0
+        AscendC::Duplicate(sumLocal, (float)0.0f, this->tileLength);
+
+        uint32_t remaining = this->dim;
+        uint32_t offset = 0;
+        for (uint32_t t = 0; t < this->tileNum; t++) {
+            if (remaining == 0) break;
+            uint32_t curLen = this->tileLength;
+            if (curLen > remaining) {
+                curLen = remaining;
+            }
+            // Align curLen up to 8 for DataCopy
+            uint32_t copyLen = ((curLen + 7) / 8) * 8;
+            if (copyLen > this->tileLength) copyLen = this->tileLength;
+
+            AscendC::LocalTensor<float> inLocal = inQueue.AllocTensor<float>();
+            // Zero out the buffer first if copyLen > curLen to avoid garbage in padding
+            if (copyLen > curLen) {
+                AscendC::Duplicate(inLocal, (float)0.0f, copyLen);
+            }
+            AscendC::DataCopy(inLocal, xGm[rowOffset + offset], copyLen);
+            inQueue.EnQue(inLocal);
+
+            AscendC::LocalTensor<float> inLocal2 = inQueue.DeQue<float>();
+            // Compute abs
+            AscendC::Abs(inLocal2, inLocal2, copyLen);
+            // Add to sum
+            AscendC::Add(sumLocal, sumLocal, inLocal2, copyLen);
+            inQueue.FreeTensor(inLocal2);
+
+            offset += curLen;
+            remaining -= curLen;
+        }
+
+        // Now reduce sumLocal to a scalar
+        // sumLocal has tileLength elements, we need to sum them all
+        // Use ReduceSum
+        float totalSum = 0.0f;
+        // We'll do a reduction over the accumulated buffer
+        // The sumLocal contains partial sums across tiles, but they are element-wise accumulated
+        // Actually we need the total sum of all elements. Let's use AscendC::ReduceSum
+        AscendC::LocalTensor<float> scalarLocal = scalarBuf.Get<float>();
+        
+        // ReduceSum: reduce tileLength elements to 1
+        // Work tensor needs tileLength elements
+        // Actually we can just sum using a loop-based reduction or use the built-in
+        // Let's use a simpler approach: WholeReduceSum
+        float rowSum = 0.0f;
+        // Use block reduce approach
+        AscendC::LocalTensor<float> reduceResult = scalarLocal;
+        uint32_t reduceLen = this->tileLength;
+        // ReduceSum requires length to be power-of-2 friendly, let's do manual
+        // Actually AscendC::ReduceSum should work on aligned lengths
+        // Use the pattern: ReduceSum(dst, src, workLocal, reduceLen)
+        // dst should have at least reduceLen/8 elements as workspace
+        // This is complicated, let's just do a simpler approach
+        
+        // Copy sumLocal to a temp and repeatedly halve
+        // Or just use WholeReduceSum if available
+        // Let's try: sum all tileLength elements
+        // Since tileLength may be large, use AscendC vector reduce
+        
+        // Simple approach: repeatedly add halves
+        AscendC::Duplicate(reduceResult, (float)0.0f, this->tileLength);
+        AscendC::DataCopy(reduceResult, sumLocal, this->tileLength);
+        
+        uint32_t len = this->tileLength;
+        while (len > 1) {
+            uint32_t half = len / 2;
+            if (half == 0) break;
+            // Align half to 8
+            uint32_t alignedHalf = ((half + 7) / 8) * 8;
+            // Add second half to first half
+            // We need a view of the second half
+            AscendC::Add(reduceResult, reduceResult, reduceResult[half], alignedHalf);
+            len = half;
+        }
+        
+        // Now reduceResult[0] has the sum
+        // Compute mean = totalSum / dim
+        float meanVal;
+        // We can't easily read a single scalar, let's use Duplicate + Div approach
+        // Actually let's compute 1/mean and multiply
+        
+        // Compute reciprocal of (sum / dim) = dim / sum
+        // Use Muls to scale: result[i] = x[i] * dim / sum = x[i] / mean
+        // But we need the scalar sum first
+        
+        // Use a different strategy: store sum as a vector of same value, then divide
+        // AscendC::Muls(dst, src, scalar, len) - multiply by scalar
+        // But we need the scalar value...
+        
+        // Let's just use Div: y = x / meanTensor where meanTensor is broadcast
+        // First, let's get the sum into a scalar by using Muls with 1/dim
+        // Then broadcast it
+        
+        // Actually, a cleaner approach:
+        // After reduction, reduceResult[0] = sum of abs values
+        // We want to divide each element by (sum / dim) = multiply by (dim / sum)
+        // Use AscendC::Divs to divide reduceResult[0] by itself to get 1, then scale... no
+        
+        // Let's use the approach: broadcast the reduced sum, then divide
+        // Muls(reduceResult, reduceResult, 1.0f/dim, tileLength) then the first element = sum/dim = mean
+        // Then Duplicate to broadcast mean
+        // But we need to extract the scalar...
+        
+        // Better: use the sum tensor directly for division
+        // Let's prepare a "mean" tensor by: take reduceResult, Muls by 1/dim, then Duplicate from [0]
+        
+        // Simplest correct approach: use Div element-wise with a broadcast mean tensor
+        AscendC::Muls(reduceResult, reduceResult, 1.0f / (float)this->dim, 8);
+        // Now reduceResult[0] = mean value of abs
+        // Broadcast this to all elements
+        // Use AscendC::Duplicate... but we need the scalar value
+        // AscendC can't easily extract scalar from tensor
+        
+        // Alternative: use Brcb (broadcast) or just do Div with Adds trick
+        // Let me use a different approach for the whole row processing
+        
+        // Second pass: divide x by mean using the sumLocal
+        // We have sumLocal which is the accumulated abs values tile-wise
+        // That's NOT what we want - we need the TOTAL sum
+        
+        // Let me restructure: after reduction, reduceResult contains the total sum in element [0]
+        // (approximately, with some extra from padding, but padding was 0)
+        
+        // Use AscendC::BlockDataCopy or just reuse Brcb
+        // Actually: AscendC has Brcb(dst, src, ...) for broadcast copy
+        // Or we can do: Duplicate the first 8 elements across the whole tensor 
+        
+        // The simplest: copy element[0] block to all blocks
+        // reduceResult[0] has sum/dim = mean
+        // Use Brcb to broadcast
+        AscendC::BrcbRepeat(scalarLocal, reduceResult, this->tileLength / 8, 1, 8);
+        // Now scalarLocal is filled with the mean value
+        
+        // Second pass: divide each tile by mean
+        remaining = this->dim;
+        offset = 0;
+        for (uint32_t t = 0; t < this->tileNum; t++) {
+            if (remaining == 0) break;
+            uint32_t curLen = this->tileLength;
+            if (curLen > remaining) {
+                curLen = remaining;
+            }
+            uint32_t copyLen = ((curLen + 7) / 8) * 8;
+            if (copyLen > this->tileLength) copyLen = this->tileLength;
+
+            AscendC::LocalTensor<float> inLocal = inQueue.AllocTensor<float>();
+            AscendC::DataCopy(inLocal, xGm[rowOffset + offset], copyLen);
+            inQueue.EnQue(inLocal);
+
+            AscendC::LocalTensor<float> inLocal2 = inQueue.DeQue<float>();
+            AscendC::LocalTensor<float> outLocal = outQueue.AllocTensor<float>();
+            AscendC::Div(outLocal, inLocal2, scalarLocal, copyLen);
+            outQueue.EnQue(outLocal);
+            inQueue.FreeTensor(inLocal2);
+
+            AscendC::LocalTensor<float> outLocal2 = outQueue.DeQue<float>();
+            AscendC::DataCopy(yGm[rowOffset + offset], outLocal2, copyLen);
+            outQueue.FreeTensor(outLocal2);
+
+            offset += curLen;
+            remaining -= curLen;
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> workBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> scalarBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t dim;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t rowsPerBlock;
+    uint32_t startRow;
+    uint32_t endRow;
+};
+
+extern "C" __global__ __aicore__ void l1_norm_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelL1Norm op;
+    op.Init(x, y, tiling_data.batchSize, tiling_data.dim, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor l1_norm_custom_impl_npu(const at::Tensor& x) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnL1NormCustom, x, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("l1_norm_custom", &l1_norm_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("l1_norm_custom", &l1_norm_custom_impl_npu, "L1 normalization custom");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x):
+        return custom_ops_lib.l1_norm_custom(x)
+'''
+```
+
+Wait, let me reconsider the kernel. The `BrcbRepeat` API might not exist exactly as I wrote it, and the reduction approach is fragile. Let me rewrite with a cleaner, more correct kernel:
+
+```python
+project_json_src='''
+[
+    {
+        "op": "L1NormCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(L1NormCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, dim);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(L1NormCustom, L1NormCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "l1_norm_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    L1NormCustomTilingData tiling;
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
+    uint32_t dim = xShape->GetStorageShape().GetDim(1);
+
+    uint32_t BLOCK_DIM = 32;
+
+    // Choose tileNum so each tile fits in UB
+    // UB budget: ~192KB usable, we need multiple buffers
+    // 4 buffers of tileLength floats each: inQueue(2) + outQueue(2) + workBuf + scalarBuf = ~6 buffers
+    // Be conservative: max tile = 8192 floats = 32KB per buffer, 6*32KB = 192KB
+    uint32_t maxTileFloats = 8192;
+    uint32_t tileNum = 1;
+    // Align dim processing to 8 floats (32 bytes)
+    uint32_t alignedDim = ((dim + 7) / 8) * 8;
+    if (alignedDim > maxTileFloats) {
+        tileNum = (alignedDim + maxTileFloats - 1) / maxTileFloats;
+    }
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_dim(dim);
+    tiling.set_tileNum(tileNum);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class L1NormCustom : public OpDef {
+public:
+    explicit L1NormCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(L1NormCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelL1Norm {
+public:
+    __aicore__ inline KernelL1Norm() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t dim, uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->dim = dim;
+        this->tileNum = tileNum;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->rowsPerBlock = (batchSize + blockNum - 1) / blockNum;
+        this->startRow = blockIdx * this->rowsPerBlock;
+        this->endRow = startRow + rowsPerBlock;
+        if (this->endRow > batchSize) {
+            this->endRow = batchSize;
+        }
+
+        // Compute aligned tile length
+        uint32_t alignedDim = ((dim + 7) / 8) * 8;
+        this->tileLength = (alignedDim + tileNum - 1) / tileNum;
+        this->tileLength = ((this->tileLength + 7) / 8) * 8;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, (uint64_t)batchSize * dim);
+        yGm.SetGlobalBuffer((__gm__ float *)y, (uint64_t)batchSize * dim);
+
+        pipe.InitBuffer(inQueue, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueue, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(accumBuf, 1, this->tileLength * sizeof(float));
+        pipe.InitBuffer(meanBuf, 1, this->tileLength * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t row = this->startRow; row < this->endRow; row++) {
+            ProcessRow(row);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessRow(uint32_t row)
+    {
+        uint64_t rowOffset = (uint64_t)row * this->dim;
+        AscendC::LocalTensor<float> accumLocal = accumBuf.Get<float>();
+
+        // First pass: compute sum of |x|
+        AscendC::Duplicate(accumLocal, 0.0f, this->tileLength);
+        AscendC::PipeBarrier<PIPE_V>();
+
+        uint32_t remaining = this->dim;
+        uint32_t offset = 0;
+        for (uint32_t t = 0; t < this->tileNum; t++) {
+            if (remaining == 0) break;
+            uint32_t curLen = remaining;
+            if (curLen > this->tileLength) curLen = this->tileLength;
+            uint32_t copyLen = ((curLen + 7) / 8) * 8;
+
+            AscendC::LocalTensor<float> inLocal = inQueue.AllocTensor<float>();
+            if (copyLen > curLen) {
+                AscendC::Duplicate(inLocal, 0.0f, copyLen);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
+            AscendC::DataCopy(inLocal, xGm[rowOffset + offset], copyLen);
+            inQueue.EnQue(inLocal);
+
+            AscendC::LocalTensor<float> xLocal = inQueue.DeQue<float>();
+            AscendC::Abs(xLocal, xLocal, copyLen);
+            AscendC::Add(accumLocal, accumLocal, xLocal, copyLen);
+            inQueue.FreeTensor(xLocal);
+
+            offset += curLen;
+            remaining -= curLen;
+        }
+
+        // Reduce accumLocal to get total sum
+        // Sum over tileLength elements by halving
+        AscendC::PipeBarrier<PIPE_V>();
+        uint32_t len = this->tileLength;
+        while (len > 8) {
+            uint32_t half = len / 2;
+            uint32_t alignedHalf = ((half + 7) / 8) * 8;
+            for (uint32_t i = 0; i < alignedHalf; i += 8) {
+                if (i + half < len) {
+                    // nothing special
+                }
+            }
+            AscendC::Add(accumLocal, accumLocal, accumLocal[half], alignedHalf);
+            AscendC::PipeBarrier<PIPE_V>();
+            len = half;
+        }
+        // Now first 8 elements contain partial sums, reduce last 8
+        // Sum 8 elements: use ReduceSum or manual
+        // ReduceSum over 8 elements
+        float totalAbsSum = 0.0f;
+        // Use AscendC::ReduceSum
+        AscendC::LocalTensor<float> meanLocal = meanBuf.Get<float>();
+        
+        // Reduce the last 8 elements
+        // accumLocal[0..7] has 8 partial sums
+        // A simpler approach: use WholeReduceSum or manually
+        // Let's use Adds pattern:
+        // [a0,a1,a2,a3,a4,a5,a6,a7]
+        // After Add(acc, acc, acc[4], 8): [a0+a4, a1+a5, a2+a6, a3+a7, ...]
+        // But we can't offset by 4 easily with 8-alignment...
+        // Actually we can just use ReduceSum on 8 elements
+        AscendC::ReduceSum(meanLocal, accumLocal, accumLocal, 8);
+        
+        // meanLocal[0] now contains the sum
+        // Compute mean = sum / dim, then we need 1/mean for multiplication
+        // Divs: divide scalar into vector
+        AscendC::Muls(meanLocal, meanLocal, 1.0f / (float)this->dim, 8);
+        AscendC::PipeBarrier<PIPE_V>();
+        
+        // Now meanLocal[0] = mean of abs values
+        // Broadcast mean to all tileLength elements
+        // Use Duplicate with a known scalar is not possible since meanLocal[0] isn't accessible as C++ float
+        // Instead, use Brcb to replicate the first data block
+        
+        // Alternative: use Div(outLocal, inLocal, meanBroadcast, len) where meanBroadcast is filled with mean
+        // We can fill meanLocal with the mean value using BrcbRepeat
+        // BrcbRepeat: copies first block (32B = 8 floats) repeatedly
+        uint32_t repeatTimes = this->tileLength / 8;
+        if (repeatTimes > 1) {
+            uint32_t srcStride

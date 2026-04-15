@@ -1,0 +1,45 @@
+{
+  "MatmulForLowerTriangularMatricesCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "a",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "b",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "c",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "MatmulForLowerTriangularMatricesCustom/d=0,p=1/0,2/0,2/0,2",
+          "MatmulForLowerTriangularMatricesCustom/d=0,p=0/0,2/0,2/0,2",
+          "MatmulForLowerTriangularMatricesCustom/d=1,p=1/0,2/0,2/0,2",
+          "MatmulForLowerTriangularMatricesCustom/d=1,p=0/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/matmul_for_lower_triangular_matrices_custom/MatmulForLowerTriangularMatricesCustom_8ad064f376a833a7ab6a8ef6275cceba.o",
+        "jsonPath": "ascend910b/matmul_for_lower_triangular_matrices_custom/MatmulForLowerTriangularMatricesCustom_8ad064f376a833a7ab6a8ef6275cceba.json"
+      }
+    ]
+  }
+}

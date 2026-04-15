@@ -1,0 +1,41 @@
+
+[
+    {
+        "op": "ConvTransposed3dAsymmetricInputSquareKernelCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "OIJK"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]

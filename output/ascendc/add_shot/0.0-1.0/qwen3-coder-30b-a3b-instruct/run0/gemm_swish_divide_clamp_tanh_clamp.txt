@@ -1,0 +1,297 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "GemmSwishDivideClampTanhClampCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "optional",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GemmSwishDivideClampTanhClampCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batch);
+  TILING_DATA_FIELD_DEF(uint32_t, inFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, outFeatures);
+  TILING_DATA_FIELD_DEF(bool, hasBias);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GemmSwishDivideClampTanhClampCustom, GemmSwishDivideClampTanhClampCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "gemm_swish_divide_clamp_tanh_clamp_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 4096;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+
+    GemmSwishDivideClampTanhClampCustomTilingData tiling;
+    uint32_t batch = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    uint32_t inFeatures = context->GetInputShape(0)->GetOriginShape().GetDim(1);
+    uint32_t outFeatures = context->GetOutputShape(0)->GetOriginShape().GetDim(1);
+    bool hasBias = context->GetInputShape(2) != nullptr;
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batch(batch);
+    tiling.set_inFeatures(inFeatures);
+    tiling.set_outFeatures(outFeatures);
+    tiling.set_hasBias(hasBias);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    const gert::Shape* weight_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDim(0, x1_shape->GetOriginShape().GetDim(0));
+    y_shape->SetDim(1, weight_shape->GetOriginShape().GetDim(0));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class GemmSwishDivideClampTanhClampCustom : public OpDef {
+public:
+    explicit GemmSwishDivideClampTanhClampCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(GemmSwishDivideClampTanhClampCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+
+class KernelGemmSwishDivideClampTanhClamp {
+public:
+    __aicore__ inline KernelGemmSwishDivideClampTanhClamp() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, uint32_t batch, uint32_t inFeatures, uint32_t outFeatures, bool hasBias)
+    {
+        this->batch = batch;
+        this->inFeatures = inFeatures;
+        this->outFeatures = outFeatures;
+        this->hasBias = hasBias;
+        this->blockLength = inFeatures;
+        this->tileNum = 4096;
+        this->tileLength = this->blockLength / this->tileNum / BUFFER_NUM;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batch * inFeatures);
+        weightGm.SetGlobalBuffer((__gm__ float *)weight, inFeatures * outFeatures);
+        if (hasBias) {
+            biasGm.SetGlobalBuffer((__gm__ float *)bias, outFeatures);
+        }
+        yGm.SetGlobalBuffer((__gm__ float *)y, batch * outFeatures);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->tileLength * outFeatures * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, outFeatures * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        for (uint32_t i = 0; i < batch; i++) {
+            Gemm(i);
+        }
+    }
+
+private:
+    __aicore__ inline void Gemm(uint32_t batchId)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> weightLocal = inQueueWeight.AllocTensor<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+        AscendC::GlobalTensor<float> xBatch = xGm[batchId * inFeatures];
+        AscendC::GlobalTensor<float> yBatch = yGm[batchId * outFeatures];
+
+        // Perform GEMM operation
+        AscendC::MatMul(yLocal, xBatch, weightGm, biasGm, false, false, outFeatures, inFeatures, 1, hasBias);
+        
+        // Apply Swish activation: x * sigmoid(x)
+        AscendC::Sigmoid(yLocal, yLocal, outFeatures);
+        AscendC::Mul(yLocal, yLocal, xBatch, outFeatures);
+        
+        // Divide by 2.0
+        AscendC::ScalarDiv(yLocal, yLocal, 2.0f, outFeatures);
+        
+        // Clamp between -1.0 and 1.0
+        AscendC::Clip(yLocal, yLocal, -1.0f, 1.0f, outFeatures);
+        
+        // Tanh activation
+        AscendC::Tanh(yLocal, yLocal, outFeatures);
+        
+        // Clamp again between -1.0 and 1.0
+        AscendC::Clip(yLocal, yLocal, -1.0f, 1.0f, outFeatures);
+        
+        AscendC::DataCopy(yBatch, yLocal, outFeatures);
+        inQueueX.FreeTensor(xLocal);
+        inQueueWeight.FreeTensor(weightLocal);
+        outQueueY.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueWeight;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> weightGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batch;
+    uint32_t inFeatures;
+    uint32_t outFeatures;
+    bool hasBias;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void gemm_swish_divide_clamp_tanh_clamp_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGemmSwishDivideClampTanhClamp op;
+    op.Init(x, weight, bias, y, tiling_data.batch, tiling_data.inFeatures, tiling_data.outFeatures, tiling_data.hasBias);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gemm_swish_divide_clamp_tanh_clamp_custom_impl_npu(const at::Tensor& self, const at::Tensor& weight, const c10::optional<at::Tensor>& bias) {
+    at::Tensor result = at::empty({self.size(0), weight.size(0)}, at::TensorOptions(at::kFloat).device(at::kNPU));
+    if (bias.has_value()) {
+        EXEC_NPU_CMD(aclnnGemmSwishDivideClampTanhClampCustom, self, weight, bias.value(), result);
+    } else {
+        EXEC_NPU_CMD(aclnnGemmSwishDivideClampTanhClampCustom, self, weight, at::Tensor(), result);
+    }
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gemm_swish_divide_clamp_tanh_clamp_custom", &gemm_swish_divide_clamp_tanh_clamp_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_swish_divide_clamp_tanh_clamp_custom", &gemm_swish_divide_clamp_tanh_clamp_custom_impl_npu, "GEMM + Swish + Divide + Clamp + Tanh + Clamp");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_features, out_features, bias=True):
+        super(ModelNew, self).__init__()
+        self.weight = torch.nn.Parameter(torch.rand(out_features, in_features))
+        if bias:
+            self.bias = torch.nn.Parameter(torch.rand(out_features))
+        else:
+            self.register_parameter('bias', None)
+
+    def forward(self, x):
+        if self.bias is not None:
+            return custom_ops_lib.gemm_swish_divide_clamp_tanh_clamp_custom(x, self.weight, self.bias)
+        else:
+            return custom_ops_lib.gemm_swish_divide_clamp_tanh_clamp_custom(x, self.weight, None)
+'''
+```

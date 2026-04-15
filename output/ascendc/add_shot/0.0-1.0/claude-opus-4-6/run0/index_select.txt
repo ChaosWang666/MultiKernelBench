@@ -1,0 +1,293 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "IndexSelectCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "indices",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "int32"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "dim",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "numRows",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "numCols",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "numIndices",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(IndexSelectCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, dim);
+  TILING_DATA_FIELD_DEF(uint32_t, numRows);
+  TILING_DATA_FIELD_DEF(uint32_t, numCols);
+  TILING_DATA_FIELD_DEF(uint32_t, numIndices);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(IndexSelectCustom, IndexSelectCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "index_select_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    IndexSelectCustomTilingData tiling;
+
+    const gert::RuntimeAttrs* attrs = context->GetAttrs();
+    uint32_t dim = *(attrs->GetAttrPointer<uint32_t>(0));
+    uint32_t numRows = *(attrs->GetAttrPointer<uint32_t>(1));
+    uint32_t numCols = *(attrs->GetAttrPointer<uint32_t>(2));
+    uint32_t numIndices = *(attrs->GetAttrPointer<uint32_t>(3));
+
+    uint32_t blockDim = 32;
+    context->SetBlockDim(blockDim);
+
+    tiling.set_dim(dim);
+    tiling.set_numRows(numRows);
+    tiling.set_numCols(numCols);
+    tiling.set_numIndices(numIndices);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* idx_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+
+    const gert::RuntimeAttrs* attrs = context->GetAttrs();
+    uint32_t dim = *(attrs->GetAttrPointer<uint32_t>(0));
+
+    int64_t ndim = x_shape->GetDimNum();
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i == (int64_t)dim) {
+            y_shape->SetDim(i, idx_shape->GetDim(0));
+        } else {
+            y_shape->SetDim(i, x_shape->GetDim(i));
+        }
+    }
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class IndexSelectCustom : public OpDef {
+public:
+    explicit IndexSelectCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("indices")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("dim")
+            .AttrType(REQUIRED)
+            .Int();
+        this->Attr("numRows")
+            .AttrType(REQUIRED)
+            .Int();
+        this->Attr("numCols")
+            .AttrType(REQUIRED)
+            .Int();
+        this->Attr("numIndices")
+            .AttrType(REQUIRED)
+            .Int();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(IndexSelectCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+extern "C" __global__ __aicore__ void index_select_custom(GM_ADDR x, GM_ADDR indices, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+
+    uint32_t dim = tiling_data.dim;
+    uint32_t numRows = tiling_data.numRows;
+    uint32_t numCols = tiling_data.numCols;
+    uint32_t numIndices = tiling_data.numIndices;
+
+    uint32_t blockIdx = AscendC::GetBlockIdx();
+    uint32_t numBlocks = AscendC::GetBlockNum();
+
+    // For dim==1: x is [numRows, numCols], output is [numRows, numIndices]
+    // Each block processes a subset of rows
+    // For dim==0: x is [numRows, numCols], output is [numIndices, numCols]
+    // Each block processes a subset of indices
+
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<int32_t> indicesGm;
+    AscendC::GlobalTensor<float> yGm;
+
+    xGm.SetGlobalBuffer((__gm__ float*)x, numRows * numCols);
+    indicesGm.SetGlobalBuffer((__gm__ int32_t*)indices, numIndices);
+    yGm.SetGlobalBuffer((__gm__ float*)y, numRows * numIndices);
+
+    if (dim == 1) {
+        // Output shape: [numRows, numIndices]
+        // Total work items = numRows * numIndices
+        // We distribute rows across blocks
+        uint32_t rowsPerBlock = (numRows + numBlocks - 1) / numBlocks;
+        uint32_t rowStart = blockIdx * rowsPerBlock;
+        uint32_t rowEnd = rowStart + rowsPerBlock;
+        if (rowEnd > numRows) rowEnd = numRows;
+
+        // We need to read indices into local memory
+        // Process each row assigned to this block
+        for (uint32_t row = rowStart; row < rowEnd; row++) {
+            for (uint32_t j = 0; j < numIndices; j++) {
+                int32_t idx = indicesGm.GetValue(j);
+                float val = xGm.GetValue(row * numCols + idx);
+                yGm.SetValue(row * numIndices + j, val);
+            }
+        }
+    } else {
+        // dim == 0
+        // Output shape: [numIndices, numCols]
+        uint32_t idxPerBlock = (numIndices + numBlocks - 1) / numBlocks;
+        uint32_t idxStart = blockIdx * idxPerBlock;
+        uint32_t idxEnd = idxStart + idxPerBlock;
+        if (idxEnd > numIndices) idxEnd = numIndices;
+
+        for (uint32_t i = idxStart; i < idxEnd; i++) {
+            int32_t srcRow = indicesGm.GetValue(i);
+            for (uint32_t c = 0; c < numCols; c++) {
+                float val = xGm.GetValue(srcRow * numCols + c);
+                yGm.SetValue(i * numCols + c, val);
+            }
+        }
+    }
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor index_select_custom_impl_npu(const at::Tensor& x, const at::Tensor& indices, int64_t dim, int64_t numRows, int64_t numCols, int64_t numIndices) {
+    // Compute output shape
+    auto sizes = x.sizes().vec();
+    sizes[dim] = numIndices;
+    at::Tensor result = at::empty(sizes, x.options());
+    EXEC_NPU_CMD(aclnnIndexSelectCustom, x, indices, result, dim, numRows, numCols, numIndices);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("index_select_custom", &index_select_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("index_select_custom", &index_select_custom_impl_npu, "index_select custom op");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x, indices):
+        dim = 1
+        numRows = x.shape[0]
+        numCols = x.shape[1]
+        numIndices = indices.shape[0]
+        indices_int32 = indices.to(torch.int32)
+        return custom_ops_lib.index_select_custom(x, indices_int32, dim, numRows, numCols, numIndices)
+'''
+```

@@ -1,0 +1,307 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "KlDivLossCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "log_predictions",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "targets",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "loss",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(KlDivLossCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(KlDivLossCustom, KlDivLossCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "kl_div_loss_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 4096;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    KlDivLossCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    uint32_t batchSize = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.set_batchSize(batchSize);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    // Output is a scalar (1 element)
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = gert::Shape({1});
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class KlDivLossCustom : public OpDef {
+public:
+    explicit KlDivLossCustom(const char* name) : OpDef(name)
+    {
+        this->Input("log_predictions")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("targets")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("loss")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(KlDivLossCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelKlDivLoss {
+public:
+    __aicore__ inline KernelKlDivLoss() {}
+    __aicore__ inline void Init(GM_ADDR log_predictions, GM_ADDR targets, GM_ADDR loss,
+                                 uint32_t totalLength, uint32_t tileNum, uint32_t batchSize)
+    {
+        this->totalLength = totalLength;
+        this->batchSize = batchSize;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+
+        logPredGm.SetGlobalBuffer((__gm__ float *)log_predictions + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        targetsGm.SetGlobalBuffer((__gm__ float *)targets + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        lossGm.SetGlobalBuffer((__gm__ float *)loss, 1);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
+
+        this->partialSum = 0.0f;
+    }
+
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+        // Write partial sum for this block to lossGm using atomic add
+        // We'll use block 0 to aggregate; each block atomically adds
+        // For simplicity, write partial sums to the output and let host handle,
+        // or use AtomicAdd. We'll do a simple approach: write to lossGm[blockIdx]
+        // Actually, lossGm is only 1 element. Let's use a different strategy.
+        // We accumulate partialSum per block and use AtomicAdd to lossGm[0].
+        
+        // Use pipe to write partial sum
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+        tmpLocal.SetValue(0, this->partialSum);
+        AscendC::SetAtomicAdd<float>();
+        AscendC::DataCopy(lossGm[0], tmpLocal, 1);
+        AscendC::SetAtomicNone();
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> yLocal = inQueueY.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, logPredGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(yLocal, targetsGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+        inQueueY.EnQue(yLocal);
+    }
+
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = inQueueY.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+
+        // KL divergence: targets * (log(targets) - log_predictions)
+        // = targets * log(targets) - targets * log_predictions
+        // Using the PyTorch convention for kl_div with log input:
+        // loss = exp(log_predictions) - targets * log_predictions  ... No.
+        // Actually torch.nn.functional.kl_div(log_input, target, reduction='batchmean')
+        // = sum(target * (log(target) - log_input)) / batch_size
+        // But PyTorch kl_div actually computes: target * (log(target) - input) where input = log(predictions)
+        // The formula is: F.kl_div(input, target) = target * (log(target) - input)
+        // So element-wise: target_i * log(target_i) - target_i * input_i
+        
+        // Compute: targets * log(targets) - targets * log_predictions
+        // zLocal = targets * log(targets) - targets * log_predictions
+
+        // tmp = log(targets)
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+        AscendC::Ln(tmpLocal, yLocal, this->tileLength);
+        // tmp = targets * log(targets)
+        AscendC::Mul(tmpLocal, yLocal, tmpLocal, this->tileLength);
+        // zLocal = targets * log_predictions
+        AscendC::Mul(zLocal, yLocal, xLocal, this->tileLength);
+        // zLocal = targets * log(targets) - targets * log_predictions
+        AscendC::Sub(zLocal, tmpLocal, zLocal, this->tileLength);
+
+        // Accumulate sum
+        float tileSum = 0.0f;
+        for (uint32_t i = 0; i < this->tileLength; i++) {
+            tileSum += zLocal.GetValue(i);
+        }
+        this->partialSum += tileSum;
+
+        outQueueZ.EnQue<float>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+        inQueueY.FreeTensor(yLocal);
+    }
+
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<float> logPredGm;
+    AscendC::GlobalTensor<float> targetsGm;
+    AscendC::GlobalTensor<float> lossGm;
+    uint32_t totalLength;
+    uint32_t batchSize;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    float partialSum;
+};
+
+extern "C" __global__ __aicore__ void kl_div_loss_custom(GM_ADDR log_predictions, GM_ADDR targets, GM_ADDR loss, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelKlDivLoss op;
+    op.Init(log_predictions, targets, loss, tiling_data.totalLength, tiling_data.tileNum, tiling_data.batchSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor kl_div_loss_custom_impl_npu(const at::Tensor& log_predictions, const at::Tensor& targets) {
+    at::Tensor result = at::zeros({1}, log_predictions.options());
+    EXEC_NPU_CMD(aclnnKlDivLossCustom, log_predictions, targets, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("kl_div_loss_custom", &kl_div_loss_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("kl_div_loss_custom", &kl_div_loss_custom_impl_npu, "KL Divergence Loss Custom");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model that computes Kullback-Leibler Divergence using custom AscendC kernel.
+    """
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        log_predictions = torch.log(predictions)
+        result = custom_ops_lib.kl_div_loss_custom(log_predictions, targets)
+        batch_size = predictions.shape[0]
+        return result / batch_size
+'''
+```

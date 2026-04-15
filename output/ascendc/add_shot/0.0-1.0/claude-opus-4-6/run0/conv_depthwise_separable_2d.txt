@@ -1,0 +1,463 @@
+
+
+Looking at this architecture, I need to implement a depthwise-separable 2D convolution as a fused custom AscendC kernel. This involves:
+1. A depthwise convolution (each input channel convolved independently)
+2. A pointwise (1x1) convolution
+
+Let me create the six required source strings:
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvDepthwiseSeparable2dCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "dw_weight",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "pw_weight",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "batch_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "height",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "width",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "stride",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "padding",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "dilation",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvDepthwiseSeparable2dCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, height);
+  TILING_DATA_FIELD_DEF(uint32_t, width);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, stride);
+  TILING_DATA_FIELD_DEF(uint32_t, padding);
+  TILING_DATA_FIELD_DEF(uint32_t, dilation);
+  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, totalOutputElements);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvDepthwiseSeparable2dCustom, ConvDepthwiseSeparable2dCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_depthwise_separable_2d_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvDepthwiseSeparable2dCustomTilingData tiling;
+
+    const uint32_t batchSize = *(context->GetAttrs()->GetAttrPointer<int>(0));
+    const uint32_t inChannels = *(context->GetAttrs()->GetAttrPointer<int>(1));
+    const uint32_t outChannels = *(context->GetAttrs()->GetAttrPointer<int>(2));
+    const uint32_t height = *(context->GetAttrs()->GetAttrPointer<int>(3));
+    const uint32_t width = *(context->GetAttrs()->GetAttrPointer<int>(4));
+    const uint32_t kernelSize = *(context->GetAttrs()->GetAttrPointer<int>(5));
+    const uint32_t stride = *(context->GetAttrs()->GetAttrPointer<int>(6));
+    const uint32_t padding = *(context->GetAttrs()->GetAttrPointer<int>(7));
+    const uint32_t dilation = *(context->GetAttrs()->GetAttrPointer<int>(8));
+
+    uint32_t outHeight = (height + 2 * padding - dilation * (kernelSize - 1) - 1) / stride + 1;
+    uint32_t outWidth = (width + 2 * padding - dilation * (kernelSize - 1) - 1) / stride + 1;
+    uint32_t totalOutputElements = batchSize * outChannels * outHeight * outWidth;
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_height(height);
+    tiling.set_width(width);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_stride(stride);
+    tiling.set_padding(padding);
+    tiling.set_dilation(dilation);
+    tiling.set_outHeight(outHeight);
+    tiling.set_outWidth(outWidth);
+    tiling.set_totalOutputElements(totalOutputElements);
+
+    uint32_t BLOCK_DIM = 32;
+    context->SetBlockDim(BLOCK_DIM);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+
+    // workspace for depthwise intermediate output
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = (size_t)batchSize * inChannels * outHeight * outWidth * sizeof(float);
+
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvDepthwiseSeparable2dCustom : public OpDef {
+public:
+    explicit ConvDepthwiseSeparable2dCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("dw_weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("pw_weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Attr("batch_size").AttrType(REQUIRED).Int();
+        this->Attr("in_channels").AttrType(REQUIRED).Int();
+        this->Attr("out_channels").AttrType(REQUIRED).Int();
+        this->Attr("height").AttrType(REQUIRED).Int();
+        this->Attr("width").AttrType(REQUIRED).Int();
+        this->Attr("kernel_size").AttrType(REQUIRED).Int();
+        this->Attr("stride").AttrType(REQUIRED).Int();
+        this->Attr("padding").AttrType(REQUIRED).Int();
+        this->Attr("dilation").AttrType(REQUIRED).Int();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvDepthwiseSeparable2dCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+// Depthwise separable convolution kernel
+// Phase 1: Depthwise convolution - each core handles a subset of (batch, channel) pairs
+// Phase 2: Pointwise convolution - each core handles a subset of output elements
+
+extern "C" __global__ __aicore__ void conv_depthwise_separable_2d_custom(
+    GM_ADDR x, GM_ADDR dw_weight, GM_ADDR pw_weight, GM_ADDR y,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(t, tiling);
+
+    uint32_t batchSize = t.batchSize;
+    uint32_t inChannels = t.inChannels;
+    uint32_t outChannels = t.outChannels;
+    uint32_t H = t.height;
+    uint32_t W = t.width;
+    uint32_t K = t.kernelSize;
+    uint32_t S = t.stride;
+    uint32_t P = t.padding;
+    uint32_t D = t.dilation;
+    uint32_t OH = t.outHeight;
+    uint32_t OW = t.outWidth;
+
+    uint32_t blockIdx = AscendC::GetBlockIdx();
+    uint32_t blockNum = AscendC::GetBlockNum();
+
+    // Global memory tensors
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> dwGm;
+    AscendC::GlobalTensor<float> pwGm;
+    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<float> dwOutGm; // workspace for depthwise output
+
+    xGm.SetGlobalBuffer((__gm__ float*)x, batchSize * inChannels * H * W);
+    dwGm.SetGlobalBuffer((__gm__ float*)dw_weight, inChannels * 1 * K * K);
+    pwGm.SetGlobalBuffer((__gm__ float*)pw_weight, outChannels * inChannels * 1 * 1);
+    yGm.SetGlobalBuffer((__gm__ float*)y, batchSize * outChannels * OH * OW);
+    dwOutGm.SetGlobalBuffer((__gm__ float*)workspace, batchSize * inChannels * OH * OW);
+
+    // Phase 1: Depthwise convolution
+    // Total work items = batchSize * inChannels
+    uint32_t totalDwWork = batchSize * inChannels;
+    uint32_t dwWorkPerBlock = (totalDwWork + blockNum - 1) / blockNum;
+    uint32_t dwStart = blockIdx * dwWorkPerBlock;
+    uint32_t dwEnd = dwStart + dwWorkPerBlock;
+    if (dwEnd > totalDwWork) dwEnd = totalDwWork;
+
+    // Pipe and buffers for depthwise phase
+    AscendC::TPipe pipe;
+
+    for (uint32_t idx = dwStart; idx < dwEnd; idx++) {
+        uint32_t b = idx / inChannels;
+        uint32_t c = idx % inChannels;
+
+        // For each output spatial position
+        for (uint32_t oh = 0; oh < OH; oh++) {
+            for (uint32_t ow = 0; ow < OW; ow++) {
+                float sum = 0.0f;
+                for (uint32_t kh = 0; kh < K; kh++) {
+                    for (uint32_t kw = 0; kw < K; kw++) {
+                        int32_t ih = (int32_t)(oh * S + kh * D) - (int32_t)P;
+                        int32_t iw = (int32_t)(ow * S + kw * D) - (int32_t)P;
+                        if (ih >= 0 && ih < (int32_t)H && iw >= 0 && iw < (int32_t)W) {
+                            uint32_t xIdx = b * inChannels * H * W + c * H * W + (uint32_t)ih * W + (uint32_t)iw;
+                            uint32_t wIdx = c * K * K + kh * K + kw;
+                            float xVal = xGm.GetValue(xIdx);
+                            float wVal = dwGm.GetValue(wIdx);
+                            sum += xVal * wVal;
+                        }
+                    }
+                }
+                uint32_t outIdx = b * inChannels * OH * OW + c * OH * OW + oh * OW + ow;
+                dwOutGm.SetValue(outIdx, sum);
+            }
+        }
+    }
+
+    // Barrier (sync between phases) - all blocks must complete depthwise before pointwise
+    // Since we can't do cross-block sync easily, we'll do both phases in same block
+    // by partitioning the pointwise work per block as well
+    // For correctness, each block's pointwise must only read dwOut data it computed
+    // This is tricky - instead, let's fuse: each block does its own dw outputs then pw
+
+    // Phase 2: Pointwise convolution
+    // Total work items = batchSize * outChannels * OH * OW
+    // But we need dwOut fully computed first. With no cross-block sync,
+    // we restructure: each block handles a set of batch items fully (both phases)
+
+    // Actually let's re-approach: partition by batch.
+    // Each block handles ceil(batchSize/blockNum) batches, doing full dw then pw.
+
+    // We'll redo the computation logic:
+    // Reset and re-partition by batch
+    uint32_t batchPerBlock = (batchSize + blockNum - 1) / blockNum;
+    uint32_t bStart = blockIdx * batchPerBlock;
+    uint32_t bEnd = bStart + batchPerBlock;
+    if (bEnd > batchSize) bEnd = batchSize;
+
+    // Redo depthwise for our batch slice (overwrite the first pass - simple approach)
+    for (uint32_t b = bStart; b < bEnd; b++) {
+        for (uint32_t c = 0; c < inChannels; c++) {
+            for (uint32_t oh = 0; oh < OH; oh++) {
+                for (uint32_t ow = 0; ow < OW; ow++) {
+                    float sum = 0.0f;
+                    for (uint32_t kh = 0; kh < K; kh++) {
+                        for (uint32_t kw = 0; kw < K; kw++) {
+                            int32_t ih = (int32_t)(oh * S + kh * D) - (int32_t)P;
+                            int32_t iw = (int32_t)(ow * S + kw * D) - (int32_t)P;
+                            if (ih >= 0 && ih < (int32_t)H && iw >= 0 && iw < (int32_t)W) {
+                                uint32_t xIdx = b * inChannels * H * W + c * H * W + (uint32_t)ih * W + (uint32_t)iw;
+                                uint32_t wIdx = c * K * K + kh * K + kw;
+                                float xVal = xGm.GetValue(xIdx);
+                                float wVal = dwGm.GetValue(wIdx);
+                                sum += xVal * wVal;
+                            }
+                        }
+                    }
+                    uint32_t outIdx = b * inChannels * OH * OW + c * OH * OW + oh * OW + ow;
+                    dwOutGm.SetValue(outIdx, sum);
+                }
+            }
+        }
+
+        // Pointwise for this batch item
+        for (uint32_t oc = 0; oc < outChannels; oc++) {
+            for (uint32_t oh = 0; oh < OH; oh++) {
+                for (uint32_t ow = 0; ow < OW; ow++) {
+                    float sum = 0.0f;
+                    for (uint32_t ic = 0; ic < inChannels; ic++) {
+                        uint32_t dwIdx = b * inChannels * OH * OW + ic * OH * OW + oh * OW + ow;
+                        uint32_t pwIdx = oc * inChannels + ic;
+                        float dwVal = dwOutGm.GetValue(dwIdx);
+                        float pwVal = pwGm.GetValue(pwIdx);
+                        sum += dwVal * pwVal;
+                    }
+                    uint32_t yIdx = b * outChannels * OH * OW + oc * OH * OW + oh * OW + ow;
+                    yGm.SetValue(yIdx, sum);
+                }
+            }
+        }
+    }
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_depthwise_separable_2d_custom_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& dw_weight,
+    const at::Tensor& pw_weight,
+    int64_t batch_size,
+    int64_t in_channels,
+    int64_t out_channels,
+    int64_t height,
+    int64_t width,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation)
+{
+    int64_t out_h = (height + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+    int64_t out_w = (width + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
+
+    at::Tensor result = at::empty({batch_size, out_channels, out_h, out_w}, x.options());
+
+    EXEC_NPU_CMD(aclnnConvDepthwiseSeparable2dCustom, x, dw_weight, pw_weight, result,
+                  batch_size, in_channels, out_channels, height, width,
+                  kernel_size, stride, padding, dilation);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_depthwise_separable_2d_custom", &conv_depthwise_separable_2d_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_depthwise_separable_2d_custom", &conv_depthwise_separable_2d_custom_impl_npu,
+          "Depthwise separable conv2d custom");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized depthwise-separable 2D convolution using custom AscendC kernel.
+    """
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
+                 stride: int = 1, padding: int = 0, dilation: int = 1, bias: bool = False):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+
+        # Initialize depthwise conv weights: (in_channels, 1, K, K)
+        self.dw_weight = torch.nn.Parameter(torch.randn(in_channels, 1, kernel_size, kernel_size))
+        # Initialize pointwise conv weights: (out_channels, in_channels, 1, 1)
+        self.pw_weight = torch.nn.Parameter(torch.randn(out_channels, in_channels, 1, 1))
+
+        # Initialize with Kaiming uniform like nn.Conv2d
+        torch.nn.init.kaiming_uniform_(self.dw_weight, a=5**0.5)
+        torch.nn.init.kaiming_uniform_(self.pw_weight, a=5**0.5)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.shape[0]
+        height = x.shape[2]
+        width = x.shape[3]
+
+        # Ensure contiguous
+        x_contig = x.contiguous()
+        dw_w = self.dw_weight.contiguous()
+        pw_w = self.pw_weight.contiguous()
+
+        return custom_ops_lib.conv_depthwise_separable_2d_custom(
+            x_contig, dw_w, pw_w,
+            batch_size, self.in_channels, self.out_channels,
+            height, width, self.kernel_size,
+            self.stride, self.padding, self.dilation
+        )
+'''
+```

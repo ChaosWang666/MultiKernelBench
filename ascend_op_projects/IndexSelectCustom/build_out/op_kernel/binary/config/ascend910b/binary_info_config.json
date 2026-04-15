@@ -1,0 +1,59 @@
+{
+  "IndexSelectCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "indices",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "dim"
+        },
+        {
+          "name": "numRows"
+        },
+        {
+          "name": "numCols"
+        },
+        {
+          "name": "numIndices"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "IndexSelectCustom/d=0,p=1/0,2/3,2/0,2",
+          "IndexSelectCustom/d=0,p=0/0,2/3,2/0,2",
+          "IndexSelectCustom/d=1,p=1/0,2/3,2/0,2",
+          "IndexSelectCustom/d=1,p=0/0,2/3,2/0,2"
+        ],
+        "binPath": "ascend910b/index_select_custom/IndexSelectCustom_500f005be6ea1809948ea9f4bfcc1ea9.o",
+        "jsonPath": "ascend910b/index_select_custom/IndexSelectCustom_500f005be6ea1809948ea9f4bfcc1ea9.json"
+      }
+    ]
+  }
+}

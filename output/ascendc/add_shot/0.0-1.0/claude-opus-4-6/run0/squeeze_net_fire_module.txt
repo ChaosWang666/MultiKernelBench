@@ -1,0 +1,421 @@
+
+
+Looking at the architecture, this is a SqueezeNet Fire Module that performs:
+1. 1x1 squeeze convolution + ReLU
+2. Two parallel expand paths: 1x1 conv + ReLU and 3x3 conv + ReLU
+3. Concatenation along channel dimension
+
+The key optimization opportunity is to fuse the ReLU activations with the convolution outputs and the final concatenation. I'll create a custom kernel that fuses the two ReLU activations and concatenation of the expand paths into a single kernel operation, reducing memory bandwidth.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "SqueezeNetFireModuleCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "expand1x1_out",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "expand3x3_out",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(SqueezeNetFireModuleCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength1);
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength2);
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels1);
+  TILING_DATA_FIELD_DEF(uint32_t, channels2);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(SqueezeNetFireModuleCustom, SqueezeNetFireModuleCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "squeeze_net_fire_module_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 2048;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    SqueezeNetFireModuleCustomTilingData tiling;
+    uint32_t totalLength1 = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    uint32_t totalLength2 = context->GetInputShape(1)->GetOriginShape().GetShapeSize();
+
+    const gert::Shape* shape1 = context->GetInputShape(0);
+    const gert::Shape* shape2 = context->GetInputShape(1);
+
+    uint32_t batchSize = shape1->GetDim(0);
+    uint32_t channels1 = shape1->GetDim(1);
+    uint32_t channels2 = shape2->GetDim(1);
+    uint32_t h = shape1->GetDim(2);
+    uint32_t w = shape1->GetDim(3);
+    uint32_t spatialSize = h * w;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength1(totalLength1);
+    tiling.set_totalLength2(totalLength2);
+    tiling.set_batchSize(batchSize);
+    tiling.set_channels1(channels1);
+    tiling.set_channels2(channels2);
+    tiling.set_spatialSize(spatialSize);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    const gert::Shape* x2_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+
+    int64_t batch = x1_shape->GetDim(0);
+    int64_t c1 = x1_shape->GetDim(1);
+    int64_t c2 = x2_shape->GetDim(1);
+    int64_t h = x1_shape->GetDim(2);
+    int64_t w = x1_shape->GetDim(3);
+
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, batch);
+    y_shape->SetDim(1, c1 + c2);
+    y_shape->SetDim(2, h);
+    y_shape->SetDim(3, w);
+
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class SqueezeNetFireModuleCustom : public OpDef {
+public:
+    explicit SqueezeNetFireModuleCustom(const char* name) : OpDef(name)
+    {
+        this->Input("expand1x1_out")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("expand3x3_out")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(SqueezeNetFireModuleCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelSqueezeNetFireModule {
+public:
+    __aicore__ inline KernelSqueezeNetFireModule() {}
+    __aicore__ inline void Init(GM_ADDR expand1x1_out, GM_ADDR expand3x3_out, GM_ADDR z,
+                                 uint32_t totalLength1, uint32_t totalLength2,
+                                 uint32_t batchSize, uint32_t channels1, uint32_t channels2,
+                                 uint32_t spatialSize, uint32_t tileNum)
+    {
+        this->totalLength1 = totalLength1;
+        this->totalLength2 = totalLength2;
+        this->batchSize = batchSize;
+        this->channels1 = channels1;
+        this->channels2 = channels2;
+        this->spatialSize = spatialSize;
+
+        // Total output elements = batchSize * (channels1 + channels2) * spatialSize
+        uint32_t totalOut = batchSize * (channels1 + channels2) * spatialSize;
+
+        // We'll process expand1x1 and expand3x3 separately, applying ReLU and writing to correct output positions
+        // Simple approach: each block processes a portion of elements from both inputs
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        // Process input1 (expand1x1)
+        this->blockLength1 = totalLength1 / blockNum;
+        uint32_t remaining1 = totalLength1 - this->blockLength1 * blockNum;
+        if (blockIdx < remaining1) {
+            this->blockLength1 += 1;
+            this->startOffset1 = this->blockLength1 * blockIdx;
+        } else {
+            this->startOffset1 = this->blockLength1 * blockIdx + remaining1;
+        }
+
+        // Process input2 (expand3x3)
+        this->blockLength2 = totalLength2 / blockNum;
+        uint32_t remaining2 = totalLength2 - this->blockLength2 * blockNum;
+        if (blockIdx < remaining2) {
+            this->blockLength2 += 1;
+            this->startOffset2 = this->blockLength2 * blockIdx;
+        } else {
+            this->startOffset2 = this->blockLength2 * blockIdx + remaining2;
+        }
+
+        // Align tile lengths to 32 bytes (8 floats)
+        this->tileNum = tileNum;
+        if (this->blockLength1 > 0) {
+            this->tileLength1 = ((this->blockLength1 / (tileNum * BUFFER_NUM) + 7) / 8) * 8;
+            if (this->tileLength1 == 0) this->tileLength1 = 8;
+        } else {
+            this->tileLength1 = 8;
+        }
+
+        if (this->blockLength2 > 0) {
+            this->tileLength2 = ((this->blockLength2 / (tileNum * BUFFER_NUM) + 7) / 8) * 8;
+            if (this->tileLength2 == 0) this->tileLength2 = 8;
+        } else {
+            this->tileLength2 = 8;
+        }
+
+        // For the contiguous approach: input is contiguous NCHW, output needs interleaved channels
+        // Input1: [N, C1, H, W] contiguous => element at (n, c, h, w) = n*C1*S + c*S + h*W + w
+        // Output: [N, C1+C2, H, W], first C1 channels from input1, next C2 from input2
+        // Output element for input1 (n,c,h,w) => n*(C1+C2)*S + c*S + h*W + w
+        // Output element for input2 (n,c,h,w) => n*(C1+C2)*S + (C1+c)*S + h*W + w
+
+        // Since the channel reordering makes non-contiguous writes complex in a tiled approach,
+        // we'll use a simpler strategy: process per-batch-channel-spatial chunks
+
+        expand1x1Gm.SetGlobalBuffer((__gm__ float *)expand1x1_out, totalLength1);
+        expand3x3Gm.SetGlobalBuffer((__gm__ float *)expand3x3_out, totalLength2);
+        zGm.SetGlobalBuffer((__gm__ float *)z, totalOut);
+
+        uint32_t maxTile = (this->tileLength1 > this->tileLength2) ? this->tileLength1 : this->tileLength2;
+        pipe.InitBuffer(inQueue1, BUFFER_NUM, maxTile * sizeof(float));
+        pipe.InitBuffer(outQueue1, BUFFER_NUM, maxTile * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t outChannels = channels1 + channels2;
+        uint32_t chunkSize = spatialSize; // one channel-spatial block
+
+        // Process expand1x1 part
+        ProcessInput(expand1x1Gm, 0, totalLength1, blockLength1, startOffset1, channels1, 0, outChannels);
+        // Process expand3x3 part
+        ProcessInput(expand3x3Gm, 0, totalLength2, blockLength2, startOffset2, channels2, channels1, outChannels);
+    }
+
+private:
+    __aicore__ inline void ProcessInput(AscendC::GlobalTensor<float>& inputGm,
+                                         uint32_t gmBase,
+                                         uint32_t totalLen,
+                                         uint32_t myBlockLen,
+                                         uint32_t myStartOff,
+                                         uint32_t inChannels,
+                                         uint32_t channelOffset,
+                                         uint32_t outChannels)
+    {
+        if (myBlockLen == 0) return;
+
+        uint32_t inBatchStride = inChannels * spatialSize;
+        uint32_t outBatchStride = outChannels * spatialSize;
+
+        // Process elements [myStartOff, myStartOff + myBlockLen)
+        uint32_t processed = 0;
+        uint32_t globalPos = myStartOff;
+
+        while (processed < myBlockLen) {
+            uint32_t remaining = myBlockLen - processed;
+
+            // Figure out current position in NCHW layout
+            uint32_t n = globalPos / inBatchStride;
+            uint32_t withinBatch = globalPos - n * inBatchStride;
+            uint32_t c = withinBatch / spatialSize;
+            uint32_t withinChannel = withinBatch - c * spatialSize;
+
+            // How many contiguous elements we can process (within this channel)
+            uint32_t contiguousAvail = spatialSize - withinChannel;
+            uint32_t toCopy = (remaining < contiguousAvail) ? remaining : contiguousAvail;
+
+            // Align to 8 for processing (pad up)
+            uint32_t alignedCopy = ((toCopy + 7) / 8) * 8;
+            if (alignedCopy > myBlockLen) alignedCopy = ((toCopy + 7) / 8) * 8;
+
+            // Calculate output position
+            uint32_t outPos = n * outBatchStride + (channelOffset + c) * spatialSize + withinChannel;
+
+            // CopyIn
+            AscendC::LocalTensor<float> inLocal = inQueue1.AllocTensor<float>();
+            AscendC::DataCopy(inLocal, inputGm[globalPos], alignedCopy);
+            inQueue1.EnQue(inLocal);
+
+            // Compute ReLU
+            AscendC::LocalTensor<float> inLocal2 = inQueue1.DeQue<float>();
+            AscendC::LocalTensor<float> outLocal = outQueue1.AllocTensor<float>();
+
+            // Create zero tensor for max (ReLU = max(0, x))
+            float zeroVal = 0.0f;
+            AscendC::Duplicate(outLocal, zeroVal, alignedCopy);
+            AscendC::Max(outLocal, inLocal2, outLocal, alignedCopy);
+
+            outQueue1.EnQue(outLocal);
+            inQueue1.FreeTensor(inLocal2);
+
+            // CopyOut
+            AscendC::LocalTensor<float> outLocal2 = outQueue1.DeQue<float>();
+            AscendC::DataCopy(zGm[outPos], outLocal2, alignedCopy);
+            outQueue1.FreeTensor(outLocal2);
+
+            processed += toCopy;
+            globalPos += toCopy;
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue1;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue1;
+    AscendC::GlobalTensor<float> expand1x1Gm;
+    AscendC::GlobalTensor<float> expand3x3Gm;
+    AscendC::GlobalTensor<float> zGm;
+
+    uint32_t totalLength1, totalLength2;
+    uint32_t batchSize, channels1, channels2, spatialSize;
+    uint32_t blockLength1, blockLength2;
+    uint32_t startOffset1, startOffset2;
+    uint32_t tileNum;
+    uint32_t tileLength1, tileLength2;
+};
+
+extern "C" __global__ __aicore__ void squeeze_net_fire_module_custom(GM_ADDR expand1x1_out, GM_ADDR expand3x3_out, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelSqueezeNetFireModule op;
+    op.Init(expand1x1_out, expand3x3_out, z,
+            tiling_data.totalLength1, tiling_data.totalLength2,
+            tiling_data.batchSize, tiling_data.channels1, tiling_data.channels2,
+            tiling_data.spatialSize, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor squeeze_net_fire_module_custom_impl_npu(const at::Tensor& expand1x1_out, const at::Tensor& expand3x3_out) {
+    int64_t batch = expand1x1_out.size(0);
+    int64_t c1 = expand1x1_out.size(1);
+    int64_t c2 = expand3x3_out.size(1);
+    int64_t h = expand1x1_out.size(2);
+    int64_t w = expand1x1_out.size(3);
+
+    at::Tensor result = at::empty({batch, c1 + c2, h, w}, expand1x1_out.options());
+    EXEC_NPU_CMD(aclnnSqueezeNetFireModuleCustom, expand1x1_out, expand3x3_out, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("squeeze_net_fire_module_custom", &squeeze_net_fire_module_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("squeeze_net_fire_module_custom", &squeeze_net_fire_module_custom_impl_npu, "Fused ReLU + Cat for SqueezeNet Fire Module");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, squeeze_channels, expand1x1_channels, expand3x3_channels):
+        """
+        :param in_channels: Number of input channels
+        :param squeeze_channels: Number of output channels for the squeeze layer
+        :param expand1x1_channels: Number of output channels for the 1x1 expand layer
+        :param expand3x3_channels: Number of output channels for the 3x3 expand layer
+        """
+        super(ModelNew, self).__init__()
+
+        self.squeeze = nn.Conv2d(in_channels, squeeze_channels, kernel_size=1)
+        self.squeeze_activation = nn.ReLU(inplace=True)
+
+        self.expand1x1 = nn.Conv2d(squeeze_channels, expand1x1_channels, kernel_size=1)
+        self.expand3x3 = nn.Conv2d(squeeze_channels, expand3x3_channels, kernel_size=3, padding=1)
+
+    def forward(self, x):
+        """
+        :param x: Input tensor, shape (batch_size, in_channels, height, width)
+        :return: Output tensor, shape (batch_size, expand1x1_channels + expand3x3_channels, height, width)
+        """
+        x = self.squeeze_activation(self.squeeze(x))
+        expand1x1_out = self.expand1x1(x)
+        expand3x3_out = self.expand3x3(x)
+        # Fused ReLU + concatenation using custom kernel
+        return custom_ops_lib.squeeze_net_fire_module_custom(expand1x1_out, expand3x3_out)
+'''
+```

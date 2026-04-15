@@ -1,0 +1,668 @@
+
+
+Looking at the architecture, I need to fuse the operations after convolution: tanh, scaling, bias addition, and max-pooling into a custom AscendC kernel. The convolution itself is complex and best left to the built-in operator, but the post-conv operations (tanh, scale, bias add, max pool) can be fused into a single kernel.
+
+Let me analyze the dimensions:
+- After conv2d with kernel_size=3: (128, 64, 254, 254)
+- After max_pool with pool_kernel_size=4: (128, 64, 63, 63)
+- Bias shape: (64, 1, 1) - broadcast over H, W dimensions
+
+I'll create a fused kernel for tanh + scaling + bias_add + max_pool.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv2dTanhScalingBiasAddMaxCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv2dTanhScalingBiasAddMaxCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, inH);
+  TILING_DATA_FIELD_DEF(uint32_t, inW);
+  TILING_DATA_FIELD_DEF(uint32_t, outH);
+  TILING_DATA_FIELD_DEF(uint32_t, outW);
+  TILING_DATA_FIELD_DEF(uint32_t, poolKernel);
+  TILING_DATA_FIELD_DEF(float, scalingFactor);
+  TILING_DATA_FIELD_DEF(uint32_t, totalTasks);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv2dTanhScalingBiasAddMaxCustom, Conv2dTanhScalingBiasAddMaxCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv2d_tanh_scaling_bias_add_max_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv2dTanhScalingBiasAddMaxCustomTilingData tiling;
+
+    // x shape: [N, C, H, W]
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t H = xShape.GetDim(2);
+    uint32_t W = xShape.GetDim(3);
+
+    // Get attrs from context - we'll pass scaling_factor and pool_kernel via tiling
+    // We'll use default values that match the model
+    uint32_t poolKernel = 4;
+    float scalingFactor = 2.0f;
+
+    // Read attributes
+    const auto attrs = context->GetAttrs();
+    if (attrs != nullptr) {
+        const float* sf = attrs->GetAttrPointer<float>(0);
+        if (sf) scalingFactor = *sf;
+        const int32_t* pk = attrs->GetAttrPointer<int32_t>(1);
+        if (pk) poolKernel = (uint32_t)*pk;
+    }
+
+    uint32_t outH = H / poolKernel;
+    uint32_t outW = W / poolKernel;
+
+    // Total tasks = N * C (one task per (batch, channel) pair)
+    uint32_t totalTasks = N * C;
+
+    context->SetBlockDim(BLOCK_DIM);
+
+    tiling.set_batchSize(N);
+    tiling.set_channels(C);
+    tiling.set_inH(H);
+    tiling.set_inW(W);
+    tiling.set_outH(outH);
+    tiling.set_outW(outW);
+    tiling.set_poolKernel(poolKernel);
+    tiling.set_scalingFactor(scalingFactor);
+    tiling.set_totalTasks(totalTasks);
+    tiling.set_tileNum(1);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+
+    // x: [N, C, H, W], output: [N, C, H/pool, W/pool]
+    // We need pool_kernel from attrs
+    int64_t N = x_shape->GetDim(0);
+    int64_t C = x_shape->GetDim(1);
+    int64_t H = x_shape->GetDim(2);
+    int64_t W = x_shape->GetDim(3);
+
+    // Default pool kernel
+    int64_t poolKernel = 4;
+
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, N);
+    y_shape->SetDim(1, C);
+    y_shape->SetDim(2, H / poolKernel);
+    y_shape->SetDim(3, W / poolKernel);
+
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Conv2dTanhScalingBiasAddMaxCustom : public OpDef {
+public:
+    explicit Conv2dTanhScalingBiasAddMaxCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Attr("scaling_factor").AttrType(OPTIONAL).Float(2.0);
+        this->Attr("pool_kernel").AttrType(OPTIONAL).Int(4);
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv2dTanhScalingBiasAddMaxCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 1;
+
+class KernelConv2dTanhScalingBiasAddMax {
+public:
+    __aicore__ inline KernelConv2dTanhScalingBiasAddMax() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t channels,
+                                 uint32_t inH, uint32_t inW,
+                                 uint32_t outH, uint32_t outW,
+                                 uint32_t poolKernel, float scalingFactor,
+                                 uint32_t totalTasks)
+    {
+        this->batchSize = batchSize;
+        this->channels = channels;
+        this->inH = inH;
+        this->inW = inW;
+        this->outH = outH;
+        this->outW = outW;
+        this->poolKernel = poolKernel;
+        this->scalingFactor = scalingFactor;
+        this->totalTasks = totalTasks;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        // Each block handles a range of (n, c) tasks
+        this->taskPerBlock = (totalTasks + blockNum - 1) / blockNum;
+        this->taskStart = blockIdx * this->taskPerBlock;
+        this->taskEnd = taskStart + taskPerBlock;
+        if (this->taskEnd > totalTasks) this->taskEnd = totalTasks;
+
+        uint32_t inPlaneSize = inH * inW;
+        uint32_t outPlaneSize = outH * outW;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * channels * inPlaneSize);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, channels);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * channels * outPlaneSize);
+
+        // We process one row of output at a time
+        // For each output row, we need poolKernel input rows, each of width inW
+        // Tile size = poolKernel * inW (aligned to 32 bytes = 8 floats)
+        uint32_t tileInputSize = poolKernel * inW;
+        // Align to 8 floats (32 bytes)
+        uint32_t alignedTileInputSize = (tileInputSize + 7) / 8 * 8;
+        // Output row size
+        uint32_t outRowSize = outW;
+        uint32_t alignedOutRowSize = (outRowSize + 7) / 8 * 8;
+        // We also need a temp buffer for intermediate computations of size alignedTileInputSize
+        
+        this->alignedTileInputSize = alignedTileInputSize;
+        this->alignedOutRowSize = alignedOutRowSize;
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, alignedTileInputSize * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, alignedOutRowSize * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, BUFFER_NUM, alignedTileInputSize * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, BUFFER_NUM, alignedTileInputSize * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t task = taskStart; task < taskEnd; task++) {
+            uint32_t n = task / channels;
+            uint32_t c = task % channels;
+            ProcessOneChannel(n, c);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOneChannel(uint32_t n, uint32_t c)
+    {
+        uint32_t inPlaneSize = inH * inW;
+        uint32_t outPlaneSize = outH * outW;
+        uint32_t inBaseOffset = (n * channels + c) * inPlaneSize;
+        uint32_t outBaseOffset = (n * channels + c) * outPlaneSize;
+
+        // Read bias for this channel
+        // We cannot easily do scalar read, so we'll handle bias in compute
+        float biasVal = 0.0f;
+        // Use a small trick: copy 8 floats starting from aligned position
+        // Actually, for simplicity, let's just process with pipe
+
+        for (uint32_t oh = 0; oh < outH; oh++) {
+            // For output row oh, input rows are [oh*poolKernel, (oh+1)*poolKernel)
+            // Process poolKernel input rows, apply tanh+scale+bias, then do max pool
+
+            // We'll accumulate max across pool rows
+            // First row
+            uint32_t inRowStart = oh * poolKernel;
+            
+            // Process first input row of the pool window
+            {
+                AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+                AscendC::DataCopy(xLocal, xGm[inBaseOffset + inRowStart * inW], alignedTileInputSize);
+                inQueueX.EnQue(xLocal);
+            }
+            {
+                AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+                AscendC::LocalTensor<float> t1 = tmpBuf1.AllocTensor<float>();
+                
+                // tanh
+                // Use the vector tanh instruction
+                // First compute tanh(x), but AscendC might not have direct Tanh
+                // We can use: tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+                // Or check if AscendC has Tanh API
+                // AscendC does not have a direct Tanh, we use the formula or Sigmoid:
+                // tanh(x) = 2*sigmoid(2x) - 1
+                // But let's try using the available math ops
+                
+                // Compute tanh via: tanh(x) = 2 * sigmoid(2*x) - 1
+                // Step 1: t1 = 2 * x
+                float two = 2.0f;
+                AscendC::Muls(t1, xLocal, two, alignedTileInputSize);
+                // Step 2: t1 = sigmoid(t1)  -- not available directly either
+                // Actually AscendC has Exp. Let's do:
+                // tanh(x) = (exp(x) - exp(-x)) / (exp(x) + exp(-x))
+                // Or simpler: use the formula with Exp
+                // exp(2x)
+                AscendC::Exp(t1, t1, alignedTileInputSize);
+                // t1 = exp(2x)
+                // tanh = (t1 - 1) / (t1 + 1)
+                AscendC::LocalTensor<float> t2 = tmpBuf2.AllocTensor<float>();
+                float one = 1.0f;
+                AscendC::Adds(t2, t1, one, alignedTileInputSize);    // t2 = exp(2x) + 1
+                AscendC::Adds(t1, t1, -one, alignedTileInputSize);   // t1 = exp(2x) - 1
+                AscendC::Div(t1, t1, t2, alignedTileInputSize);      // t1 = tanh(x)
+                
+                // Scale
+                AscendC::Muls(t1, t1, scalingFactor, alignedTileInputSize);
+                
+                // Bias add (broadcast across HW)
+                // biasGm[c] is a single float. We add it as scalar.
+                // We can't easily read a single scalar. Let's use Adds with a scalar.
+                // But we need to get biasVal... We'll copy it into t2 and use it
+                // Actually we can copy 8 floats including position c
+                // Simpler: just copy 8 aligned floats from biasGm
+                // For now let's use a workaround: copy the bias value
+                // We'll handle bias separately by copying a small chunk
+                
+                tmpBuf2.FreeTensor(t2);
+                tmpBuf1.FreeTensor(t1);
+                inQueueX.FreeTensor(xLocal);
+            }
+
+            // The above approach is getting complex. Let me restructure:
+            // Process all poolKernel rows, do max pooling in W direction as well
+            
+            // Actually let me use a different approach: process per output element
+            // But that's too slow. Let me restructure the whole kernel.
+            
+            // Output a dummy for now - let me redo this properly below
+            {
+                AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+                // Set zeros
+                AscendC::Duplicate(yLocal, 0.0f, alignedOutRowSize);
+                outQueueY.EnQue(yLocal);
+            }
+            {
+                AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+                AscendC::DataCopy(yGm[outBaseOffset + oh * outW], yLocal, alignedOutRowSize);
+                outQueueY.FreeTensor(yLocal);
+            }
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> yGm;
+
+    uint32_t batchSize, channels, inH, inW, outH, outW, poolKernel;
+    float scalingFactor;
+    uint32_t totalTasks;
+    uint32_t taskPerBlock, taskStart, taskEnd;
+    uint32_t alignedTileInputSize, alignedOutRowSize;
+};
+
+extern "C" __global__ __aicore__ void conv2d_tanh_scaling_bias_add_max_custom(GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv2dTanhScalingBiasAddMax op;
+    op.Init(x, bias, y,
+            tiling_data.batchSize, tiling_data.channels,
+            tiling_data.inH, tiling_data.inW,
+            tiling_data.outH, tiling_data.outW,
+            tiling_data.poolKernel, tiling_data.scalingFactor,
+            tiling_data.totalTasks);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv2d_tanh_scaling_bias_add_max_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias, float scaling_factor, int64_t pool_kernel) {
+    int64_t N = x.size(0);
+    int64_t C = x.size(1);
+    int64_t H = x.size(2);
+    int64_t W = x.size(3);
+    int64_t outH = H / pool_kernel;
+    int64_t outW = W / pool_kernel;
+
+    at::Tensor result = at::empty({N, C, outH, outW}, x.options());
+    EXEC_NPU_CMD(aclnnConv2dTanhScalingBiasAddMaxCustom, x, bias, result, scaling_factor, pool_kernel);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv2d_tanh_scaling_bias_add_max_custom", &conv2d_tanh_scaling_bias_add_max_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv2d_tanh_scaling_bias_add_max_custom", &conv2d_tanh_scaling_bias_add_max_custom_impl_npu, "fused tanh+scale+bias+maxpool");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, scaling_factor, bias_shape, pool_kernel_size):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(in_channels, out_channels, kernel_size)
+        self.scaling_factor = scaling_factor
+        self.bias = torch.nn.Parameter(torch.randn(bias_shape))
+        self.pool_kernel_size = pool_kernel_size
+
+    def forward(self, x):
+        x = self.conv(x)
+        # Fused tanh + scaling + bias add + max pool
+        x = custom_ops_lib.conv2d_tanh_scaling_bias_add_max_custom(x, self.bias.view(-1), self.scaling_factor, self.pool_kernel_size)
+        return x
+'''
+```
+
+Wait, I need to reconsider this. The kernel I wrote above is incomplete and has structural issues. Let me rewrite it properly with a cleaner approach that actually works correctly on AscendC.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv2dTanhScalingBiasAddMaxCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv2dTanhScalingBiasAddMaxCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, inH);
+  TILING_DATA_FIELD_DEF(uint32_t, inW);
+  TILING_DATA_FIELD_DEF(uint32_t, outH);
+  TILING_DATA_FIELD_DEF(uint32_t, outW);
+  TILING_DATA_FIELD_DEF(uint32_t, poolKernel);
+  TILING_DATA_FIELD_DEF(float, scalingFactor);
+  TILING_DATA_FIELD_DEF(uint32_t, totalTasks);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv2dTanhScalingBiasAddMaxCustom, Conv2dTanhScalingBiasAddMaxCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv2d_tanh_scaling_bias_add_max_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv2dTanhScalingBiasAddMaxCustomTilingData tiling;
+
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t H = xShape.GetDim(2);
+    uint32_t W = xShape.GetDim(3);
+
+    float scalingFactor = 2.0f;
+    uint32_t poolKernel = 4;
+
+    const auto attrs = context->GetAttrs();
+    if (attrs != nullptr) {
+        const float* sf = attrs->GetAttrPointer<float>(0);
+        if (sf) scalingFactor = *sf;
+        const int32_t* pk = attrs->GetAttrPointer<int32_t>(1);
+        if (pk) poolKernel = (uint32_t)*pk;
+    }
+
+    uint32_t outH = H / poolKernel;
+    uint32_t outW = W / poolKernel;
+    uint32_t totalTasks = N * C;
+
+    context->SetBlockDim(BLOCK_DIM);
+
+    tiling.set_batchSize(N);
+    tiling.set_channels(C);
+    tiling.set_inH(H);
+    tiling.set_inW(W);
+    tiling.set_outH(outH);
+    tiling.set_outW(outW);
+    tiling.set_poolKernel(poolKernel);
+    tiling.set_scalingFactor(scalingFactor);
+    tiling.set_totalTasks(totalTasks);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+
+    int64_t N = x_shape->GetDim(0);
+    int64_t C = x_shape->GetDim(1);
+    int64_t H = x_shape->GetDim(2);
+    int64_t W = x_shape->GetDim(3);
+    int64_t poolKernel = 4;
+
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, N);
+    y_shape->SetDim(1, C);
+    y_shape->SetDim(2, H / poolKernel);
+    y_shape->SetDim(3, W / poolKernel);
+
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Conv2dTanhScalingBiasAddMaxCustom : public OpDef {
+public:
+    explicit Conv2dTanhScalingBiasAddMaxCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Attr("scaling_factor").AttrType(OPTIONAL).Float(2.0);
+        this->Attr("pool_kernel").AttrType(OPTIONAL).Int(4);
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv2dTanhScalingBiasAddMaxCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 1;
+
+class KernelFusedTanhScaleBiasMaxPool {
+public:
+    __aicore__ inline KernelFusedTanhScaleBiasMaxPool() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t channels,
+                                 uint32_t inH, uint32_t inW,
+                                 uint32_t outH, uint32_t outW,
+                                 uint32_t poolKernel, float scalingFactor,
+                                 uint32_t totalTasks)
+    {
+        this->batchSize = batchSize;
+        this->channels = channels;
+        this->inH = inH;
+        this->inW = inW;
+        this->outH = outH;
+        this->outW = outW;
+        this->poolKernel = poolKernel;
+        this->scalingFactor = scalingFactor;
+        this->totalTasks = totalTasks;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        this->taskPerBlock = (totalTasks + blockNum - 1) / blockNum;
+        this->taskStart = blockIdx * this->taskPerBlock;
+        this->taskEnd = taskStart + taskPerBlock;
+        if (this->taskEnd > totalTasks) this->taskEnd = totalTasks;
+
+        uint32_t inPlaneSize = inH * inW;
+        uint32_t outPlaneSize = outH * outW;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * channels * inPlaneSize);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, channels);
+        yGm.SetGlobalBuffer((__gm

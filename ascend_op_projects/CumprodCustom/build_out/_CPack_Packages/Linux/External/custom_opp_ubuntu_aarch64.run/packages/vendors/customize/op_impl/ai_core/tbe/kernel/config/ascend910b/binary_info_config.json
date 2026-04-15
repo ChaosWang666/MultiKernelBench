@@ -1,0 +1,44 @@
+{
+  "CumprodCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "dim"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "CumprodCustom/d=0,p=1/0,2/0,2",
+          "CumprodCustom/d=0,p=0/0,2/0,2",
+          "CumprodCustom/d=1,p=1/0,2/0,2",
+          "CumprodCustom/d=1,p=0/0,2/0,2"
+        ],
+        "binPath": "ascend910b/cumprod_custom/CumprodCustom_5ae337852b2c8f232eaf9c01a377c4b8.o",
+        "jsonPath": "ascend910b/cumprod_custom/CumprodCustom_5ae337852b2c8f232eaf9c01a377c4b8.json"
+      }
+    ]
+  }
+}

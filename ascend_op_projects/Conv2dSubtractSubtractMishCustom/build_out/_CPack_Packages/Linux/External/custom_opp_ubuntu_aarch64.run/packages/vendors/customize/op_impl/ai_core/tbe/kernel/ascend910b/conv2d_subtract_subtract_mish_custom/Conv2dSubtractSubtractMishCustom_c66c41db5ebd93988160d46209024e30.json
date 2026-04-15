@@ -1,0 +1,86 @@
+{
+ "binFileName": "Conv2dSubtractSubtractMishCustom_c66c41db5ebd93988160d46209024e30",
+ "binFileSuffix": ".o",
+ "blockDim": -1,
+ "coreType": "VectorCore",
+ "core_type": "AIV",
+ "intercoreSync": 0,
+ "kernelName": "Conv2dSubtractSubtractMishCustom_c66c41db5ebd93988160d46209024e30",
+ "magic": "RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+ "memoryStamping": [],
+ "opParaSize": 24,
+ "parameters": [
+  null,
+  null,
+  null
+ ],
+ "sha256": "1fc71b86fdead31a46ac11bd592cc1106c2f551e9d89276160ccdc55d0000235",
+ "workspace": {
+  "num": 1,
+  "size": [
+   -1
+  ],
+  "type": [
+   0
+  ]
+ },
+ "kernelList": [
+  {
+   "kernelName": "Conv2dSubtractSubtractMishCustom_c66c41db5ebd93988160d46209024e30_0"
+  }
+ ],
+ "optionalInputMode": "gen_placeholder",
+ "optionalOutputMode": "gen_placeholder",
+ "supportSuperKernel": 1,
+ "compileInfo": {},
+ "supportInfo": {
+  "implMode": "high_performance",
+  "int64Mode": false,
+  "simplifiedKeyMode": 0,
+  "simplifiedKey": [
+   "Conv2dSubtractSubtractMishCustom/d=0,p=1/0,2/0,2",
+   "Conv2dSubtractSubtractMishCustom/d=0,p=0/0,2/0,2",
+   "Conv2dSubtractSubtractMishCustom/d=1,p=1/0,2/0,2",
+   "Conv2dSubtractSubtractMishCustom/d=1,p=0/0,2/0,2"
+  ],
+  "optionalInputMode": "gen_placeholder",
+  "optionalOutputMode": "gen_placeholder",
+  "staticKey": "fc7c64e4a23910ca38d9ecf8e29c0a37df0c171f572768ed7a5ba0ab5d60d4ec,794cb4832899a70050bca87528bcf29bc742bfabd2bad2c5aa0b2e32ea7086fb",
+  "inputs": [
+   {
+    "name": "x",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "z",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "attrs": [
+   {
+    "name": "subtract_value",
+    "dtype": "float",
+    "value": 0.0
+   }
+  ],
+  "opMode": "dynamic",
+  "deterministic": "ignore"
+ },
+ "filePath": "ascend910b/conv2d_subtract_subtract_mish_custom/Conv2dSubtractSubtractMishCustom_c66c41db5ebd93988160d46209024e30.json"
+}

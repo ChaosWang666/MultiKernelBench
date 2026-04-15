@@ -1,0 +1,103 @@
+{
+ "binFileName": "KvCachedSpeculativeAttentionCustom_833681daf898c4872611161e2249b379",
+ "binFileSuffix": ".o",
+ "blockDim": -1,
+ "coreType": "VectorCore",
+ "core_type": "AIV",
+ "intercoreSync": 0,
+ "kernelName": "KvCachedSpeculativeAttentionCustom_833681daf898c4872611161e2249b379",
+ "magic": "RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+ "memoryStamping": [],
+ "opParaSize": 32,
+ "parameters": [
+  null,
+  null,
+  null,
+  null,
+  null
+ ],
+ "sha256": "f4d4a86f8044f5630232fb32a9b14247115dce06e7516e221e148a0e0f6a1bd1",
+ "workspace": {
+  "num": 1,
+  "size": [
+   -1
+  ],
+  "type": [
+   0
+  ]
+ },
+ "kernelList": [
+  {
+   "kernelName": "KvCachedSpeculativeAttentionCustom_833681daf898c4872611161e2249b379_0"
+  }
+ ],
+ "optionalInputMode": "gen_placeholder",
+ "optionalOutputMode": "gen_placeholder",
+ "supportSuperKernel": 1,
+ "compileInfo": {},
+ "supportInfo": {
+  "implMode": "high_performance",
+  "int64Mode": false,
+  "simplifiedKeyMode": 0,
+  "simplifiedKey": [
+   "KvCachedSpeculativeAttentionCustom/d=0,p=1/0,2/0,2/0,2/0,2",
+   "KvCachedSpeculativeAttentionCustom/d=0,p=0/0,2/0,2/0,2/0,2",
+   "KvCachedSpeculativeAttentionCustom/d=1,p=1/0,2/0,2/0,2/0,2",
+   "KvCachedSpeculativeAttentionCustom/d=1,p=0/0,2/0,2/0,2/0,2"
+  ],
+  "optionalInputMode": "gen_placeholder",
+  "optionalOutputMode": "gen_placeholder",
+  "staticKey": "e7ee671befb09f01a579e6b447052e4f8660d41790aaa0c02a813a8d991f88b7,10ece6b820443a55859e93e431b9869965527700534b902d054c8d6c436c9db4",
+  "inputs": [
+   {
+    "name": "query",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   },
+   {
+    "name": "key_cache",
+    "index": 1,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   },
+   {
+    "name": "value_cache",
+    "index": 2,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "output",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "opMode": "dynamic",
+  "deterministic": "ignore"
+ },
+ "filePath": "ascend910b/kv_cached_speculative_attention_custom/KvCachedSpeculativeAttentionCustom_833681daf898c4872611161e2249b379.json"
+}

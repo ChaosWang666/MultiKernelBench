@@ -1,0 +1,6 @@
+{
+  "MatmulWithSmallKDimensionCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

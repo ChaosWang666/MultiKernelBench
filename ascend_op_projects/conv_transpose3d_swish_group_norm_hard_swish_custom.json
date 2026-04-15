@@ -1,0 +1,68 @@
+
+[
+    {
+        "op": "ConvTranspose3dSwishGroupNormHardSwishCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "in_channels",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "out_channels",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "kernel_size",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "stride",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "padding",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "groups",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "eps",
+                "type": "float",
+                "default_value": "0.0"
+            }
+        ]
+    }
+]

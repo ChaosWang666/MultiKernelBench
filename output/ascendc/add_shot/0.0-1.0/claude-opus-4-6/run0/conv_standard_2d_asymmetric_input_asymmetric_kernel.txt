@@ -1,0 +1,516 @@
+
+
+Looking at this architecture, I need to implement a 2D convolution with asymmetric input and asymmetric kernel as a custom AscendC kernel. Given the complexity of a full conv2d implementation in AscendC (with arbitrary kernel sizes, strides, padding, dilation, groups), I'll implement this using an im2col + matmul approach which is a standard way to implement convolution efficiently.
+
+However, implementing a fully optimized conv2d from scratch in AscendC is extremely complex. A more practical approach is to leverage the existing NPU conv2d capabilities through the ACLNN interface while wrapping it as a custom operator. Let me implement this properly.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvStandard2dAsymmetricInputAsymmetricKernelCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "optional",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "stride_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "stride_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "pad_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "pad_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "dilation_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "dilation_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "groups",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvStandard2dAsymmetricInputAsymmetricKernelCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, inHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, inWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelH);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelW);
+  TILING_DATA_FIELD_DEF(uint32_t, strideH);
+  TILING_DATA_FIELD_DEF(uint32_t, strideW);
+  TILING_DATA_FIELD_DEF(uint32_t, padH);
+  TILING_DATA_FIELD_DEF(uint32_t, padW);
+  TILING_DATA_FIELD_DEF(uint32_t, dilationH);
+  TILING_DATA_FIELD_DEF(uint32_t, dilationW);
+  TILING_DATA_FIELD_DEF(uint32_t, groups);
+  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, hasBias);
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvStandard2dAsymmetricInputAsymmetricKernelCustom, ConvStandard2dAsymmetricInputAsymmetricKernelCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_standard_2d_asymmetric_input_asymmetric_kernel_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 8;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvStandard2dAsymmetricInputAsymmetricKernelCustomTilingData tiling;
+    
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* w_shape = context->GetInputShape(1);
+    
+    uint32_t batchSize = x_shape->GetDim(0);
+    uint32_t inChannels = x_shape->GetDim(1);
+    uint32_t inHeight = x_shape->GetDim(2);
+    uint32_t inWidth = x_shape->GetDim(3);
+    
+    uint32_t outChannels = w_shape->GetDim(0);
+    uint32_t kernelH = w_shape->GetDim(2);
+    uint32_t kernelW = w_shape->GetDim(3);
+    
+    const auto* attrs = context->GetAttrs();
+    uint32_t strideH = *(attrs->GetInt(0));
+    uint32_t strideW = *(attrs->GetInt(1));
+    uint32_t padH = *(attrs->GetInt(2));
+    uint32_t padW = *(attrs->GetInt(3));
+    uint32_t dilationH = *(attrs->GetInt(4));
+    uint32_t dilationW = *(attrs->GetInt(5));
+    uint32_t groups = *(attrs->GetInt(6));
+    
+    uint32_t outHeight = (inHeight + 2 * padH - dilationH * (kernelH - 1) - 1) / strideH + 1;
+    uint32_t outWidth = (inWidth + 2 * padW - dilationW * (kernelW - 1) - 1) / strideW + 1;
+    
+    uint32_t hasBias = 0;
+    if (context->GetInputShape(2) != nullptr) {
+        hasBias = 1;
+    }
+    
+    uint32_t totalLength = batchSize * outChannels * outHeight * outWidth;
+    
+    context->SetBlockDim(BLOCK_DIM);
+    
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_inHeight(inHeight);
+    tiling.set_inWidth(inWidth);
+    tiling.set_outChannels(outChannels);
+    tiling.set_kernelH(kernelH);
+    tiling.set_kernelW(kernelW);
+    tiling.set_strideH(strideH);
+    tiling.set_strideW(strideW);
+    tiling.set_padH(padH);
+    tiling.set_padW(padW);
+    tiling.set_dilationH(dilationH);
+    tiling.set_dilationW(dilationW);
+    tiling.set_groups(groups);
+    tiling.set_outHeight(outHeight);
+    tiling.set_outWidth(outWidth);
+    tiling.set_hasBias(hasBias);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* w_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    
+    int64_t batch = x_shape->GetDim(0);
+    int64_t outC = w_shape->GetDim(0);
+    int64_t inH = x_shape->GetDim(2);
+    int64_t inW = x_shape->GetDim(3);
+    int64_t kH = w_shape->GetDim(2);
+    int64_t kW = w_shape->GetDim(3);
+    
+    const auto* attrs = context->GetAttrs();
+    int64_t strideH = *(attrs->GetInt(0));
+    int64_t strideW = *(attrs->GetInt(1));
+    int64_t padH = *(attrs->GetInt(2));
+    int64_t padW = *(attrs->GetInt(3));
+    int64_t dilationH = *(attrs->GetInt(4));
+    int64_t dilationW = *(attrs->GetInt(5));
+    
+    int64_t outH = (inH + 2 * padH - dilationH * (kH - 1) - 1) / strideH + 1;
+    int64_t outW = (inW + 2 * padW - dilationW * (kW - 1) - 1) / strideW + 1;
+    
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, batch);
+    y_shape->SetDim(1, outC);
+    y_shape->SetDim(2, outH);
+    y_shape->SetDim(3, outW);
+    
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvStandard2dAsymmetricInputAsymmetricKernelCustom : public OpDef {
+public:
+    explicit ConvStandard2dAsymmetricInputAsymmetricKernelCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW})
+            .UnknownShapeFormat({ge::FORMAT_NCHW});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW})
+            .UnknownShapeFormat({ge::FORMAT_NCHW});
+        this->Input("bias")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCHW})
+            .UnknownShapeFormat({ge::FORMAT_NCHW});
+        this->Attr("stride_h").AttrType(REQUIRED).Int();
+        this->Attr("stride_w").AttrType(REQUIRED).Int();
+        this->Attr("pad_h").AttrType(REQUIRED).Int();
+        this->Attr("pad_w").AttrType(REQUIRED).Int();
+        this->Attr("dilation_h").AttrType(REQUIRED).Int();
+        this->Attr("dilation_w").AttrType(REQUIRED).Int();
+        this->Attr("groups").AttrType(REQUIRED).Int();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvStandard2dAsymmetricInputAsymmetricKernelCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConv2d {
+public:
+    __aicore__ inline KernelConv2d() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t inChannels, uint32_t inHeight, uint32_t inWidth,
+                                 uint32_t outChannels, uint32_t kernelH, uint32_t kernelW,
+                                 uint32_t strideH, uint32_t strideW,
+                                 uint32_t padH, uint32_t padW,
+                                 uint32_t dilationH, uint32_t dilationW,
+                                 uint32_t groups, uint32_t outHeight, uint32_t outWidth,
+                                 uint32_t hasBias, uint32_t totalLength, uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->inChannels = inChannels;
+        this->inHeight = inHeight;
+        this->inWidth = inWidth;
+        this->outChannels = outChannels;
+        this->kernelH = kernelH;
+        this->kernelW = kernelW;
+        this->strideH = strideH;
+        this->strideW = strideW;
+        this->padH = padH;
+        this->padW = padW;
+        this->dilationH = dilationH;
+        this->dilationW = dilationW;
+        this->groups = groups;
+        this->outHeight = outHeight;
+        this->outWidth = outWidth;
+        this->hasBias = hasBias;
+        
+        uint32_t totalOutPixels = batchSize * outChannels * outHeight * outWidth;
+        uint32_t numBlocks = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        
+        this->outChannelsPerGroup = outChannels / groups;
+        this->inChannelsPerGroup = inChannels / groups;
+        
+        uint32_t pixelsPerBlock = totalOutPixels / numBlocks;
+        uint32_t remainder = totalOutPixels % numBlocks;
+        
+        if (blockIdx < remainder) {
+            this->startPixel = blockIdx * (pixelsPerBlock + 1);
+            this->pixelCount = pixelsPerBlock + 1;
+        } else {
+            this->startPixel = remainder * (pixelsPerBlock + 1) + (blockIdx - remainder) * pixelsPerBlock;
+            this->pixelCount = pixelsPerBlock;
+        }
+        
+        xGm.SetGlobalBuffer((__gm__ float*)x, batchSize * inChannels * inHeight * inWidth);
+        weightGm.SetGlobalBuffer((__gm__ float*)weight, outChannels * inChannelsPerGroup * kernelH * kernelW);
+        if (hasBias) {
+            biasGm.SetGlobalBuffer((__gm__ float*)bias, outChannels);
+        }
+        yGm.SetGlobalBuffer((__gm__ float*)y, batchSize * outChannels * outHeight * outWidth);
+    }
+    
+    __aicore__ inline void Process()
+    {
+        for (uint32_t i = 0; i < this->pixelCount; i++) {
+            uint32_t globalIdx = this->startPixel + i;
+            
+            uint32_t ow = globalIdx % outWidth;
+            uint32_t tmp = globalIdx / outWidth;
+            uint32_t oh = tmp % outHeight;
+            tmp = tmp / outHeight;
+            uint32_t oc = tmp % outChannels;
+            uint32_t n = tmp / outChannels;
+            
+            uint32_t g = oc / outChannelsPerGroup;
+            uint32_t ocInGroup = oc % outChannelsPerGroup;
+            
+            float sum = 0.0f;
+            
+            uint32_t inCStart = g * inChannelsPerGroup;
+            
+            for (uint32_t ic = 0; ic < inChannelsPerGroup; ic++) {
+                for (uint32_t kh = 0; kh < kernelH; kh++) {
+                    for (uint32_t kw = 0; kw < kernelW; kw++) {
+                        int32_t ih = (int32_t)(oh * strideH + kh * dilationH) - (int32_t)padH;
+                        int32_t iw = (int32_t)(ow * strideW + kw * dilationW) - (int32_t)padW;
+                        
+                        if (ih >= 0 && ih < (int32_t)inHeight && iw >= 0 && iw < (int32_t)inWidth) {
+                            uint32_t xIdx = n * inChannels * inHeight * inWidth +
+                                           (inCStart + ic) * inHeight * inWidth +
+                                           (uint32_t)ih * inWidth + (uint32_t)iw;
+                            uint32_t wIdx = oc * inChannelsPerGroup * kernelH * kernelW +
+                                           ic * kernelH * kernelW +
+                                           kh * kernelW + kw;
+                            
+                            float xVal = xGm.GetValue(xIdx);
+                            float wVal = weightGm.GetValue(wIdx);
+                            sum += xVal * wVal;
+                        }
+                    }
+                }
+            }
+            
+            if (hasBias) {
+                float bVal = biasGm.GetValue(oc);
+                sum += bVal;
+            }
+            
+            uint32_t yIdx = n * outChannels * outHeight * outWidth +
+                           oc * outHeight * outWidth +
+                           oh * outWidth + ow;
+            yGm.SetValue(yIdx, sum);
+        }
+    }
+
+private:
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> weightGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> yGm;
+    
+    uint32_t batchSize, inChannels, inHeight, inWidth;
+    uint32_t outChannels, kernelH, kernelW;
+    uint32_t strideH, strideW, padH, padW;
+    uint32_t dilationH, dilationW, groups;
+    uint32_t outHeight, outWidth;
+    uint32_t hasBias;
+    uint32_t outChannelsPerGroup, inChannelsPerGroup;
+    uint32_t startPixel, pixelCount;
+};
+
+extern "C" __global__ __aicore__ void conv_standard_2d_asymmetric_input_asymmetric_kernel_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv2d op;
+    op.Init(x, weight, bias, y,
+            tiling_data.batchSize, tiling_data.inChannels, tiling_data.inHeight, tiling_data.inWidth,
+            tiling_data.outChannels, tiling_data.kernelH, tiling_data.kernelW,
+            tiling_data.strideH, tiling_data.strideW,
+            tiling_data.padH, tiling_data.padW,
+            tiling_data.dilationH, tiling_data.dilationW,
+            tiling_data.groups, tiling_data.outHeight, tiling_data.outWidth,
+            tiling_data.hasBias, tiling_data.totalLength, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_standard_2d_asymmetric_input_asymmetric_kernel_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& weight,
+    const c10::optional<at::Tensor>& bias_opt,
+    int64_t stride_h, int64_t stride_w,
+    int64_t pad_h, int64_t pad_w,
+    int64_t dilation_h, int64_t dilation_w,
+    int64_t groups) {
+    
+    int64_t batch = x.size(0);
+    int64_t inH = x.size(2);
+    int64_t inW = x.size(3);
+    int64_t outC = weight.size(0);
+    int64_t kH = weight.size(2);
+    int64_t kW = weight.size(3);
+    
+    int64_t outH = (inH + 2 * pad_h - dilation_h * (kH - 1) - 1) / stride_h + 1;
+    int64_t outW = (inW + 2 * pad_w - dilation_w * (kW - 1) - 1) / stride_w + 1;
+    
+    at::Tensor result = at::empty({batch, outC, outH, outW}, x.options());
+    
+    at::Tensor x_contig = x.contiguous();
+    at::Tensor w_contig = weight.contiguous();
+    
+    if (bias_opt.has_value() && bias_opt.value().defined()) {
+        at::Tensor b_contig = bias_opt.value().contiguous();
+        EXEC_NPU_CMD(aclnnConvStandard2dAsymmetricInputAsymmetricKernelCustom,
+                      x_contig, w_contig, b_contig, result,
+                      stride_h, stride_w, pad_h, pad_w, dilation_h, dilation_w, groups);
+    } else {
+        EXEC_NPU_CMD(aclnnConvStandard2dAsymmetricInputAsymmetricKernelCustom,
+                      x_contig, w_contig, result,
+                      stride_h, stride_w, pad_h, pad_w, dilation_h, dilation_w, groups);
+    }
+    
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_standard_2d_asymmetric_input_asymmetric_kernel_custom",
+           &conv_standard_2d_asymmetric_input_asymmetric_kernel_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_standard_2d_asymmetric_input_asymmetric_kernel_custom",
+          &conv_standard_2d_asymmetric_input_asymmetric_kernel_custom_impl_npu,
+          "Custom 2D convolution with asymmetric input and kernel");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized 2D convolution using custom AscendC kernel with asymmetric input and kernel sizes.
+    """
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: tuple, stride: tuple = (1, 1), padding: tuple = (0, 0), dilation: tuple = (1, 1), groups: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.conv2d = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias)
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.groups = groups
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        bias_opt = self.conv2d.bias if self.conv2d.bias is not None else None
+        return custom_ops_lib.conv_standard_2d_asymmetric_input_asymmetric_kernel_custom(
+            x, self.conv2d.weight, bias_opt,
+            self.stride[0], self.stride[1],
+            self.padding[0], self.padding[1],
+            self.dilation[0], self.dilation[1],
+            self.groups
+        )
+'''
+```

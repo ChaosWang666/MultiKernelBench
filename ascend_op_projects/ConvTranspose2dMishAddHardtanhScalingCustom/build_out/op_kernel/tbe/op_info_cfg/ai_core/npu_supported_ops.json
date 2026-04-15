@@ -1,0 +1,6 @@
+{
+  "ConvTranspose2dMishAddHardtanhScalingCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

@@ -1,0 +1,115 @@
+{
+ "binFileName": "SgdCustom_b64193339c2a38883fac09b4cdd2a599",
+ "binFileSuffix": ".o",
+ "blockDim": -1,
+ "coreType": "VectorCore",
+ "core_type": "AIV",
+ "intercoreSync": 0,
+ "kernelName": "SgdCustom_b64193339c2a38883fac09b4cdd2a599",
+ "magic": "RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+ "memoryStamping": [],
+ "opParaSize": 24,
+ "parameters": [
+  null,
+  null,
+  null,
+  null,
+  null
+ ],
+ "sha256": "9c362b1fa9d021961a31a53cc658e18f96efbeb34348bcea5e427486491be74d",
+ "workspace": {
+  "num": 1,
+  "size": [
+   -1
+  ],
+  "type": [
+   0
+  ]
+ },
+ "kernelList": [
+  {
+   "kernelName": "SgdCustom_b64193339c2a38883fac09b4cdd2a599_0"
+  }
+ ],
+ "optionalInputMode": "gen_placeholder",
+ "optionalOutputMode": "gen_placeholder",
+ "supportSuperKernel": 1,
+ "compileInfo": {},
+ "supportInfo": {
+  "implMode": "high_performance",
+  "int64Mode": false,
+  "simplifiedKeyMode": 0,
+  "simplifiedKey": [
+   "SgdCustom/d=0,p=1/0,2/0,2/0,2/0,2",
+   "SgdCustom/d=0,p=0/0,2/0,2/0,2/0,2",
+   "SgdCustom/d=1,p=1/0,2/0,2/0,2/0,2",
+   "SgdCustom/d=1,p=0/0,2/0,2/0,2/0,2"
+  ],
+  "optionalInputMode": "gen_placeholder",
+  "optionalOutputMode": "gen_placeholder",
+  "staticKey": "2a7dc48f5edc181073cb0e6b4ee1658801509b7e917508fc862ccce46356b784,56ae54c915992f95dfb31e66477c3f9e86c6deb440d3d03cc7d014d555f65d91",
+  "inputs": [
+   {
+    "name": "param",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   },
+   {
+    "name": "grad",
+    "index": 1,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   },
+   {
+    "name": "velocity",
+    "index": 2,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "param_out",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "attrs": [
+   {
+    "name": "momentum",
+    "dtype": "float",
+    "value": 0.0
+   },
+   {
+    "name": "lr",
+    "dtype": "float",
+    "value": 0.0
+   }
+  ],
+  "opMode": "dynamic",
+  "deterministic": "ignore"
+ },
+ "filePath": "ascend910b/sgd_custom/SgdCustom_b64193339c2a38883fac09b4cdd2a599.json"
+}

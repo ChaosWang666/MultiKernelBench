@@ -1,0 +1,3 @@
+all: matmul_swish_sum_group_norm_custom0
+matmul_swish_sum_group_norm_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MatmulSwishSumGroupNormCustom/build_out/op_kernel/MatmulSwishSumGroupNormCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MatmulSwishSumGroupNormCustom/build_out/op_kernel/MatmulSwishSumGroupNormCustom_ascend910b/bin_param/MatmulSwishSumGroupNormCustom-matmul_swish_sum_group_norm_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

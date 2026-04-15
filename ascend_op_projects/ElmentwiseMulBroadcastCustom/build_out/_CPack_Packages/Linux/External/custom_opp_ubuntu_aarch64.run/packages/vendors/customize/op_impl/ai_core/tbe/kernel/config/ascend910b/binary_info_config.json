@@ -1,0 +1,45 @@
+{
+  "ElmentwiseMulBroadcastCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "y",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "z",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "ElmentwiseMulBroadcastCustom/d=0,p=1/0,2/0,2/0,2",
+          "ElmentwiseMulBroadcastCustom/d=0,p=0/0,2/0,2/0,2",
+          "ElmentwiseMulBroadcastCustom/d=1,p=1/0,2/0,2/0,2",
+          "ElmentwiseMulBroadcastCustom/d=1,p=0/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/elmentwise_mul_broadcast_custom/ElmentwiseMulBroadcastCustom_b4e1f091ed1d9030e9b99a70bdf8ae27.o",
+        "jsonPath": "ascend910b/elmentwise_mul_broadcast_custom/ElmentwiseMulBroadcastCustom_b4e1f091ed1d9030e9b99a70bdf8ae27.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "MatmulForUpperTriangularMatricesCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

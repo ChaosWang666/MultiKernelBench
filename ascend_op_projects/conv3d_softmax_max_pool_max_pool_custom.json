@@ -1,0 +1,53 @@
+
+[
+    {
+        "op": "Conv3dSoftmaxMaxPoolMaxPoolCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "in_channels",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "out_channels",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "kernel_size",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "pool_kernel_size",
+                "type": "int",
+                "default_value": "0"
+            }
+        ]
+    }
+]

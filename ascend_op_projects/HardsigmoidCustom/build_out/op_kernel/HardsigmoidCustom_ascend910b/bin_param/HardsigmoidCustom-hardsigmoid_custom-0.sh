@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "[ascend910b] Generating HardsigmoidCustom_6ffe5bbeededc749d650b61ad954f097 ..."
+echo "[ascend910b] Generating HardsigmoidCustom_ba06f03231de60c48ccf22450393b910 ..."
 export ASCEND_GLOBAL_LOG_LEVEL=3
 export ASCEND_SLOG_PRINT_TO_STDOUT=1
 
@@ -17,17 +17,17 @@ while true; do
       ;;
   esac
 done
-res=$(opc $1 --main_func=hardsigmoid_custom --input_param=/data/w00936672/MultiKernelBench/ascend_op_projects/HardsigmoidCustom/build_out/op_kernel/HardsigmoidCustom_ascend910b/bin_param/HardsigmoidCustom_6ffe5bbeededc749d650b61ad954f097_param.json --soc_version=Ascend910B1                 --output=$2 --impl_mode=high_performance,optional --simplified_key_mode=0 --op_mode=dynamic )
+res=$(opc $1 --main_func=hardsigmoid_custom --input_param=/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/HardsigmoidCustom/build_out/op_kernel/HardsigmoidCustom_ascend910b/bin_param/HardsigmoidCustom_ba06f03231de60c48ccf22450393b910_param.json --soc_version=Ascend910B1                 --output=$2 --impl_mode=high_performance,optional --simplified_key_mode=0 --op_mode=dynamic )
 
 echo "${res}"
 
-if ! test -f $2/HardsigmoidCustom_6ffe5bbeededc749d650b61ad954f097.json ; then
-  echo "$2/HardsigmoidCustom_6ffe5bbeededc749d650b61ad954f097.json not generated!"
+if ! test -f $2/HardsigmoidCustom_ba06f03231de60c48ccf22450393b910.json ; then
+  echo "$2/HardsigmoidCustom_ba06f03231de60c48ccf22450393b910.json not generated!"
   exit 1
 fi
 
-if ! test -f $2/HardsigmoidCustom_6ffe5bbeededc749d650b61ad954f097.o ; then
-  echo "$2/HardsigmoidCustom_6ffe5bbeededc749d650b61ad954f097.o not generated!"
+if ! test -f $2/HardsigmoidCustom_ba06f03231de60c48ccf22450393b910.o ; then
+  echo "$2/HardsigmoidCustom_ba06f03231de60c48ccf22450393b910.o not generated!"
   exit 1
 fi
-echo "[ascend910b] Generating HardsigmoidCustom_6ffe5bbeededc749d650b61ad954f097 Done"
+echo "[ascend910b] Generating HardsigmoidCustom_ba06f03231de60c48ccf22450393b910 Done"

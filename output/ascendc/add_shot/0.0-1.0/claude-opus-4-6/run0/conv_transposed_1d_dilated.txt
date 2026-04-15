@@ -1,0 +1,488 @@
+
+
+Looking at this architecture, I need to implement a transposed 1D convolution with dilation using custom AscendC kernels. The transposed 1D convolution computes the output by essentially scattering input values through the kernel weights with appropriate stride, padding, and dilation parameters.
+
+Let me analyze the parameters:
+- batch_size=32, in_channels=32, out_channels=64, kernel_size=5, length=131072
+- stride=1, padding=0, dilation=3
+- Output length = (length - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + 1
+
+The transposed convolution can be viewed as: for each output position, sum over input channels and kernel positions where the input contributes.
+
+Given the complexity, I'll implement this as a custom operator:
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvTransposed1dDilatedCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTransposed1dDilatedCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, inputLength);
+  TILING_DATA_FIELD_DEF(uint32_t, outputLength);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, stride);
+  TILING_DATA_FIELD_DEF(uint32_t, padding);
+  TILING_DATA_FIELD_DEF(uint32_t, dilation);
+  TILING_DATA_FIELD_DEF(uint32_t, blockDim);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTransposed1dDilatedCustom, ConvTransposed1dDilatedCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transposed_1d_dilated_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTransposed1dDilatedCustomTilingData tiling;
+
+    // x shape: (batch, in_channels, length)
+    const gert::Shape* xShape = context->GetInputShape(0);
+    // weight shape: (in_channels, out_channels, kernel_size)
+    const gert::Shape* wShape = context->GetInputShape(1);
+
+    uint32_t batchSize = xShape->GetDim(0);
+    uint32_t inChannels = xShape->GetDim(1);
+    uint32_t inputLength = xShape->GetDim(2);
+    uint32_t outChannels = wShape->GetDim(1);
+    uint32_t kernelSize = wShape->GetDim(2);
+
+    // We need stride, padding, dilation from attributes or we derive them
+    // For this problem: stride=1, padding=0, dilation=3
+    uint32_t stride = 1;
+    uint32_t padding = 0;
+    uint32_t dilation = 3;
+
+    // Try to get attrs
+    const auto* attrs = context->GetAttrs();
+    if (attrs != nullptr) {
+        const int64_t* stridePtr = attrs->GetAttrPointer<int64_t>(0);
+        if (stridePtr) stride = (uint32_t)(*stridePtr);
+        const int64_t* paddingPtr = attrs->GetAttrPointer<int64_t>(1);
+        if (paddingPtr) padding = (uint32_t)(*paddingPtr);
+        const int64_t* dilationPtr = attrs->GetAttrPointer<int64_t>(2);
+        if (dilationPtr) dilation = (uint32_t)(*dilationPtr);
+    }
+
+    uint32_t outputLength = (inputLength - 1) * stride - 2 * padding + dilation * (kernelSize - 1) + 1;
+
+    // We dispatch across batch * outChannels
+    uint32_t totalTasks = batchSize * outChannels;
+    uint32_t blockDim = totalTasks < 32 ? totalTasks : 32;
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_inputLength(inputLength);
+    tiling.set_outputLength(outputLength);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_stride(stride);
+    tiling.set_padding(padding);
+    tiling.set_dilation(dilation);
+    tiling.set_blockDim(blockDim);
+    tiling.set_tileNum(8);
+
+    context->SetBlockDim(blockDim);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* xShape = context->GetInputShape(0);
+    const gert::Shape* wShape = context->GetInputShape(1);
+    gert::Shape* yShape = context->GetOutputShape(0);
+
+    int64_t batchSize = xShape->GetDim(0);
+    int64_t inChannels = xShape->GetDim(1);
+    int64_t inputLength = xShape->GetDim(2);
+    int64_t outChannels = wShape->GetDim(1);
+    int64_t kernelSize = wShape->GetDim(2);
+
+    int64_t stride = 1;
+    int64_t padding = 0;
+    int64_t dilation = 3;
+
+    const auto* attrs = context->GetAttrs();
+    if (attrs != nullptr) {
+        const int64_t* stridePtr = attrs->GetAttrPointer<int64_t>(0);
+        if (stridePtr) stride = *stridePtr;
+        const int64_t* paddingPtr = attrs->GetAttrPointer<int64_t>(1);
+        if (paddingPtr) padding = *paddingPtr;
+        const int64_t* dilationPtr = attrs->GetAttrPointer<int64_t>(2);
+        if (dilationPtr) dilation = *dilationPtr;
+    }
+
+    int64_t outputLength = (inputLength - 1) * stride - 2 * padding + dilation * (kernelSize - 1) + 1;
+
+    yShape->SetDimNum(3);
+    yShape->SetDim(0, batchSize);
+    yShape->SetDim(1, outChannels);
+    yShape->SetDim(2, outputLength);
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvTransposed1dDilatedCustom : public OpDef {
+public:
+    explicit ConvTransposed1dDilatedCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Attr("stride").AttrType(OPTIONAL).Int(1);
+        this->Attr("padding").AttrType(OPTIONAL).Int(0);
+        this->Attr("dilation").AttrType(OPTIONAL).Int(3);
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTransposed1dDilatedCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+// Transposed 1D convolution with dilation
+// x: (batch, inC, inL), weight: (inC, outC, kS), output: (batch, outC, outL)
+// outL = (inL-1)*stride - 2*padding + dilation*(kS-1) + 1
+// For each output[b][oc][o]: sum over ic,k of x[b][ic][i]*weight[ic][oc][k]
+//   where i = (o + padding - k*dilation) / stride, if divisible and 0<=i<inL
+
+class KernelConvTransposed1dDilated {
+public:
+    __aicore__ inline KernelConvTransposed1dDilated() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t inChannels,
+                                 uint32_t outChannels, uint32_t inputLength,
+                                 uint32_t outputLength, uint32_t kernelSize,
+                                 uint32_t stride, uint32_t padding,
+                                 uint32_t dilation, uint32_t blockDim,
+                                 uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->inputLength = inputLength;
+        this->outputLength = outputLength;
+        this->kernelSize = kernelSize;
+        this->stride = stride;
+        this->padding = padding;
+        this->dilation = dilation;
+        this->blockDim = blockDim;
+
+        // Total tasks = batchSize * outChannels
+        this->totalTasks = batchSize * outChannels;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inChannels * inputLength);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, inChannels * outChannels * kernelSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * outChannels * outputLength);
+
+        // We need buffers for: input tile, weight tile, output accumulation, temp
+        // Allocate based on available UB
+        // Process output in tiles along outputLength dimension
+        this->tileNum = tileNum;
+        uint32_t tileLenRaw = outputLength / tileNum;
+        // Align to 8 for float (32 bytes)
+        this->tileLength = (tileLenRaw + 7) & ~7;
+        if (this->tileLength * tileNum < outputLength) {
+            this->tileLength = ((outputLength + tileNum - 1) / tileNum + 7) & ~7;
+        }
+
+        pipe.InitBuffer(outBuf, 1, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf, 1, this->tileLength * sizeof(float));
+        // For input: we need at most (tileLength + dilation*(kS-1)) / stride + 1 elements per ic
+        uint32_t maxInputTile = (this->tileLength + dilation * (kernelSize - 1)) / stride + 2;
+        maxInputTile = (maxInputTile + 7) & ~7;
+        this->maxInputTile = maxInputTile;
+        pipe.InitBuffer(inBuf, 1, maxInputTile * sizeof(float));
+        pipe.InitBuffer(wBuf, 1, ((kernelSize + 7) & ~7) * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        // Each block processes a subset of tasks
+        uint32_t tasksPerBlock = (totalTasks + blockDim - 1) / blockDim;
+        uint32_t taskStart = blockIdx * tasksPerBlock;
+        uint32_t taskEnd = taskStart + tasksPerBlock;
+        if (taskEnd > totalTasks) taskEnd = totalTasks;
+
+        for (uint32_t task = taskStart; task < taskEnd; task++) {
+            uint32_t b = task / outChannels;
+            uint32_t oc = task % outChannels;
+            ProcessOneOutput(b, oc);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOneOutput(uint32_t b, uint32_t oc)
+    {
+        // Process output[b][oc][:] in tiles along output length
+        for (uint32_t t = 0; t < outputLength; t += tileLength) {
+            uint32_t curTileLen = tileLength;
+            if (t + curTileLen > outputLength) {
+                curTileLen = outputLength - t;
+            }
+            uint32_t alignedTileLen = (curTileLen + 7) & ~7;
+
+            // Zero the output accumulator
+            AscendC::LocalTensor<float> outLocal = outBuf.Get<float>();
+            AscendC::Duplicate(outLocal, (float)0.0f, alignedTileLen);
+
+            // For each input channel
+            for (uint32_t ic = 0; ic < inChannels; ic++) {
+                // For each kernel position
+                for (uint32_t k = 0; k < kernelSize; k++) {
+                    // output pos o maps to input pos i = (o + padding - k*dilation) / stride
+                    // Need: (o + padding - k*dilation) >= 0 and divisible by stride and i < inputLength
+                    int32_t kd = (int32_t)(k * dilation);
+
+                    // Load the single weight value weight[ic][oc][k]
+                    // weight layout: (inChannels, outChannels, kernelSize)
+                    uint32_t wOffset = ic * outChannels * kernelSize + oc * kernelSize + k;
+                    AscendC::LocalTensor<float> wLocal = wBuf.Get<float>();
+                    // We need just one weight value, but DataCopy requires alignment
+                    // Copy aligned chunk
+                    uint32_t wAlignedOffset = (wOffset / 8) * 8;
+                    uint32_t wIntraOffset = wOffset - wAlignedOffset;
+                    AscendC::DataCopy(wLocal, wGm[wAlignedOffset], 8);
+                    AscendC::PipeBarrier<PIPE_ALL>();
+                    float wVal = wLocal.GetValue(wIntraOffset);
+
+                    if (wVal == 0.0f) continue;
+
+                    // For this tile of output positions [t, t+curTileLen):
+                    // i = (o + padding - kd) / stride
+                    // We need o + padding - kd >= 0 => o >= kd - padding
+                    // and (o + padding - kd) % stride == 0
+                    // and i < inputLength
+
+                    AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+                    AscendC::Duplicate(tmpLocal, (float)0.0f, alignedTileLen);
+                    AscendC::PipeBarrier<PIPE_ALL>();
+
+                    // Process element by element for correctness
+                    uint32_t xBaseOffset = b * inChannels * inputLength + ic * inputLength;
+
+                    for (uint32_t idx = 0; idx < curTileLen; idx++) {
+                        uint32_t o = t + idx;
+                        int32_t numerator = (int32_t)o + (int32_t)padding - kd;
+                        if (numerator < 0) continue;
+                        if (stride > 1 && (numerator % (int32_t)stride != 0)) continue;
+                        uint32_t i = (uint32_t)numerator / stride;
+                        if (i >= inputLength) continue;
+
+                        // Read x[b][ic][i]
+                        uint32_t xIdx = xBaseOffset + i;
+                        uint32_t xAligned = (xIdx / 8) * 8;
+                        uint32_t xIntra = xIdx - xAligned;
+                        AscendC::LocalTensor<float> inLocal = inBuf.Get<float>();
+                        AscendC::DataCopy(inLocal, xGm[xAligned], 8);
+                        AscendC::PipeBarrier<PIPE_ALL>();
+                        float xVal = inLocal.GetValue(xIntra);
+
+                        float contribution = xVal * wVal;
+                        float curVal = outLocal.GetValue(idx);
+                        outLocal.SetValue(idx, curVal + contribution);
+                    }
+                    AscendC::PipeBarrier<PIPE_ALL>();
+                }
+            }
+
+            // Write output tile
+            uint32_t yOffset = b * outChannels * outputLength + oc * outputLength + t;
+            AscendC::PipeBarrier<PIPE_ALL>();
+            // Need to handle unaligned writes
+            uint32_t alignedWrite = (curTileLen + 7) & ~7;
+            if (t + alignedWrite <= outputLength) {
+                AscendC::DataCopy(yGm[yOffset], outLocal, alignedWrite);
+            } else {
+                // Last tile might exceed, but we allocated enough in output
+                AscendC::DataCopy(yGm[yOffset], outLocal, alignedWrite);
+            }
+            AscendC::PipeBarrier<PIPE_ALL>();
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> outBuf, tmpBuf, inBuf, wBuf;
+    AscendC::GlobalTensor<float> xGm, wGm, yGm;
+    uint32_t batchSize, inChannels, outChannels, inputLength, outputLength;
+    uint32_t kernelSize, stride, padding, dilation;
+    uint32_t blockDim, totalTasks;
+    uint32_t tileNum, tileLength, maxInputTile;
+};
+
+extern "C" __global__ __aicore__ void conv_transposed_1d_dilated_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConvTransposed1dDilated op;
+    op.Init(x, weight, y,
+            tiling_data.batchSize, tiling_data.inChannels,
+            tiling_data.outChannels, tiling_data.inputLength,
+            tiling_data.outputLength, tiling_data.kernelSize,
+            tiling_data.stride, tiling_data.padding,
+            tiling_data.dilation, tiling_data.blockDim,
+            tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transposed_1d_dilated_custom_impl_npu(const at::Tensor& x, const at::Tensor& weight,
+                                                        int64_t stride, int64_t padding, int64_t dilation) {
+    int64_t batch_size = x.size(0);
+    int64_t in_channels = x.size(1);
+    int64_t input_length = x.size(2);
+    int64_t out_channels = weight.size(1);
+    int64_t kernel_size = weight.size(2);
+
+    int64_t output_length = (input_length - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + 1;
+    // Align output_length to 8
+    int64_t output_length_alloc = ((output_length + 7) / 8) * 8;
+
+    at::Tensor result = at::zeros({batch_size, out_channels, output_length_alloc}, x.options());
+
+    EXEC_NPU_CMD(aclnnConvTransposed1dDilatedCustom, x, weight, result, stride, padding, dilation);
+
+    // Slice to actual output length
+    if (output_length_alloc != output_length) {
+        result = result.slice(2, 0, output_length).contiguous();
+    }
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transposed_1d_dilated_custom", &conv_transposed_1d_dilated_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transposed_1d_dilated_custom", &conv_transposed_1d_dilated_custom_impl_npu,
+          "Transposed 1D convolution with dilation");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized transposed 1D convolution with dilation using custom AscendC kernel.
+    """
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
+                 stride: int = 1, padding: int = 0, dilation: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        # Use the original module to get properly initialized weights
+        self.conv1d_transpose = torch.nn.ConvTranspose1d(
+            in_channels, out_channels, kernel_size,
+            stride=stride, padding=padding, dilation=dilation, bias=bias
+        )
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.has_bias = bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        weight = self.conv1d_transpose.weight  # (in_channels, out_channels, kernel_size)
+        result = custom_ops_lib.conv_transposed_1d_dilated_custom(
+            x, weight, self.stride, self.padding, self.dilation
+        )
+        if self.has_bias and self.conv1d_transpose.bias is not None:
+            result = result + self.conv1d_transpose.bias.unsqueeze(0).unsqueeze(2)
+        return result
+'''
+```

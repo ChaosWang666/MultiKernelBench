@@ -1,0 +1,68 @@
+{
+  "op_type": "GemmMultiplyLeakyreluCustom",
+  "op_list": [
+    {
+      "bin_filename": "GemmMultiplyLeakyreluCustom_74ad10699431671a210028d4ec62f4e2",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "weight",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "bias",
+          "index": 2,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "z",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "multiplier",
+          "dtype": "float",
+          "value": 0.0
+        },
+        {
+          "name": "negativeSlope",
+          "dtype": "float",
+          "value": 0.0
+        }
+      ]
+    }
+  ]
+}

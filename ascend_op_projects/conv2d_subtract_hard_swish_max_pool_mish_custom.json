@@ -1,0 +1,58 @@
+
+[
+    {
+        "op": "Conv2dSubtractHardSwishMaxPoolMishCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "in_channels",
+                "type": "int",
+                "param_type": "required"
+            },
+            {
+                "name": "out_channels",
+                "type": "int",
+                "param_type": "required"
+            },
+            {
+                "name": "kernel_size",
+                "type": "int",
+                "param_type": "required"
+            },
+            {
+                "name": "subtract_value",
+                "type": "float",
+                "param_type": "required"
+            },
+            {
+                "name": "pool_kernel_size",
+                "type": "int",
+                "param_type": "required"
+            }
+        ]
+    }
+]

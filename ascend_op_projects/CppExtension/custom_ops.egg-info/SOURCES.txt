@@ -1,5 +1,5 @@
 setup.py
-/data/w00936672/MultiKernelBench/ascend_op_projects/CppExtension/csrc/op.cpp
+/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/CppExtension/csrc/op.cpp
 custom_ops.egg-info/PKG-INFO
 custom_ops.egg-info/SOURCES.txt
 custom_ops.egg-info/dependency_links.txt

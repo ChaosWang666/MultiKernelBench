@@ -1,0 +1,6 @@
+{
+  "Conv2dHardSwishReluCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

@@ -1,0 +1,78 @@
+
+[
+    {
+        "op": "SparseAttentionCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "query",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "key",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "value",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "output",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "batchSize",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "numHeads",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "seqLen",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "headDim",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "windowSize",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]

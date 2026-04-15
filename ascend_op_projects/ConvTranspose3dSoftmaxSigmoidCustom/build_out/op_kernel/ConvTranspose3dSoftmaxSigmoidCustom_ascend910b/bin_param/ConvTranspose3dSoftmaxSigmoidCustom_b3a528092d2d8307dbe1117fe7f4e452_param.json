@@ -1,0 +1,34 @@
+{
+  "op_type": "ConvTranspose3dSoftmaxSigmoidCustom",
+  "op_list": [
+    {
+      "bin_filename": "ConvTranspose3dSoftmaxSigmoidCustom_b3a528092d2d8307dbe1117fe7f4e452",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ]
+    }
+  ]
+}

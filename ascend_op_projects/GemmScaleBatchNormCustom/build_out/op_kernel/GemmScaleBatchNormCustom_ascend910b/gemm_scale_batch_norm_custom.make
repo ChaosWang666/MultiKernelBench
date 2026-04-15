@@ -1,0 +1,3 @@
+all: gemm_scale_batch_norm_custom0
+gemm_scale_batch_norm_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmScaleBatchNormCustom/build_out/op_kernel/GemmScaleBatchNormCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmScaleBatchNormCustom/build_out/op_kernel/GemmScaleBatchNormCustom_ascend910b/bin_param/GemmScaleBatchNormCustom-gemm_scale_batch_norm_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

@@ -1,0 +1,334 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvTransposed1dAsymmetricInputSquareKernelPaddedStridedDilatedCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "stride",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "padding",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "dilation",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_size",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTransposed1dAsymmetricInputSquareKernelPaddedStridedDilatedCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batch);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, stride);
+  TILING_DATA_FIELD_DEF(uint32_t, padding);
+  TILING_DATA_FIELD_DEF(uint32_t, dilation);
+  TILING_DATA_FIELD_DEF(uint32_t, inputLength);
+  TILING_DATA_FIELD_DEF(uint32_t, outputLength);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTransposed1dAsymmetricInputSquareKernelPaddedStridedDilatedCustom, ConvTransposed1dAsymmetricInputSquareKernelPaddedStridedDilatedCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transposed_1d_asymmetric_input_square_kernel_padded_strided_dilated_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTransposed1dAsymmetricInputSquareKernelPaddedStridedDilatedCustomTilingData tiling;
+    uint32_t batch = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    uint32_t inChannels = context->GetInputShape(0)->GetOriginShape().GetDim(1);
+    uint32_t outChannels = context->GetOutputShape(0)->GetOriginShape().GetDim(1);
+    uint32_t kernelSize = context->GetAttrInt("kernel_size");
+    uint32_t stride = context->GetAttrInt("stride");
+    uint32_t padding = context->GetAttrInt("padding");
+    uint32_t dilation = context->GetAttrInt("dilation");
+    uint32_t inputLength = context->GetInputShape(0)->GetOriginShape().GetDim(2);
+    uint32_t outputLength = (inputLength - 1) * stride - 2 * padding + (kernelSize - 1) * dilation + 1;
+    
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batch(batch);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_stride(stride);
+    tiling.set_padding(padding);
+    tiling.set_dilation(dilation);
+    tiling.set_inputLength(inputLength);
+    tiling.set_outputLength(outputLength);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    const gert::Shape* weight_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    uint32_t batch = x1_shape->GetOriginShape().GetDim(0);
+    uint32_t outChannels = weight_shape->GetOriginShape().GetDim(0);
+    uint32_t inputLength = x1_shape->GetOriginShape().GetDim(2);
+    uint32_t kernelSize = weight_shape->GetOriginShape().GetDim(2);
+    uint32_t stride = context->GetAttrInt("stride");
+    uint32_t padding = context->GetAttrInt("padding");
+    uint32_t dilation = context->GetAttrInt("dilation");
+    uint32_t outputLength = (inputLength - 1) * stride - 2 * padding + (kernelSize - 1) * dilation + 1;
+    y_shape->SetDim(0, batch);
+    y_shape->SetDim(1, outChannels);
+    y_shape->SetDim(2, outputLength);
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvTransposed1dAsymmetricInputSquareKernelPaddedStridedDilatedCustom : public OpDef {
+public:
+    explicit ConvTransposed1dAsymmetricInputSquareKernelPaddedStridedDilatedCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("stride").SetType(ATTR_VALUE_INT).SetInt(1);
+        this->Attr("padding").SetType(ATTR_VALUE_INT).SetInt(0);
+        this->Attr("dilation").SetType(ATTR_VALUE_INT).SetInt(1);
+        this->Attr("in_channels").SetType(ATTR_VALUE_INT).SetInt(1);
+        this->Attr("out_channels").SetType(ATTR_VALUE_INT).SetInt(1);
+        this->Attr("kernel_size").SetType(ATTR_VALUE_INT).SetInt(1);
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTransposed1dAsymmetricInputSquareKernelPaddedStridedDilatedCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+
+class KernelConvTransposed1d {
+public:
+    __aicore__ inline KernelConvTransposed1d() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR y, uint32_t batch, uint32_t inChannels, uint32_t outChannels,
+                                uint32_t kernelSize, uint32_t stride, uint32_t padding, uint32_t dilation, uint32_t inputLength, uint32_t outputLength)
+    {
+        this->batch = batch;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->kernelSize = kernelSize;
+        this->stride = stride;
+        this->padding = padding;
+        this->dilation = dilation;
+        this->inputLength = inputLength;
+        this->outputLength = outputLength;
+        this->blockLength = outputLength / AscendC::GetBlockNum();
+        this->blockStart = this->blockLength * AscendC::GetBlockIdx();
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x, batch * inChannels * inputLength);
+        weightGm.SetGlobalBuffer((__gm__ DTYPE_WEIGHT *)weight, outChannels * inChannels * kernelSize);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y, batch * outChannels * outputLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->blockLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->blockLength * sizeof(DTYPE_WEIGHT));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->blockLength * sizeof(DTYPE_Y));
+    }
+    __aicore__ inline void Process()
+    {
+        for (uint32_t b = 0; b < batch; ++b) {
+            for (uint32_t oc = 0; oc < outChannels; ++oc) {
+                for (uint32_t ic = 0; ic < inChannels; ++ic) {
+                    ProcessOneChannel(b, oc, ic);
+                }
+            }
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOneChannel(uint32_t batchId, uint32_t outCh, uint32_t inCh)
+    {
+        uint32_t weightOffset = outCh * inChannels * kernelSize + inCh * kernelSize;
+        uint32_t inputOffset = batchId * inChannels * inputLength + inCh * inputLength;
+        uint32_t outputOffset = batchId * outChannels * outputLength + outCh * outputLength;
+
+        for (uint32_t i = 0; i < inputLength; ++i) {
+            uint32_t outputStart = i * stride - padding;
+            for (uint32_t k = 0; k < kernelSize; ++k) {
+                uint32_t outputPos = outputStart + k * dilation;
+                if (outputPos >= 0 && outputPos < outputLength) {
+                    float val = xGm[inputOffset + i];
+                    float w = weightGm[weightOffset + k];
+                    yGm[outputOffset + outputPos] += val * w;
+                }
+            }
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueWeight;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_WEIGHT> weightGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    uint32_t batch;
+    uint32_t inChannels;
+    uint32_t outChannels;
+    uint32_t kernelSize;
+    uint32_t stride;
+    uint32_t padding;
+    uint32_t dilation;
+    uint32_t inputLength;
+    uint32_t outputLength;
+    uint32_t blockLength;
+    uint32_t blockStart;
+};
+
+extern "C" __global__ __aicore__ void conv_transposed_1d_asymmetric_input_square_kernel_padded_strided_dilated_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConvTransposed1d op;
+    op.Init(x, weight, y, tiling_data.batch, tiling_data.inChannels, tiling_data.outChannels,
+            tiling_data.kernelSize, tiling_data.stride, tiling_data.padding, tiling_data.dilation,
+            tiling_data.inputLength, tiling_data.outputLength);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transposed_1d_asymmetric_input_square_kernel_padded_strided_dilated_custom_impl_npu(
+    const at::Tensor& self, const at::Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t in_channels, int64_t out_channels, int64_t kernel_size) {
+    at::Tensor result = at::empty_like(self);
+    EXEC_NPU_CMD(aclnnConvTransposed1dAsymmetricInputSquareKernelPaddedStridedDilatedCustom, self, weight, result, stride, padding, dilation, in_channels, out_channels, kernel_size);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transposed_1d_asymmetric_input_square_kernel_padded_strided_dilated_custom", &conv_transposed_1d_asymmetric_input_square_kernel_padded_strided_dilated_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transposed_1d_asymmetric_input_square_kernel_padded_strided_dilated_custom", &conv_transposed_1d_asymmetric_input_square_kernel_padded_strided_dilated_custom_impl_npu, "ConvTranspose1d with asymmetric input and square kernel");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0, dilation: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.weight = torch.nn.Parameter(torch.rand(out_channels, in_channels, kernel_size))
+        self.bias = torch.nn.Parameter(torch.zeros(out_channels)) if bias else None
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return custom_ops_lib.conv_transposed_1d_asymmetric_input_square_kernel_padded_strided_dilated_custom(
+            x, self.weight, self.stride, self.padding, self.dilation, self.in_channels, self.out_channels, self.kernel_size)
+'''
+```

@@ -1,0 +1,251 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "MseLossCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "predictions",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "targets",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "loss",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MseLossCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MseLossCustom, MseLossCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "mse_loss_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 4096;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+
+    MseLossCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class MseLossCustom : public OpDef {
+public:
+    explicit MseLossCustom(const char* name) : OpDef(name)
+    {
+        this->Input("predictions")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("targets")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("loss")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(MseLossCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+ 
+class KernelMseLoss {
+public:
+    __aicore__ inline KernelMseLoss() {}
+    __aicore__ inline void Init(GM_ADDR predictions, GM_ADDR targets, GM_ADDR loss, uint32_t totalLength, uint32_t tileNum)
+    {
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+
+        predictionsGm.SetGlobalBuffer((__gm__ DTYPE_PREDICTIONS *)predictions + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        targetsGm.SetGlobalBuffer((__gm__ DTYPE_TARGETS *)targets + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        lossGm.SetGlobalBuffer((__gm__ DTYPE_LOSS *)loss + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueuePred, BUFFER_NUM, this->tileLength * sizeof(DTYPE_PREDICTIONS));
+        pipe.InitBuffer(inQueueTarget, BUFFER_NUM, this->tileLength * sizeof(DTYPE_TARGETS));
+        pipe.InitBuffer(outQueueDiff, BUFFER_NUM, this->tileLength * sizeof(DTYPE_DIFF));
+        pipe.InitBuffer(outQueueSquare, BUFFER_NUM, this->tileLength * sizeof(DTYPE_SQUARE));
+        pipe.InitBuffer(outQueueSum, BUFFER_NUM, sizeof(DTYPE_SUM));
+    }
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_PREDICTIONS> predLocal = inQueuePred.AllocTensor<DTYPE_PREDICTIONS>();
+        AscendC::LocalTensor<DTYPE_TARGETS> targetLocal = inQueueTarget.AllocTensor<DTYPE_TARGETS>();
+        AscendC::DataCopy(predLocal, predictionsGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(targetLocal, targetsGm[progress * this->tileLength], this->tileLength);
+        inQueuePred.EnQue(predLocal);
+        inQueueTarget.EnQue(targetLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_PREDICTIONS> predLocal = inQueuePred.DeQue<DTYPE_PREDICTIONS>();
+        AscendC::LocalTensor<DTYPE_TARGETS> targetLocal = inQueueTarget.DeQue<DTYPE_TARGETS>();
+        AscendC::LocalTensor<DTYPE_DIFF> diffLocal = outQueueDiff.AllocTensor<DTYPE_DIFF>();
+        AscendC::LocalTensor<DTYPE_SQUARE> squareLocal = outQueueSquare.AllocTensor<DTYPE_SQUARE>();
+        AscendC::Sub(diffLocal, predLocal, targetLocal, this->tileLength);
+        AscendC::Mul(squareLocal, diffLocal, diffLocal, this->tileLength);
+        outQueueDiff.EnQue<DTYPE_DIFF>(diffLocal);
+        outQueueSquare.EnQue<DTYPE_SQUARE>(squareLocal);
+        inQueuePred.FreeTensor(predLocal);
+        inQueueTarget.FreeTensor(targetLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_SQUARE> squareLocal = outQueueSquare.DeQue<DTYPE_SQUARE>();
+        AscendC::LocalTensor<DTYPE_SUM> sumLocal = outQueueSum.AllocTensor<DTYPE_SUM>();
+        AscendC::ReduceSum(sumLocal, squareLocal, this->tileLength);
+        outQueueSum.EnQue<DTYPE_SUM>(sumLocal);
+        outQueueSquare.FreeTensor(squareLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueuePred, inQueueTarget;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueDiff, outQueueSquare, outQueueSum;
+    AscendC::GlobalTensor<DTYPE_PREDICTIONS> predictionsGm;
+    AscendC::GlobalTensor<DTYPE_TARGETS> targetsGm;
+    AscendC::GlobalTensor<DTYPE_LOSS> lossGm;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void mse_loss_custom(GM_ADDR predictions, GM_ADDR targets, GM_ADDR loss, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMseLoss op;
+    op.Init(predictions, targets, loss, tiling_data.totalLength, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor mse_loss_custom_impl_npu(const at::Tensor& predictions, const at::Tensor& targets) {
+    at::Tensor result = at::empty_like(predictions);
+    EXEC_NPU_CMD(aclnnMseLossCustom, predictions, targets, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("mse_loss_custom", &mse_loss_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("mse_loss_custom", &mse_loss_custom_impl_npu, "Mean Squared Error Loss");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        return custom_ops_lib.mse_loss_custom(predictions, targets)
+'''
+```

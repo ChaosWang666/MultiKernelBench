@@ -1,0 +1,45 @@
+{
+  "MatmulWithDiagonalMatricesCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "a",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "b",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "c",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "MatmulWithDiagonalMatricesCustom/d=0,p=1/0,2/0,2/0,2",
+          "MatmulWithDiagonalMatricesCustom/d=0,p=0/0,2/0,2/0,2",
+          "MatmulWithDiagonalMatricesCustom/d=1,p=1/0,2/0,2/0,2",
+          "MatmulWithDiagonalMatricesCustom/d=1,p=0/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/matmul_with_diagonal_matrices_custom/MatmulWithDiagonalMatricesCustom_5825dc9bfaa2170241ca38da29bb9b6a.o",
+        "jsonPath": "ascend910b/matmul_with_diagonal_matrices_custom/MatmulWithDiagonalMatricesCustom_5825dc9bfaa2170241ca38da29bb9b6a.json"
+      }
+    ]
+  }
+}

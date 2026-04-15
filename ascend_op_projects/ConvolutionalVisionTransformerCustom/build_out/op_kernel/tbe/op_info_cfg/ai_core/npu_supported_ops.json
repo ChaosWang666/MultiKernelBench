@@ -1,0 +1,6 @@
+{
+  "ConvolutionalVisionTransformerCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

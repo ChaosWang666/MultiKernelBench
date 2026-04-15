@@ -1,0 +1,6 @@
+{
+  "GemmBatchNormGeluGroupNormMeanReluCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

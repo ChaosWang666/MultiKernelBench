@@ -1,0 +1,3 @@
+all: take_along_dim_custom0
+take_along_dim_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/TakeAlongDimCustom/build_out/op_kernel/TakeAlongDimCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/TakeAlongDimCustom/build_out/op_kernel/TakeAlongDimCustom_ascend910b/bin_param/TakeAlongDimCustom-take_along_dim_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

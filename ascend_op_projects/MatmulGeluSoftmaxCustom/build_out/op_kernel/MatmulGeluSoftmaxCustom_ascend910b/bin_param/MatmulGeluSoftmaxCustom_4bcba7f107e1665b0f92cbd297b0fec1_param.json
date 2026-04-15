@@ -1,0 +1,34 @@
+{
+  "op_type": "MatmulGeluSoftmaxCustom",
+  "op_list": [
+    {
+      "bin_filename": "MatmulGeluSoftmaxCustom_4bcba7f107e1665b0f92cbd297b0fec1",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ]
+    }
+  ]
+}

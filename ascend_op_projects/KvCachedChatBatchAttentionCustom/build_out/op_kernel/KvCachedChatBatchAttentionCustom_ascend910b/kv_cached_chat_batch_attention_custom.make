@@ -1,0 +1,3 @@
+all: kv_cached_chat_batch_attention_custom0
+kv_cached_chat_batch_attention_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/KvCachedChatBatchAttentionCustom/build_out/op_kernel/KvCachedChatBatchAttentionCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/KvCachedChatBatchAttentionCustom/build_out/op_kernel/KvCachedChatBatchAttentionCustom_ascend910b/bin_param/KvCachedChatBatchAttentionCustom-kv_cached_chat_batch_attention_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

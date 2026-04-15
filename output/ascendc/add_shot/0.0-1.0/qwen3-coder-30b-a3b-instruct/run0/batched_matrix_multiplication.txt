@@ -1,0 +1,309 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "BatchedMatrixMultiplicationCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "a",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "b",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "c",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(BatchedMatrixMultiplicationCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, m);
+  TILING_DATA_FIELD_DEF(uint32_t, k);
+  TILING_DATA_FIELD_DEF(uint32_t, n);
+  TILING_DATA_FIELD_DEF(uint32_t, tileM);
+  TILING_DATA_FIELD_DEF(uint32_t, tileK);
+  TILING_DATA_FIELD_DEF(uint32_t, tileN);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(BatchedMatrixMultiplicationCustom, BatchedMatrixMultiplicationCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "batched_matrix_multiplication_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+
+    BatchedMatrixMultiplicationCustomTilingData tiling;
+    const gert::Shape* a_shape = context->GetInputShape(0);
+    const gert::Shape* b_shape = context->GetInputShape(1);
+    const std::vector<int64_t>& a_dims = a_shape->GetOriginShape().GetDims();
+    const std::vector<int64_t>& b_dims = b_shape->GetOriginShape().GetDims();
+
+    uint32_t batchSize = static_cast<uint32_t>(a_dims[0]);
+    uint32_t m = static_cast<uint32_t>(a_dims[1]);
+    uint32_t k = static_cast<uint32_t>(a_dims[2]);
+    uint32_t n = static_cast<uint32_t>(b_dims[2]);
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_m(m);
+    tiling.set_k(k);
+    tiling.set_n(n);
+    tiling.set_tileM(128);
+    tiling.set_tileK(64);
+    tiling.set_tileN(128);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* a_shape = context->GetInputShape(0);
+    const gert::Shape* b_shape = context->GetInputShape(1);
+    gert::Shape* c_shape = context->GetOutputShape(0);
+    *c_shape = *a_shape;
+    c_shape->GetOriginShape().SetDim(2, b_shape->GetOriginShape().GetDim(2));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class BatchedMatrixMultiplicationCustom : public OpDef {
+public:
+    explicit BatchedMatrixMultiplicationCustom(const char* name) : OpDef(name)
+    {
+        this->Input("a")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("b")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("c")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(BatchedMatrixMultiplicationCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+
+class KernelBatchedMatrixMultiplication {
+public:
+    __aicore__ inline KernelBatchedMatrixMultiplication() {}
+    __aicore__ inline void Init(GM_ADDR a, GM_ADDR b, GM_ADDR c, uint32_t batchSize, uint32_t m, uint32_t k, uint32_t n, uint32_t tileM, uint32_t tileK, uint32_t tileN)
+    {
+        this->batchSize = batchSize;
+        this->m = m;
+        this->k = k;
+        this->n = n;
+        this->tileM = tileM;
+        this->tileK = tileK;
+        this->tileN = tileN;
+        this->blockSize = AscendC::GetBlockNum();
+        this->blockId = AscendC::GetBlockIdx();
+        this->totalBlocks = (m + tileM - 1) / tileM * (n + tileN - 1) / tileN;
+        this->loopCount = (k + tileK - 1) / tileK;
+
+        aGm.SetGlobalBuffer((__gm__ float *)a, batchSize * m * k);
+        bGm.SetGlobalBuffer((__gm__ float *)b, batchSize * k * n);
+        cGm.SetGlobalBuffer((__gm__ float *)c, batchSize * m * n);
+        pipe.InitBuffer(inQueueA, BUFFER_NUM, tileM * tileK * sizeof(float));
+        pipe.InitBuffer(inQueueB, BUFFER_NUM, tileK * tileN * sizeof(float));
+        pipe.InitBuffer(outQueueC, BUFFER_NUM, tileM * tileN * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        for (uint32_t batch = 0; batch < batchSize; ++batch) {
+            ProcessBatch(batch);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessBatch(uint32_t batch)
+    {
+        uint32_t aOffset = batch * m * k;
+        uint32_t bOffset = batch * k * n;
+        uint32_t cOffset = batch * m * n;
+        uint32_t totalBlocks = (m + tileM - 1) / tileM * (n + tileN - 1) / tileN;
+        uint32_t blockId = AscendC::GetBlockIdx();
+        uint32_t blockSize = AscendC::GetBlockNum();
+        for (uint32_t block = blockId; block < totalBlocks; block += blockSize) {
+            ProcessBlock(block, aOffset, bOffset, cOffset);
+        }
+    }
+
+    __aicore__ inline void ProcessBlock(uint32_t block, uint32_t aOffset, uint32_t bOffset, uint32_t cOffset)
+    {
+        uint32_t mBlock = block / ((n + tileN - 1) / tileN);
+        uint32_t nBlock = block % ((n + tileN - 1) / tileN);
+        uint32_t mStart = mBlock * tileM;
+        uint32_t nStart = nBlock * tileN;
+        uint32_t mEnd = (mStart + tileM > m) ? m : mStart + tileM;
+        uint32_t nEnd = (nStart + tileN > n) ? n : nStart + tileN;
+        uint32_t mSize = mEnd - mStart;
+        uint32_t nSize = nEnd - nStart;
+
+        if (mSize <= 0 || nSize <= 0) return;
+
+        AscendC::LocalTensor<float> cLocal = outQueueC.AllocTensor<float>();
+        for (uint32_t i = 0; i < mSize * nSize; ++i) {
+            cLocal[i] = 0.0f;
+        }
+
+        for (uint32_t kBlock = 0; kBlock < loopCount; ++kBlock) {
+            uint32_t kStart = kBlock * tileK;
+            uint32_t kEnd = (kStart + tileK > k) ? k : kStart + tileK;
+            uint32_t kSize = kEnd - kStart;
+
+            AscendC::LocalTensor<float> aLocal = inQueueA.AllocTensor<float>();
+            AscendC::LocalTensor<float> bLocal = inQueueB.AllocTensor<float>();
+
+            AscendC::DataCopy(aLocal, aGm[aOffset + mStart * k + kStart], mSize * kSize);
+            AscendC::DataCopy(bLocal, bGm[bOffset + kStart * n + nStart], kSize * nSize);
+
+            inQueueA.EnQue(aLocal);
+            inQueueB.EnQue(bLocal);
+
+            AscendC::LocalTensor<float> aLocalDeq = inQueueA.DeQue<float>();
+            AscendC::LocalTensor<float> bLocalDeq = inQueueB.DeQue<float>();
+
+            AscendC::MatMul(cLocal, aLocalDeq, bLocalDeq, mSize, kSize, nSize, false, false);
+
+            inQueueA.FreeTensor(aLocalDeq);
+            inQueueB.FreeTensor(bLocalDeq);
+        }
+
+        AscendC::DataCopy(cGm[cOffset + mStart * n + nStart], cLocal, mSize * nSize);
+        outQueueC.FreeTensor(cLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueA, inQueueB;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueC;
+    AscendC::GlobalTensor<float> aGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> cGm;
+    uint32_t batchSize;
+    uint32_t m;
+    uint32_t k;
+    uint32_t n;
+    uint32_t tileM;
+    uint32_t tileK;
+    uint32_t tileN;
+    uint32_t blockSize;
+    uint32_t blockId;
+    uint32_t totalBlocks;
+    uint32_t loopCount;
+};
+
+extern "C" __global__ __aicore__ void batched_matrix_multiplication_custom(GM_ADDR a, GM_ADDR b, GM_ADDR c, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelBatchedMatrixMultiplication op;
+    op.Init(a, b, c, tiling_data.batchSize, tiling_data.m, tiling_data.k, tiling_data.n, tiling_data.tileM, tiling_data.tileK, tiling_data.tileN);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor batched_matrix_multiplication_custom_impl_npu(const at::Tensor& a, const at::Tensor& b) {
+    at::Tensor result = at::empty({a.size(0), a.size(1), b.size(2)}, at::TensorOptions(at::kFloat).device(at::kNPU));
+    EXEC_NPU_CMD(aclnnBatchedMatrixMultiplicationCustom, a, b, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("batched_matrix_multiplication_custom", &batched_matrix_multiplication_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("batched_matrix_multiplication_custom", &batched_matrix_multiplication_custom_impl_npu, "batched matrix multiplication");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        return custom_ops_lib.batched_matrix_multiplication_custom(A, B)
+'''
+```

@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "[ascend910b] Generating SoftmaxCustom_2b1468cd6bb3e5bee35b792533f987bc ..."
+echo "[ascend910b] Generating SoftmaxCustom_a67ad9463e03d331bfbcaed13beb864c ..."
 export ASCEND_GLOBAL_LOG_LEVEL=3
 export ASCEND_SLOG_PRINT_TO_STDOUT=1
 
@@ -17,17 +17,17 @@ while true; do
       ;;
   esac
 done
-res=$(opc $1 --main_func=softmax_custom --input_param=/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/SoftmaxCustom_ascend910b/bin_param/SoftmaxCustom_2b1468cd6bb3e5bee35b792533f987bc_param.json --soc_version=Ascend910B1                 --output=$2 --impl_mode=high_performance,optional --simplified_key_mode=0 --op_mode=dynamic )
+res=$(opc $1 --main_func=softmax_custom --input_param=/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/SoftmaxCustom_ascend910b/bin_param/SoftmaxCustom_a67ad9463e03d331bfbcaed13beb864c_param.json --soc_version=Ascend910B1                 --output=$2 --impl_mode=high_performance,optional --simplified_key_mode=0 --op_mode=dynamic )
 
 echo "${res}"
 
-if ! test -f $2/SoftmaxCustom_2b1468cd6bb3e5bee35b792533f987bc.json ; then
-  echo "$2/SoftmaxCustom_2b1468cd6bb3e5bee35b792533f987bc.json not generated!"
+if ! test -f $2/SoftmaxCustom_a67ad9463e03d331bfbcaed13beb864c.json ; then
+  echo "$2/SoftmaxCustom_a67ad9463e03d331bfbcaed13beb864c.json not generated!"
   exit 1
 fi
 
-if ! test -f $2/SoftmaxCustom_2b1468cd6bb3e5bee35b792533f987bc.o ; then
-  echo "$2/SoftmaxCustom_2b1468cd6bb3e5bee35b792533f987bc.o not generated!"
+if ! test -f $2/SoftmaxCustom_a67ad9463e03d331bfbcaed13beb864c.o ; then
+  echo "$2/SoftmaxCustom_a67ad9463e03d331bfbcaed13beb864c.o not generated!"
   exit 1
 fi
-echo "[ascend910b] Generating SoftmaxCustom_2b1468cd6bb3e5bee35b792533f987bc Done"
+echo "[ascend910b] Generating SoftmaxCustom_a67ad9463e03d331bfbcaed13beb864c Done"

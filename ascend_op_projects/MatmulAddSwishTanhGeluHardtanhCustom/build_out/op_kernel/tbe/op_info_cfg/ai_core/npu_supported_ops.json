@@ -1,0 +1,6 @@
+{
+  "MatmulAddSwishTanhGeluHardtanhCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

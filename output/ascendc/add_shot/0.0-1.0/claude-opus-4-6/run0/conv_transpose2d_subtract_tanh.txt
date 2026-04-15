@@ -1,0 +1,320 @@
+
+
+Looking at the architecture, I need to analyze what operations can be fused into a custom kernel. The model performs:
+1. Transposed convolution (complex operation, best left to existing optimized kernels)
+2. Subtract bias
+3. Tanh activation
+
+I'll fuse the subtract bias + tanh into a single custom AscendC kernel, keeping the transposed convolution as the standard PyTorch operator.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose2dSubtractTanhCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose2dSubtractTanhCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose2dSubtractTanhCustom, ConvTranspose2dSubtractTanhCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose2d_subtract_tanh_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 4096;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose2dSubtractTanhCustomTilingData tiling;
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* bias_shape = context->GetInputShape(1);
+    uint32_t totalLength = x_shape->GetOriginShape().GetShapeSize();
+    
+    // x shape: [N, C, H, W]
+    uint32_t outChannels = x_shape->GetOriginShape().GetDim(1);
+    uint32_t H = x_shape->GetOriginShape().GetDim(2);
+    uint32_t W = x_shape->GetOriginShape().GetDim(3);
+    uint32_t spatialSize = H * W;
+    
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.set_outChannels(outChannels);
+    tiling.set_spatialSize(spatialSize);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvTranspose2dSubtractTanhCustom : public OpDef {
+public:
+    explicit ConvTranspose2dSubtractTanhCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose2dSubtractTanhCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelSubtractTanh {
+public:
+    __aicore__ inline KernelSubtractTanh() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR z,
+                                 uint32_t totalLength, uint32_t tileNum,
+                                 uint32_t outChannels, uint32_t spatialSize)
+    {
+        this->totalLength = totalLength;
+        this->outChannels = outChannels;
+        this->spatialSize = spatialSize;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, outChannels);
+        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::LocalTensor<float> biasLocal = tmpBuf.Get<float>();
+
+        // Calculate the global offset for this tile
+        uint32_t globalOffset = this->blockLength * AscendC::GetBlockIdx() + progress * this->tileLength;
+        // channelSpatial = outChannels * spatialSize
+        uint32_t channelSpatial = this->outChannels * this->spatialSize;
+
+        // Fill bias values for each element in the tile
+        for (uint32_t i = 0; i < this->tileLength; i++) {
+            uint32_t globalIdx = globalOffset + i;
+            // For NCHW: channel = (globalIdx % (C*H*W)) / (H*W)
+            uint32_t idxInSample = globalIdx % channelSpatial;
+            uint32_t c = idxInSample / this->spatialSize;
+            biasLocal.SetValue(i, biasGm.GetValue(c));
+        }
+
+        // x - bias
+        AscendC::Sub(zLocal, xLocal, biasLocal, this->tileLength);
+        // tanh
+        // Use formula: tanh(x) = 2*sigmoid(2x) - 1
+        // Or use the built-in Tanh if available
+        // AscendC has no direct Tanh, we use: tanh(x) via Div(Sinh, Cosh) or via exp
+        // Actually let's try using the available math: tanh(x) = (exp(2x)-1)/(exp(2x)+1)
+        
+        // tmpLocal for intermediate
+        AscendC::LocalTensor<float> tmpLocal = xLocal; // reuse xLocal buffer
+        
+        // Compute 2*z
+        float twoVal = 2.0f;
+        AscendC::Muls(tmpLocal, zLocal, twoVal, this->tileLength);
+        // exp(2*z)
+        AscendC::Exp(tmpLocal, tmpLocal, this->tileLength);
+        
+        // numerator = exp(2x) - 1
+        AscendC::LocalTensor<float> numLocal = biasLocal; // reuse
+        AscendC::Adds(numLocal, tmpLocal, -1.0f, this->tileLength);
+        
+        // denominator = exp(2x) + 1
+        AscendC::Adds(tmpLocal, tmpLocal, 1.0f, this->tileLength);
+        
+        // tanh = num / denom
+        AscendC::Div(zLocal, numLocal, tmpLocal, this->tileLength);
+        
+        outQueueZ.EnQue<float>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t totalLength;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t outChannels;
+    uint32_t spatialSize;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose2d_subtract_tanh_custom(GM_ADDR x, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelSubtractTanh op;
+    op.Init(x, bias, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.outChannels, tiling_data.spatialSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose2d_subtract_tanh_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnConvTranspose2dSubtractTanhCustom, x, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose2d_subtract_tanh_custom", &conv_transpose2d_subtract_tanh_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose2d_subtract_tanh_custom", &conv_transpose2d_subtract_tanh_custom_impl_npu, "subtract bias and tanh");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model that performs transposed convolution, then uses a custom fused
+    subtract-bias + tanh kernel.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, bias_shape, stride=2, padding=1, output_padding=1):
+        super().__init__()
+        self.conv_transpose = torch.nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, output_padding=output_padding)
+        self.bias = torch.nn.Parameter(torch.randn(bias_shape))
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = custom_ops_lib.conv_transpose2d_subtract_tanh_custom(x, self.bias)
+        return x
+'''
+```

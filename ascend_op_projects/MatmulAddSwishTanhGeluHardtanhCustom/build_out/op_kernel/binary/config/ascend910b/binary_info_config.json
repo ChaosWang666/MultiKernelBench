@@ -1,0 +1,45 @@
+{
+  "MatmulAddSwishTanhGeluHardtanhCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "add_value",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "z",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "MatmulAddSwishTanhGeluHardtanhCustom/d=0,p=1/0,2/0,2/0,2",
+          "MatmulAddSwishTanhGeluHardtanhCustom/d=0,p=0/0,2/0,2/0,2",
+          "MatmulAddSwishTanhGeluHardtanhCustom/d=1,p=1/0,2/0,2/0,2",
+          "MatmulAddSwishTanhGeluHardtanhCustom/d=1,p=0/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/matmul_add_swish_tanh_gelu_hardtanh_custom/MatmulAddSwishTanhGeluHardtanhCustom_64f8943efd629522370cb86c5bbeb1d8.o",
+        "jsonPath": "ascend910b/matmul_add_swish_tanh_gelu_hardtanh_custom/MatmulAddSwishTanhGeluHardtanhCustom_64f8943efd629522370cb86c5bbeb1d8.json"
+      }
+    ]
+  }
+}

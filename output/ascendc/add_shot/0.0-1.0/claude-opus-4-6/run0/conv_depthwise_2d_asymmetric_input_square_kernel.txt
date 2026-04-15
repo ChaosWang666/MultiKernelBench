@@ -1,0 +1,516 @@
+
+
+Looking at this architecture, I need to implement a depthwise 2D convolution with asymmetric input and square kernel as a custom AscendC kernel. This is a depthwise convolution where `groups=in_channels`, meaning each input channel is convolved with its own filter.
+
+Let me analyze the parameters:
+- batch_size=64, in_channels=128, out_channels=128 (must equal in_channels for depthwise)
+- kernel_size=3, stride=1, padding=0
+- Input: (64, 128, 256, 512), Output: (64, 128, 254, 510)
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvDepthwise2dAsymmetricInputSquareKernelCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "batch_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "height_in",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "width_in",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "stride",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "padding",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvDepthwise2dAsymmetricInputSquareKernelCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, heightIn);
+  TILING_DATA_FIELD_DEF(uint32_t, widthIn);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, stride);
+  TILING_DATA_FIELD_DEF(uint32_t, padding);
+  TILING_DATA_FIELD_DEF(uint32_t, heightOut);
+  TILING_DATA_FIELD_DEF(uint32_t, widthOut);
+  TILING_DATA_FIELD_DEF(uint32_t, totalTasks);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvDepthwise2dAsymmetricInputSquareKernelCustom, ConvDepthwise2dAsymmetricInputSquareKernelCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_depthwise_2d_asymmetric_input_square_kernel_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvDepthwise2dAsymmetricInputSquareKernelCustomTilingData tiling;
+
+    auto attrs = context->GetAttrs();
+    uint32_t batchSize = *(attrs->GetAttrPointer<uint32_t>(0));
+    uint32_t channels = *(attrs->GetAttrPointer<uint32_t>(1));
+    uint32_t heightIn = *(attrs->GetAttrPointer<uint32_t>(2));
+    uint32_t widthIn = *(attrs->GetAttrPointer<uint32_t>(3));
+    uint32_t kernelSize = *(attrs->GetAttrPointer<uint32_t>(4));
+    uint32_t stride = *(attrs->GetAttrPointer<uint32_t>(5));
+    uint32_t padding = *(attrs->GetAttrPointer<uint32_t>(6));
+
+    uint32_t heightOut = (heightIn + 2 * padding - kernelSize) / stride + 1;
+    uint32_t widthOut = (widthIn + 2 * padding - kernelSize) / stride + 1;
+    uint32_t totalTasks = batchSize * channels;
+
+    context->SetBlockDim(BLOCK_DIM);
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_channels(channels);
+    tiling.set_heightIn(heightIn);
+    tiling.set_widthIn(widthIn);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_stride(stride);
+    tiling.set_padding(padding);
+    tiling.set_heightOut(heightOut);
+    tiling.set_widthOut(widthOut);
+    tiling.set_totalTasks(totalTasks);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvDepthwise2dAsymmetricInputSquareKernelCustom : public OpDef {
+public:
+    explicit ConvDepthwise2dAsymmetricInputSquareKernelCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("batch_size").AttrType(REQUIRED).Int();
+        this->Attr("channels").AttrType(REQUIRED).Int();
+        this->Attr("height_in").AttrType(REQUIRED).Int();
+        this->Attr("width_in").AttrType(REQUIRED).Int();
+        this->Attr("kernel_size").AttrType(REQUIRED).Int();
+        this->Attr("stride").AttrType(REQUIRED).Int();
+        this->Attr("padding").AttrType(REQUIRED).Int();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvDepthwise2dAsymmetricInputSquareKernelCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+using namespace AscendC;
+
+class KernelConvDw {
+public:
+    __aicore__ inline KernelConvDw() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR y,
+                                uint32_t batchSize, uint32_t channels,
+                                uint32_t heightIn, uint32_t widthIn,
+                                uint32_t kernelSize, uint32_t stride,
+                                uint32_t padding, uint32_t heightOut,
+                                uint32_t widthOut, uint32_t totalTasks)
+    {
+        this->batchSize = batchSize;
+        this->channels = channels;
+        this->heightIn = heightIn;
+        this->widthIn = widthIn;
+        this->kernelSize = kernelSize;
+        this->stride = stride;
+        this->padding = padding;
+        this->heightOut = heightOut;
+        this->widthOut = widthOut;
+        this->totalTasks = totalTasks;
+
+        uint32_t blockNum = GetBlockNum();
+        uint32_t blockIdx = GetBlockIdx();
+
+        this->tasksPerBlock = (totalTasks + blockNum - 1) / blockNum;
+        this->taskStart = blockIdx * this->tasksPerBlock;
+        this->taskEnd = taskStart + tasksPerBlock;
+        if (this->taskEnd > totalTasks) this->taskEnd = totalTasks;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, (uint64_t)batchSize * channels * heightIn * widthIn);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, (uint64_t)channels * 1 * kernelSize * kernelSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y, (uint64_t)batchSize * channels * heightOut * widthOut);
+
+        // Align widthOut to 8 for vectorized operations
+        this->widthOutAligned = ((widthOut + 7) / 8) * 8;
+
+        // Buffer sizes
+        uint32_t inputRowBytes = widthIn * sizeof(float);
+        uint32_t outputRowBytes = widthOutAligned * sizeof(float);
+        uint32_t kernelBytes = ((kernelSize * kernelSize + 7) / 8) * 8 * sizeof(float);
+
+        // We process one output row at a time
+        // Need kernelSize input rows + 1 output row + kernel weights
+        pipe.InitBuffer(inQueueX, 1, kernelSize * ((widthIn * sizeof(float) + 31) / 32) * 32);
+        pipe.InitBuffer(outQueueY, 1, (widthOutAligned * sizeof(float) + 31) / 32 * 32);
+        pipe.InitBuffer(inQueueW, 1, kernelBytes > 32 ? kernelBytes : 32);
+        pipe.InitBuffer(tmpBuf, 1, (widthOutAligned * sizeof(float) + 31) / 32 * 32);
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t task = taskStart; task < taskEnd; task++) {
+            uint32_t b = task / channels;
+            uint32_t c = task % channels;
+            ProcessOneChannel(b, c);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOneChannel(uint32_t b, uint32_t c)
+    {
+        uint64_t inputOffset = ((uint64_t)b * channels + c) * heightIn * widthIn;
+        uint64_t outputOffset = ((uint64_t)b * channels + c) * heightOut * widthOut;
+        uint64_t weightOffset = (uint64_t)c * kernelSize * kernelSize;
+
+        // Load kernel weights
+        uint32_t kElems = kernelSize * kernelSize;
+        uint32_t kElemsAligned = ((kElems + 7) / 8) * 8;
+        LocalTensor<float> wLocal = inQueueW.AllocTensor<float>();
+        // Initialize to zero
+        Duplicate(wLocal, (float)0, kElemsAligned);
+        DataCopy(wLocal, wGm[weightOffset], ((kElems + 7) / 8) * 8 <= kElemsAligned ? ((kElems + 7) / 8) * 8 : kElemsAligned);
+        pipe_barrier(PIPE_ALL);
+
+        uint32_t widthInAligned = ((widthIn + 7) / 8) * 8;
+
+        for (uint32_t oh = 0; oh < heightOut; oh++) {
+            LocalTensor<float> outLocal = outQueueY.AllocTensor<float>();
+            Duplicate(outLocal, (float)0, widthOutAligned);
+            pipe_barrier(PIPE_V);
+
+            for (uint32_t kh = 0; kh < kernelSize; kh++) {
+                int32_t ih = (int32_t)(oh * stride) - (int32_t)padding + (int32_t)kh;
+                if (ih < 0 || ih >= (int32_t)heightIn) continue;
+
+                LocalTensor<float> inLocal = inQueueX.AllocTensor<float>();
+                // Load input row
+                DataCopy(inLocal, xGm[inputOffset + ih * widthIn], widthInAligned <= widthIn ? widthIn : widthInAligned);
+                pipe_barrier(PIPE_MTE2);
+
+                for (uint32_t kw = 0; kw < kernelSize; kw++) {
+                    int32_t iwStart = (int32_t)(0 * stride) - (int32_t)padding + (int32_t)kw;
+
+                    float wVal;
+                    // Read weight value
+                    uint32_t wIdx = kh * kernelSize + kw;
+
+                    LocalTensor<float> tmpLocal = tmpBuf.AllocTensor<float>();
+
+                    // For each output position ow: out[ow] += in[ow*stride + kw - padding] * w[kh][kw]
+                    // With stride=1, padding=0: out[ow] += in[ow + kw] * w[kh][kw]
+                    // This is: slice of input starting at kw, multiplied by scalar weight
+
+                    // We need to extract the weight scalar
+                    // Use Muls with scalar from weight tensor
+                    // First copy the relevant input slice to tmpLocal
+                    // input[iwStart .. iwStart + widthOut - 1] where iwStart = kw - padding (for stride=1)
+
+                    if (iwStart >= 0 && iwStart + (int32_t)widthOut <= (int32_t)widthIn) {
+                        // All valid
+                        // Muls: tmpLocal = inLocal[iwStart:] * wLocal[wIdx]
+                        // We need scalar multiplication
+                        // Strategy: copy slice, multiply by scalar, add to output
+                        
+                        // Get weight value by broadcasting
+                        Duplicate(tmpLocal, (float)0, widthOutAligned);
+                        pipe_barrier(PIPE_V);
+                        
+                        // Copy from inLocal starting at iwStart
+                        // Unfortunately we can't do local-to-local DataCopy easily
+                        // Use vector Add with offset
+                        // tmpLocal[j] = inLocal[iwStart + j] for j in [0, widthOut)
+                        
+                        // We'll use Adds to shift: not possible directly
+                        // Alternative: just do it element-wise or use gather
+
+                        // Actually, let's use the fact that with AscendC we can do:
+                        // DataCopy from GM for each needed row+offset
+                        // Then Muls by weight scalar, then Add to output
+                        
+                        DataCopy(tmpLocal, xGm[inputOffset + ih * widthIn + iwStart], widthOutAligned <= (widthIn - iwStart) ? widthOutAligned : (uint32_t)(((widthIn - iwStart) + 7) / 8) * 8);
+                        pipe_barrier(PIPE_MTE2);
+                        
+                        // Broadcast weight scalar
+                        LocalTensor<float> dummy = inLocal; // reuse after freeing
+                        
+                        // Muls tmpLocal by wLocal[wIdx]
+                        // We need scalar. AscendC Muls takes scalar.
+                        // But we have weight in local tensor. Let's read it.
+                        // Actually we can do element-wise tricks:
+                        // We can't easily extract scalar from local tensor in AscendC.
+                        // Let's load weight from GM directly as scalar won't work.
+                        // Alternative: Use Mul with broadcast.
+                        
+                        // Simplest: reload weight val from GM each time
+                        // Or: precompute on host. But kernel_size is small (3).
+                        
+                        // Let's just use: create a tensor filled with w[kh][kw] and Mul
+                        // We already have wLocal. Let's Duplicate a temp with wLocal[wIdx].
+                        // But we can't index wLocal as scalar in AscendC easily.
+                        
+                        // Actually in AscendC we can do:
+                        // float val = wLocal.GetValue(wIdx);
+                        // Muls(tmpLocal, tmpLocal, val, widthOutAligned);
+                        
+                        float wScalar = wLocal.GetValue(wIdx);
+                        Muls(tmpLocal, tmpLocal, wScalar, widthOutAligned);
+                        pipe_barrier(PIPE_V);
+                        
+                        Add(outLocal, outLocal, tmpLocal, widthOutAligned);
+                        pipe_barrier(PIPE_V);
+                    } else {
+                        // Handle boundary - shouldn't happen with padding=0 and valid kw
+                        // but handle for generality
+                        Duplicate(tmpLocal, (float)0, widthOutAligned);
+                        pipe_barrier(PIPE_V);
+                        
+                        for (uint32_t ow = 0; ow < widthOut; ow++) {
+                            int32_t iw = (int32_t)(ow * stride) + iwStart;
+                            if (iw >= 0 && iw < (int32_t)widthIn) {
+                                float inVal = inLocal.GetValue(iw);
+                                float wScalar = wLocal.GetValue(wIdx);
+                                tmpLocal.SetValue(ow, inVal * wScalar);
+                            }
+                        }
+                        pipe_barrier(PIPE_V);
+                        Add(outLocal, outLocal, tmpLocal, widthOutAligned);
+                        pipe_barrier(PIPE_V);
+                    }
+                    
+                    tmpBuf.FreeTensor(tmpLocal);
+                }
+                
+                inQueueX.FreeTensor(inLocal);
+            }
+            
+            // Write output row
+            DataCopy(yGm[outputOffset + oh * widthOut], outLocal, widthOutAligned <= widthOut ? widthOut : widthOutAligned);
+            pipe_barrier(PIPE_MTE3);
+            outQueueY.FreeTensor(outLocal);
+        }
+        
+        inQueueW.FreeTensor(wLocal);
+    }
+
+private:
+    TPipe pipe;
+    TQue<TPosition::VECIN, 1> inQueueX;
+    TQue<TPosition::VECIN, 1> inQueueW;
+    TQue<TPosition::VECOUT, 1> outQueueY;
+    TBuf<TPosition::VECCALC> tmpBuf;
+    GlobalTensor<float> xGm;
+    GlobalTensor<float> wGm;
+    GlobalTensor<float> yGm;
+
+    uint32_t batchSize, channels, heightIn, widthIn;
+    uint32_t kernelSize, stride, padding;
+    uint32_t heightOut, widthOut, widthOutAligned;
+    uint32_t totalTasks, tasksPerBlock, taskStart, taskEnd;
+};
+
+extern "C" __global__ __aicore__ void conv_depthwise_2d_asymmetric_input_square_kernel_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConvDw op;
+    op.Init(x, weight, y,
+            tiling_data.batchSize, tiling_data.channels,
+            tiling_data.heightIn, tiling_data.widthIn,
+            tiling_data.kernelSize, tiling_data.stride,
+            tiling_data.padding, tiling_data.heightOut,
+            tiling_data.widthOut, tiling_data.totalTasks);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_depthwise_2d_custom_impl_npu(const at::Tensor& x, const at::Tensor& weight,
+                                              int64_t batch_size, int64_t channels,
+                                              int64_t height_in, int64_t width_in,
+                                              int64_t kernel_size, int64_t stride, int64_t padding) {
+    int64_t height_out = (height_in + 2 * padding - kernel_size) / stride + 1;
+    int64_t width_out = (width_in + 2 * padding - kernel_size) / stride + 1;
+    
+    at::Tensor result = at::empty({batch_size, channels, height_out, width_out}, x.options());
+    
+    EXEC_NPU_CMD(aclnnConvDepthwise2dAsymmetricInputSquareKernelCustom, x, weight, result,
+                  batch_size, channels, height_in, width_in, kernel_size, stride, padding);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_depthwise_2d_asymmetric_input_square_kernel_custom", &conv_depthwise_2d_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_depthwise_2d_asymmetric_input_square_kernel_custom", &conv_depthwise_2d_custom_impl_npu,
+          "Depthwise 2D convolution custom operator");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized depthwise 2D convolution using custom AscendC kernel.
+    """
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        # Create depthwise conv weight: shape (in_channels, 1, kernel_size, kernel_size)
+        self.weight = torch.nn.Parameter(torch.empty(in_channels, 1, kernel_size, kernel_size))
+        torch.nn.init.kaiming_uniform_(self.weight)
+        if bias:
+            self.bias = torch.nn.Parameter(torch.empty(out_channels))
+        else:
+            self.bias = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.shape[0]
+        channels = x.shape[1]
+        height_in = x.shape[2]
+        width_in = x.shape[3]
+        
+        result = custom_ops_lib.conv_depthwise_2d_asymmetric_input_square_kernel_custom(
+            x, self.weight,
+            batch_size, channels, height_in, width_in,
+            self.kernel_size, self.stride, self.padding
+        )
+        
+        if self.bias is not None:
+            result = result + self.bias.reshape(1, -1, 1, 1)
+        
+        return result
+'''
+```

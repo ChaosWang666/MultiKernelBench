@@ -1,0 +1,298 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "MatmulForUpperTriangularMatricesCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "a",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "b",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "c",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulForUpperTriangularMatricesCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, N);
+  TILING_DATA_FIELD_DEF(uint32_t, tileSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulForUpperTriangularMatricesCustom, MatmulForUpperTriangularMatricesCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_for_upper_triangular_matrices_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulForUpperTriangularMatricesCustomTilingData tiling;
+    uint32_t N = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_N(N);
+    tiling.set_tileSize(128);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MatmulForUpperTriangularMatricesCustom : public OpDef {
+public:
+    explicit MatmulForUpperTriangularMatricesCustom(const char* name) : OpDef(name)
+    {
+        this->Input("a")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("b")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("c")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MatmulForUpperTriangularMatricesCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 1;
+
+class KernelMatmulUpperTri {
+public:
+    __aicore__ inline KernelMatmulUpperTri() {}
+    __aicore__ inline void Init(GM_ADDR a, GM_ADDR b, GM_ADDR c, uint32_t N, uint32_t tileSize)
+    {
+        this->N = N;
+        this->tileSize = tileSize;
+
+        aGm.SetGlobalBuffer((__gm__ float *)a, N * N);
+        bGm.SetGlobalBuffer((__gm__ float *)b, N * N);
+        cGm.SetGlobalBuffer((__gm__ float *)c, N * N);
+
+        // We need buffers for tile computation
+        // aLocal for a tile of A row segment, bLocal for a tile of B column segment
+        // accumLocal for accumulation, resultLocal for output
+        pipe.InitBuffer(inQueueA, BUFFER_NUM, tileSize * sizeof(float));
+        pipe.InitBuffer(inQueueB, BUFFER_NUM, tileSize * sizeof(float));
+        pipe.InitBuffer(outQueue, BUFFER_NUM, tileSize * sizeof(float));
+        pipe.InitBuffer(tmpBuf, BUFFER_NUM, tileSize * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        // Each block handles a subset of rows
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t rowsPerBlock = (N + blockNum - 1) / blockNum;
+        uint32_t rowStart = blockIdx * rowsPerBlock;
+        uint32_t rowEnd = rowStart + rowsPerBlock;
+        if (rowEnd > N) rowEnd = N;
+
+        for (uint32_t i = rowStart; i < rowEnd; i++) {
+            // For upper triangular result, only compute columns j >= i
+            for (uint32_t j = i; j < N; j++) {
+                // C[i][j] = sum_{k=i}^{j} A[i][k] * B[k][j]
+                // Because A is upper triangular (A[i][k]=0 for k<i)
+                // and B is upper triangular (B[k][j]=0 for k>j)
+                float sum = 0.0f;
+                uint32_t kStart = i;
+                uint32_t kEnd = j + 1; // k from i to j inclusive
+
+                uint32_t kLen = kEnd - kStart;
+                if (kLen == 0) continue;
+
+                // Process in tiles
+                uint32_t processed = 0;
+                while (processed < kLen) {
+                    uint32_t curLen = kLen - processed;
+                    if (curLen > tileSize) curLen = tileSize;
+
+                    // Align to 8 elements for DataCopy
+                    uint32_t alignedLen = ((curLen + 7) / 8) * 8;
+                    if (alignedLen > tileSize) alignedLen = tileSize;
+
+                    AscendC::LocalTensor<float> aLocal = inQueueA.AllocTensor<float>();
+                    AscendC::LocalTensor<float> bLocal = inQueueB.AllocTensor<float>();
+                    AscendC::LocalTensor<float> tmpLocal = tmpBuf.AllocTensor<float>();
+
+                    // Copy A[i][kStart+processed .. kStart+processed+alignedLen-1]
+                    uint32_t aOffset = i * N + kStart + processed;
+                    AscendC::DataCopy(aLocal, aGm[aOffset], alignedLen);
+
+                    // Copy B[kStart+processed][j], B[kStart+processed+1][j], ...
+                    // These are strided - column j of B starting at row kStart+processed
+                    // We need to copy element by element or use strided copy
+                    // For simplicity, set values individually
+                    // Actually we need to gather column elements - let's do it with a loop per element
+                    // and use scalar accumulation for correctness
+                    
+                    // Since strided gather is complex, do scalar computation
+                    AscendC::SetMaskCount();
+                    AscendC::SetMaskNorm();
+
+                    // Zero out tmpLocal
+                    AscendC::Duplicate(tmpLocal, (float)0.0f, alignedLen);
+                    
+                    // Gather B column values
+                    for (uint32_t t = 0; t < curLen; t++) {
+                        uint32_t bOffset = (kStart + processed + t) * N + j;
+                        // We'll copy a single aligned block containing our value
+                        // For simplicity, just accumulate scalarly
+                        tmpLocal.SetValue(t, bGm.GetValue(bOffset));
+                    }
+
+                    // Multiply element-wise and reduce
+                    AscendC::LocalTensor<float> resLocal = outQueue.AllocTensor<float>();
+                    AscendC::Mul(resLocal, aLocal, tmpLocal, alignedLen);
+
+                    // Sum reduction
+                    for (uint32_t t = 0; t < curLen; t++) {
+                        sum += resLocal.GetValue(t);
+                    }
+
+                    outQueue.FreeTensor(resLocal);
+                    inQueueA.FreeTensor(aLocal);
+                    inQueueB.FreeTensor(bLocal);
+                    tmpBuf.FreeTensor(tmpLocal);
+
+                    processed += curLen;
+                }
+
+                cGm.SetValue(i * N + j, sum);
+            }
+            // Set lower triangular part to zero for this row
+            for (uint32_t j = 0; j < i; j++) {
+                cGm.SetValue(i * N + j, 0.0f);
+            }
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueA, inQueueB;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+    AscendC::TQue<AscendC::TPosition::VECCALC, BUFFER_NUM> tmpBuf;
+    AscendC::GlobalTensor<float> aGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> cGm;
+    uint32_t N;
+    uint32_t tileSize;
+};
+
+extern "C" __global__ __aicore__ void matmul_for_upper_triangular_matrices_custom(GM_ADDR a, GM_ADDR b, GM_ADDR c, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMatmulUpperTri op;
+    op.Init(a, b, c, tiling_data.N, tiling_data.tileSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_for_upper_triangular_matrices_custom_impl_npu(const at::Tensor& a, const at::Tensor& b) {
+    at::Tensor result = at::empty_like(a);
+    EXEC_NPU_CMD(aclnnMatmulForUpperTriangularMatricesCustom, a, b, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_for_upper_triangular_matrices_custom", &matmul_for_upper_triangular_matrices_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_for_upper_triangular_matrices_custom", &matmul_for_upper_triangular_matrices_custom_impl_npu, "Upper triangular matrix multiplication");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, A, B):
+        return custom_ops_lib.matmul_for_upper_triangular_matrices_custom(A, B)
+'''
+```

@@ -1,0 +1,351 @@
+
+
+Looking at the SqueezeNet architecture, I'll identify a key operation to optimize with a custom AscendC kernel. The `torch.cat` operation along channel dimension combined with ReLU activations in the FireModule is a good candidate - I'll create a fused kernel that concatenates two tensors along the channel dimension, which is called repeatedly in every FireModule.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "SqueezeNetCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(SqueezeNetCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels1);
+  TILING_DATA_FIELD_DEF(uint32_t, channels2);
+  TILING_DATA_FIELD_DEF(uint32_t, height);
+  TILING_DATA_FIELD_DEF(uint32_t, width);
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength1);
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength2);
+  TILING_DATA_FIELD_DEF(uint32_t, totalLengthOut);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(SqueezeNetCustom, SqueezeNetCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "squeeze_net_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 1;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    SqueezeNetCustomTilingData tiling;
+
+    const gert::StorageShape* x_shape = context->GetInputShape(0);
+    const gert::StorageShape* y_shape = context->GetInputShape(1);
+
+    uint32_t batchSize = x_shape->GetStorageShape().GetDim(0);
+    uint32_t channels1 = x_shape->GetStorageShape().GetDim(1);
+    uint32_t channels2 = y_shape->GetStorageShape().GetDim(1);
+    uint32_t height = x_shape->GetStorageShape().GetDim(2);
+    uint32_t width = x_shape->GetStorageShape().GetDim(3);
+
+    uint32_t totalLength1 = x_shape->GetOriginShape().GetShapeSize();
+    uint32_t totalLength2 = y_shape->GetOriginShape().GetShapeSize();
+    uint32_t totalLengthOut = totalLength1 + totalLength2;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_channels1(channels1);
+    tiling.set_channels2(channels2);
+    tiling.set_height(height);
+    tiling.set_width(width);
+    tiling.set_totalLength1(totalLength1);
+    tiling.set_totalLength2(totalLength2);
+    tiling.set_totalLengthOut(totalLengthOut);
+    tiling.set_tileNum(batchSize);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* y_shape = context->GetInputShape(1);
+    gert::Shape* z_shape = context->GetOutputShape(0);
+
+    *z_shape = *x_shape;
+    z_shape->SetDim(1, x_shape->GetDim(1) + y_shape->GetDim(1));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class SqueezeNetCustom : public OpDef {
+public:
+    explicit SqueezeNetCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(SqueezeNetCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelCatChannel {
+public:
+    __aicore__ inline KernelCatChannel() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z,
+                                uint32_t batchSize, uint32_t channels1, uint32_t channels2,
+                                uint32_t height, uint32_t width,
+                                uint32_t totalLength1, uint32_t totalLength2, uint32_t totalLengthOut)
+    {
+        this->batchSize = batchSize;
+        this->channels1 = channels1;
+        this->channels2 = channels2;
+        this->height = height;
+        this->width = width;
+        this->hw = height * width;
+        this->chw1 = channels1 * this->hw;
+        this->chw2 = channels2 * this->hw;
+        this->chwOut = (channels1 + channels2) * this->hw;
+        this->totalLength1 = totalLength1;
+        this->totalLength2 = totalLength2;
+        this->totalLengthOut = totalLengthOut;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, totalLength1);
+        yGm.SetGlobalBuffer((__gm__ float *)y, totalLength2);
+        zGm.SetGlobalBuffer((__gm__ float *)z, totalLengthOut);
+
+        uint32_t maxChunkSize = this->chw1 > this->chw2 ? this->chw1 : this->chw2;
+        uint32_t bufSize = maxChunkSize * sizeof(float);
+        if (bufSize < 32) bufSize = 32;
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, bufSize);
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, bufSize);
+    }
+    __aicore__ inline void Process()
+    {
+        for (uint32_t b = 0; b < this->batchSize; b++) {
+            // Copy x part for batch b
+            CopyInX(b);
+            CopyOutX(b);
+            // Copy y part for batch b
+            CopyInY(b);
+            CopyOutY(b);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyInX(uint32_t b)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[b * this->chw1], this->chw1);
+        inQueueX.EnQue(xLocal);
+    }
+    __aicore__ inline void CopyOutX(uint32_t b)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::DataCopy(zGm[b * this->chwOut], xLocal, this->chw1);
+        inQueueX.FreeTensor(xLocal);
+    }
+    __aicore__ inline void CopyInY(uint32_t b)
+    {
+        AscendC::LocalTensor<float> yLocal = outQueueZ.AllocTensor<float>();
+        AscendC::DataCopy(yLocal, yGm[b * this->chw2], this->chw2);
+        outQueueZ.EnQue(yLocal);
+    }
+    __aicore__ inline void CopyOutY(uint32_t b)
+    {
+        AscendC::LocalTensor<float> yLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[b * this->chwOut + this->chw1], yLocal, this->chw2);
+        outQueueZ.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t batchSize;
+    uint32_t channels1;
+    uint32_t channels2;
+    uint32_t height;
+    uint32_t width;
+    uint32_t hw;
+    uint32_t chw1;
+    uint32_t chw2;
+    uint32_t chwOut;
+    uint32_t totalLength1;
+    uint32_t totalLength2;
+    uint32_t totalLengthOut;
+};
+
+extern "C" __global__ __aicore__ void squeeze_net_custom(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelCatChannel op;
+    op.Init(x, y, z,
+            tiling_data.batchSize, tiling_data.channels1, tiling_data.channels2,
+            tiling_data.height, tiling_data.width,
+            tiling_data.totalLength1, tiling_data.totalLength2, tiling_data.totalLengthOut);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor squeeze_net_custom_impl_npu(const at::Tensor& x, const at::Tensor& y) {
+    auto x_sizes = x.sizes();
+    auto y_sizes = y.sizes();
+    int64_t out_channels = x_sizes[1] + y_sizes[1];
+    auto result = at::empty({x_sizes[0], out_channels, x_sizes[2], x_sizes[3]}, x.options());
+    EXEC_NPU_CMD(aclnnSqueezeNetCustom, x, y, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("squeeze_net_custom", &squeeze_net_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("squeeze_net_custom", &squeeze_net_custom_impl_npu, "cat along channel dim");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch_npu
+import custom_ops_lib
+
+class FireModule(nn.Module):
+    def __init__(self, in_channels, squeeze_channels, expand1x1_channels, expand3x3_channels):
+        super(FireModule, self).__init__()
+        
+        self.squeeze = nn.Conv2d(in_channels, squeeze_channels, kernel_size=1)
+        self.squeeze_activation = nn.ReLU(inplace=True)
+        
+        self.expand1x1 = nn.Conv2d(squeeze_channels, expand1x1_channels, kernel_size=1)
+        self.expand1x1_activation = nn.ReLU(inplace=True)
+        
+        self.expand3x3 = nn.Conv2d(squeeze_channels, expand3x3_channels, kernel_size=3, padding=1)
+        self.expand3x3_activation = nn.ReLU(inplace=True)
+    
+    def forward(self, x):
+        x = self.squeeze_activation(self.squeeze(x))
+        out1 = self.expand1x1_activation(self.expand1x1(x))
+        out2 = self.expand3x3_activation(self.expand3x3(x))
+        return custom_ops_lib.squeeze_net_custom(out1, out2)
+
+class ModelNew(nn.Module):
+    def __init__(self, num_classes=1000):
+        super(ModelNew, self).__init__()
+        
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 96, kernel_size=7, stride=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2, ceil_mode=True),
+            FireModule(96, 16, 64, 64),
+            FireModule(128, 16, 64, 64),
+            FireModule(128, 32, 128, 128),
+            nn.MaxPool2d(kernel_size=3, stride=2, ceil_mode=True),
+            FireModule(256, 32, 128, 128),
+            FireModule(256, 48, 192, 192),
+            FireModule(384, 48, 192, 192),
+            FireModule(384, 64, 256, 256),
+            nn.MaxPool2d(kernel_size=3, stride=2, ceil_mode=True),
+            FireModule(512, 64, 256, 256),
+        )
+        
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=0.0),
+            nn.Conv2d(512, num_classes, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
+    
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return torch.flatten(x, 1)
+'''
+```

@@ -1,0 +1,3 @@
+all: power_broadcast_custom0
+power_broadcast_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/PowerBroadcastCustom/build_out/op_kernel/PowerBroadcastCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/PowerBroadcastCustom/build_out/op_kernel/PowerBroadcastCustom_ascend910b/bin_param/PowerBroadcastCustom-power_broadcast_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

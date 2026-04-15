@@ -1,0 +1,51 @@
+{
+  "KvCachedSpeculativeAttentionCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "query",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "key_cache",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "value_cache",
+          "index": 2,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "KvCachedSpeculativeAttentionCustom/d=0,p=1/0,2/0,2/0,2/0,2",
+          "KvCachedSpeculativeAttentionCustom/d=0,p=0/0,2/0,2/0,2/0,2",
+          "KvCachedSpeculativeAttentionCustom/d=1,p=1/0,2/0,2/0,2/0,2",
+          "KvCachedSpeculativeAttentionCustom/d=1,p=0/0,2/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/kv_cached_speculative_attention_custom/KvCachedSpeculativeAttentionCustom_833681daf898c4872611161e2249b379.o",
+        "jsonPath": "ascend910b/kv_cached_speculative_attention_custom/KvCachedSpeculativeAttentionCustom_833681daf898c4872611161e2249b379.json"
+      }
+    ]
+  }
+}

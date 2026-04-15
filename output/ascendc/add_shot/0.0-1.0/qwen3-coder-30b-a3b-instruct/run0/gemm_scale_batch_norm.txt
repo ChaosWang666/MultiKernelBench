@@ -1,0 +1,380 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "GemmScaleBatchNormCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "scale",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "mean",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "variance",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GemmScaleBatchNormCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, outFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GemmScaleBatchNormCustom, GemmScaleBatchNormCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "gemm_scale_batch_norm_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 1024;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+
+    GemmScaleBatchNormCustomTilingData tiling;
+    uint32_t batchSize = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    uint32_t inFeatures = context->GetInputShape(0)->GetOriginShape().GetDim(1);
+    uint32_t outFeatures = context->GetInputShape(1)->GetOriginShape().GetDim(0);
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_inFeatures(inFeatures);
+    tiling.set_outFeatures(outFeatures);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class GemmScaleBatchNormCustom : public OpDef {
+public:
+    explicit GemmScaleBatchNormCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("scale")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("mean")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("variance")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(GemmScaleBatchNormCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+
+class KernelGemmScaleBatchNorm {
+public:
+    __aicore__ inline KernelGemmScaleBatchNorm() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR scale,
+                                GM_ADDR mean, GM_ADDR variance, GM_ADDR y,
+                                uint32_t batchSize, uint32_t inFeatures, uint32_t outFeatures, uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->inFeatures = inFeatures;
+        this->outFeatures = outFeatures;
+        this->tileNum = tileNum;
+        this->blockLength = outFeatures / AscendC::GetBlockNum();
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inFeatures);
+        weightGm.SetGlobalBuffer((__gm__ float *)weight, inFeatures * outFeatures);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, outFeatures);
+        scaleGm.SetGlobalBuffer((__gm__ float *)scale, outFeatures);
+        meanGm.SetGlobalBuffer((__gm__ float *)mean, outFeatures);
+        varianceGm.SetGlobalBuffer((__gm__ float *)variance, outFeatures);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * outFeatures);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueScale, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueMean, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueVariance, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> weightLocal = inQueueWeight.AllocTensor<float>();
+        AscendC::LocalTensor<float> biasLocal = inQueueBias.AllocTensor<float>();
+        AscendC::LocalTensor<float> scaleLocal = inQueueScale.AllocTensor<float>();
+        AscendC::LocalTensor<float> meanLocal = inQueueMean.AllocTensor<float>();
+        AscendC::LocalTensor<float> varianceLocal = inQueueVariance.AllocTensor<float>();
+
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(weightLocal, weightGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(biasLocal, biasGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(scaleLocal, scaleGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(meanLocal, meanGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(varianceLocal, varianceGm[progress * this->tileLength], this->tileLength);
+
+        inQueueX.EnQue(xLocal);
+        inQueueWeight.EnQue(weightLocal);
+        inQueueBias.EnQue(biasLocal);
+        inQueueScale.EnQue(scaleLocal);
+        inQueueMean.EnQue(meanLocal);
+        inQueueVariance.EnQue(varianceLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> weightLocal = inQueueWeight.DeQue<float>();
+        AscendC::LocalTensor<float> biasLocal = inQueueBias.DeQue<float>();
+        AscendC::LocalTensor<float> scaleLocal = inQueueScale.DeQue<float>();
+        AscendC::LocalTensor<float> meanLocal = inQueueMean.DeQue<float>();
+        AscendC::LocalTensor<float> varianceLocal = inQueueVariance.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+
+        // GEMM operation
+        AscendC::MatMul(yLocal, xLocal, weightLocal, this->tileLength, this->tileLength, this->tileLength);
+
+        // Scale operation
+        AscendC::Mul(yLocal, yLocal, scaleLocal, this->tileLength);
+
+        // BatchNorm operation
+        AscendC::Sub(yLocal, yLocal, meanLocal, this->tileLength);
+        AscendC::Add(yLocal, yLocal, varianceLocal, this->tileLength);
+
+        outQueueY.EnQue<float>(yLocal);
+        inQueueX.FreeTensor(xLocal);
+        inQueueWeight.FreeTensor(weightLocal);
+        inQueueBias.FreeTensor(biasLocal);
+        inQueueScale.FreeTensor(scaleLocal);
+        inQueueMean.FreeTensor(meanLocal);
+        inQueueVariance.FreeTensor(varianceLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        outQueueY.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueWeight, inQueueBias, inQueueScale, inQueueMean, inQueueVariance;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> weightGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> scaleGm;
+    AscendC::GlobalTensor<float> meanGm;
+    AscendC::GlobalTensor<float> varianceGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t inFeatures;
+    uint32_t outFeatures;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void gemm_scale_batch_norm_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR scale,
+    GM_ADDR mean, GM_ADDR variance, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGemmScaleBatchNorm op;
+    op.Init(x, weight, bias, scale, mean, variance, y,
+            tiling_data.batchSize, tiling_data.inFeatures, tiling_data.outFeatures, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gemm_scale_batch_norm_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias,
+    const at::Tensor& scale, const at::Tensor& mean, const at::Tensor& variance) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnGemmScaleBatchNormCustom, x, weight, bias, scale, mean, variance, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gemm_scale_batch_norm_custom", &gemm_scale_batch_norm_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_scale_batch_norm_custom", &gemm_scale_batch_norm_custom_impl_npu, "GEMM + Scale + BatchNorm");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_features, out_features, scale_shape, eps=1e-5, momentum=0.1):
+        super(ModelNew, self).__init__()
+        self.gemm = torch.nn.Linear(in_features, out_features)
+        self.scale = torch.nn.Parameter(torch.randn(scale_shape))
+        self.bn = torch.nn.BatchNorm1d(out_features, eps=eps, momentum=momentum)
+
+    def forward(self, x):
+        # Replace linear with custom kernel
+        weight = self.gemm.weight.data
+        bias = self.gemm.bias.data
+        # Replace batch norm with custom kernel
+        mean = self.bn.running_mean.data
+        variance = self.bn.running_var.data
+        # Call custom kernel
+        x = custom_ops_lib.gemm_scale_batch_norm_custom(x, weight, bias, self.scale, mean, variance)
+        return x
+'''
+```

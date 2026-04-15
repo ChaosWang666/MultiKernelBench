@@ -1,0 +1,83 @@
+{
+  "op_type": "GroupNormCustom",
+  "op_list": [
+    {
+      "bin_filename": "GroupNormCustom_abef64c3fc73d01966478acda33f0a7e",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "gamma",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "beta",
+          "index": 2,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "num_groups",
+          "dtype": "int",
+          "value": 0
+        },
+        {
+          "name": "num_channels",
+          "dtype": "int",
+          "value": 0
+        },
+        {
+          "name": "num_hw",
+          "dtype": "int",
+          "value": 0
+        },
+        {
+          "name": "batch_size",
+          "dtype": "int",
+          "value": 0
+        },
+        {
+          "name": "eps",
+          "dtype": "float",
+          "value": 0.0
+        }
+      ]
+    }
+  ]
+}

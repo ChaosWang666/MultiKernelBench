@@ -1,0 +1,48 @@
+
+[
+    {
+        "op": "Densenet121DenseBlockCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "num_layers",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "num_input_features",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "growth_rate",
+                "type": "int",
+                "default_value": "0"
+            }
+        ]
+    }
+]

@@ -1,0 +1,3 @@
+all: matmul_for_symmetric_matrices_custom0
+matmul_for_symmetric_matrices_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MatmulForSymmetricMatricesCustom/build_out/op_kernel/MatmulForSymmetricMatricesCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MatmulForSymmetricMatricesCustom/build_out/op_kernel/MatmulForSymmetricMatricesCustom_ascend910b/bin_param/MatmulForSymmetricMatricesCustom-matmul_for_symmetric_matrices_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

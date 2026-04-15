@@ -1,0 +1,34 @@
+{
+  "op_type": "ConvTranspose3dMaxMaxSumCustom",
+  "op_list": [
+    {
+      "bin_filename": "ConvTranspose3dMaxMaxSumCustom_5ac11162898cce0aedf7b0f709b6a1b9",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ]
+    }
+  ]
+}

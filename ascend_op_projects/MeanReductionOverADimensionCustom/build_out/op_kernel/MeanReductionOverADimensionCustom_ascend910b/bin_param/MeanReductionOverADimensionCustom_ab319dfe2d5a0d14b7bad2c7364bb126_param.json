@@ -1,0 +1,41 @@
+{
+  "op_type": "MeanReductionOverADimensionCustom",
+  "op_list": [
+    {
+      "bin_filename": "MeanReductionOverADimensionCustom_ab319dfe2d5a0d14b7bad2c7364bb126",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "dim",
+          "dtype": "int",
+          "value": 0
+        }
+      ]
+    }
+  ]
+}

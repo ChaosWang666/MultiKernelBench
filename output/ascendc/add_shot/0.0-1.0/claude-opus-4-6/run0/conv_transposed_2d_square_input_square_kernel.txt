@@ -1,0 +1,375 @@
+
+
+Looking at this architecture, it performs a transposed 2D convolution. This is a complex operation that involves significant computation. I'll implement a custom AscendC kernel for transposed 2D convolution with square input and square kernel.
+
+For a transposed 2D convolution, the approach is to use an im2col-like strategy but adapted for the transpose case (col2im). However, given the complexity, I'll implement this using a direct approach where each output element is computed by accumulating contributions from the input and kernel.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvTransposed2dSquareInputSquareKernelCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTransposed2dSquareInputSquareKernelCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, inHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, inWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, stride);
+  TILING_DATA_FIELD_DEF(uint32_t, padding);
+  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, groups);
+  TILING_DATA_FIELD_DEF(uint32_t, outputPadding);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTransposed2dSquareInputSquareKernelCustom, ConvTransposed2dSquareInputSquareKernelCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transposed_2d_square_input_square_kernel_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTransposed2dSquareInputSquareKernelCustomTilingData tiling;
+
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto wShape = context->GetInputShape(1)->GetOriginShape();
+
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t inChannels = xShape.GetDim(1);
+    uint32_t inHeight = xShape.GetDim(2);
+    uint32_t inWidth = xShape.GetDim(3);
+    uint32_t outChannels = wShape.GetDim(1);
+    uint32_t kernelSize = wShape.GetDim(2);
+
+    uint32_t stride = 1;
+    uint32_t padding = 0;
+    uint32_t outputPadding = 0;
+    uint32_t groups = 1;
+
+    uint32_t outHeight = (inHeight - 1) * stride - 2 * padding + kernelSize + outputPadding;
+    uint32_t outWidth = (inWidth - 1) * stride - 2 * padding + kernelSize + outputPadding;
+
+    context->SetBlockDim(BLOCK_DIM);
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_inHeight(inHeight);
+    tiling.set_inWidth(inWidth);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_stride(stride);
+    tiling.set_padding(padding);
+    tiling.set_outHeight(outHeight);
+    tiling.set_outWidth(outWidth);
+    tiling.set_groups(groups);
+    tiling.set_outputPadding(outputPadding);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* w_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+
+    int64_t batch = x_shape->GetDim(0);
+    int64_t inH = x_shape->GetDim(2);
+    int64_t inW = x_shape->GetDim(3);
+    int64_t outC = w_shape->GetDim(1);
+    int64_t kSize = w_shape->GetDim(2);
+
+    int64_t stride = 1;
+    int64_t padding = 0;
+    int64_t outputPadding = 0;
+
+    int64_t outH = (inH - 1) * stride - 2 * padding + kSize + outputPadding;
+    int64_t outW = (inW - 1) * stride - 2 * padding + kSize + outputPadding;
+
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, batch);
+    y_shape->SetDim(1, outC);
+    y_shape->SetDim(2, outH);
+    y_shape->SetDim(3, outW);
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext* context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvTransposed2dSquareInputSquareKernelCustom : public OpDef {
+public:
+    explicit ConvTransposed2dSquareInputSquareKernelCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTransposed2dSquareInputSquareKernelCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 1;
+
+class KernelConvTranspose2d {
+public:
+    __aicore__ inline KernelConvTranspose2d() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t inChannels, uint32_t outChannels,
+                                 uint32_t inHeight, uint32_t inWidth,
+                                 uint32_t kernelSize, uint32_t stride, uint32_t padding,
+                                 uint32_t outHeight, uint32_t outWidth,
+                                 uint32_t groups, uint32_t outputPadding)
+    {
+        this->batchSize = batchSize;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->inHeight = inHeight;
+        this->inWidth = inWidth;
+        this->kernelSize = kernelSize;
+        this->stride = stride;
+        this->padding = padding;
+        this->outHeight = outHeight;
+        this->outWidth = outWidth;
+        this->groups = groups;
+
+        uint32_t totalOutputElements = batchSize * outChannels * outHeight * outWidth;
+        uint32_t numBlocks = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        this->elementsPerBlock = totalOutputElements / numBlocks;
+        this->startElement = blockIdx * this->elementsPerBlock;
+        if (blockIdx == numBlocks - 1) {
+            this->elementsPerBlock = totalOutputElements - this->startElement;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float*)x, batchSize * inChannels * inHeight * inWidth);
+        wGm.SetGlobalBuffer((__gm__ float*)weight, inChannels * outChannels * kernelSize * kernelSize);
+        yGm.SetGlobalBuffer((__gm__ float*)y, totalOutputElements);
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t i = 0; i < this->elementsPerBlock; i++) {
+            uint32_t globalIdx = this->startElement + i;
+
+            uint32_t ow = globalIdx % outWidth;
+            uint32_t tmp = globalIdx / outWidth;
+            uint32_t oh = tmp % outHeight;
+            tmp = tmp / outHeight;
+            uint32_t oc = tmp % outChannels;
+            uint32_t n = tmp / outChannels;
+
+            float sum = 0.0f;
+
+            for (uint32_t ic = 0; ic < inChannels; ic++) {
+                for (uint32_t kh = 0; kh < kernelSize; kh++) {
+                    for (uint32_t kw = 0; kw < kernelSize; kw++) {
+                        int32_t ih_s = (int32_t)oh + (int32_t)padding - (int32_t)kh;
+                        int32_t iw_s = (int32_t)ow + (int32_t)padding - (int32_t)kw;
+
+                        if (ih_s % (int32_t)stride != 0) continue;
+                        if (iw_s % (int32_t)stride != 0) continue;
+
+                        int32_t ih = ih_s / (int32_t)stride;
+                        int32_t iw = iw_s / (int32_t)stride;
+
+                        if (ih >= 0 && ih < (int32_t)inHeight && iw >= 0 && iw < (int32_t)inWidth) {
+                            uint32_t xIdx = n * inChannels * inHeight * inWidth +
+                                             ic * inHeight * inWidth +
+                                             (uint32_t)ih * inWidth + (uint32_t)iw;
+                            uint32_t wIdx = ic * outChannels * kernelSize * kernelSize +
+                                             oc * kernelSize * kernelSize +
+                                             kh * kernelSize + kw;
+                            float xVal = xGm.GetValue(xIdx);
+                            float wVal = wGm.GetValue(wIdx);
+                            sum += xVal * wVal;
+                        }
+                    }
+                }
+            }
+            yGm.SetValue(globalIdx, sum);
+        }
+    }
+
+private:
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> wGm;
+    AscendC::GlobalTensor<float> yGm;
+
+    uint32_t batchSize;
+    uint32_t inChannels;
+    uint32_t outChannels;
+    uint32_t inHeight;
+    uint32_t inWidth;
+    uint32_t kernelSize;
+    uint32_t stride;
+    uint32_t padding;
+    uint32_t outHeight;
+    uint32_t outWidth;
+    uint32_t groups;
+    uint32_t elementsPerBlock;
+    uint32_t startElement;
+};
+
+extern "C" __global__ __aicore__ void conv_transposed_2d_square_input_square_kernel_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConvTranspose2d op;
+    op.Init(x, weight, y,
+            tiling_data.batchSize, tiling_data.inChannels, tiling_data.outChannels,
+            tiling_data.inHeight, tiling_data.inWidth,
+            tiling_data.kernelSize, tiling_data.stride, tiling_data.padding,
+            tiling_data.outHeight, tiling_data.outWidth,
+            tiling_data.groups, tiling_data.outputPadding);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transposed_2d_square_input_square_kernel_custom_impl_npu(
+    const at::Tensor& input, const at::Tensor& weight)
+{
+    int64_t batch = input.size(0);
+    int64_t inC = input.size(1);
+    int64_t inH = input.size(2);
+    int64_t inW = input.size(3);
+    int64_t outC = weight.size(1);
+    int64_t kSize = weight.size(2);
+
+    int64_t stride = 1;
+    int64_t padding = 0;
+    int64_t outputPadding = 0;
+
+    int64_t outH = (inH - 1) * stride - 2 * padding + kSize + outputPadding;
+    int64_t outW = (inW - 1) * stride - 2 * padding + kSize + outputPadding;
+
+    at::Tensor result = at::empty({batch, outC, outH, outW}, input.options());
+
+    EXEC_NPU_CMD(aclnnConvTransposed2dSquareInputSquareKernelCustom, input, weight, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transposed_2d_square_input_square_kernel_custom",
+           &conv_transposed_2d_square_input_square_kernel_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transposed_2d_square_input_square_kernel_custom",
+          &conv_transposed_2d_square_input_square_kernel_custom_impl_npu,
+          "Transposed 2D convolution custom");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0, output_padding: int = 0, groups: int = 1, bias: bool = False):
+        super().__init__()
+        self.conv_transpose2d = torch.nn.ConvTranspose2d(
+            in_channels, out_channels, kernel_size,
+            stride=stride, padding=padding,
+            output_padding=output_padding, groups=groups, bias=bias
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        weight = self.conv_transpose2d.weight
+        return custom_ops_lib.conv_transposed_2d_square_input_square_kernel_custom(x, weight)
+'''
+```

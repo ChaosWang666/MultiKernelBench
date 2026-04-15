@@ -1,8 +1,8 @@
-# Install script for directory: /data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/op_host
+# Install script for directory: /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/op_host
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
-  set(CMAKE_INSTALL_PREFIX "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out")
+  set(CMAKE_INSTALL_PREFIX "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out")
 endif()
 string(REGEX REPLACE "/$" "" CMAKE_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
 
@@ -29,7 +29,7 @@ endif()
 
 # Install shared libraries without execute permission?
 if(NOT DEFINED CMAKE_INSTALL_SO_NO_EXE)
-  set(CMAKE_INSTALL_SO_NO_EXE "0")
+  set(CMAKE_INSTALL_SO_NO_EXE "1")
 endif()
 
 # Is this installation the result of a crosscompile?
@@ -49,12 +49,12 @@ if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_
          FILE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so"
          RPATH "")
   endif()
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_proto/lib/linux/aarch64" TYPE SHARED_LIBRARY FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_host/libcust_opsproto_rt2.0.so")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_proto/lib/linux/aarch64" TYPE SHARED_LIBRARY FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_host/libcust_opsproto_rt2.0.so")
   if(EXISTS "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so" AND
      NOT IS_SYMLINK "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so")
     file(RPATH_CHANGE
          FILE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so"
-         OLD_RPATH "/usr/local/Ascend/cann-8.5.0/lib64:"
+         OLD_RPATH "/home/developer/Ascend/cann-9.0.0/lib64:"
          NEW_RPATH "")
     if(CMAKE_INSTALL_DO_STRIP)
       execute_process(COMMAND "/usr/bin/strip" "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so")
@@ -66,7 +66,7 @@ if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_proto/inc" TYPE FILE FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/autogen/op_proto.h")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_proto/inc" TYPE FILE FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/autogen/op_proto.h")
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
@@ -76,12 +76,12 @@ if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_
          FILE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64/libcust_opmaster_rt2.0.so"
          RPATH "")
   endif()
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64" TYPE SHARED_LIBRARY FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_host/libcust_opmaster_rt2.0.so")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64" TYPE SHARED_LIBRARY FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_host/libcust_opmaster_rt2.0.so")
   if(EXISTS "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64/libcust_opmaster_rt2.0.so" AND
      NOT IS_SYMLINK "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64/libcust_opmaster_rt2.0.so")
     file(RPATH_CHANGE
          FILE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64/libcust_opmaster_rt2.0.so"
-         OLD_RPATH "/usr/local/Ascend/cann-8.5.0/lib64:"
+         OLD_RPATH "/home/developer/Ascend/cann-9.0.0/lib64:"
          NEW_RPATH "")
     if(CMAKE_INSTALL_DO_STRIP)
       execute_process(COMMAND "/usr/bin/strip" "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64/libcust_opmaster_rt2.0.so")
@@ -93,7 +93,7 @@ if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/op_tiling" TYPE FILE FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_host/liboptiling.so")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/op_tiling" TYPE FILE FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_host/liboptiling.so")
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
@@ -103,12 +103,12 @@ if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_
          FILE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_api/lib/libcust_opapi.so"
          RPATH "")
   endif()
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_api/lib" TYPE SHARED_LIBRARY FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_host/libcust_opapi.so")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_api/lib" TYPE SHARED_LIBRARY FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_host/libcust_opapi.so")
   if(EXISTS "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_api/lib/libcust_opapi.so" AND
      NOT IS_SYMLINK "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_api/lib/libcust_opapi.so")
     file(RPATH_CHANGE
          FILE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_api/lib/libcust_opapi.so"
-         OLD_RPATH "/usr/local/Ascend/cann-8.5.0/lib64:"
+         OLD_RPATH "/home/developer/Ascend/cann-9.0.0/lib64:"
          NEW_RPATH "")
     if(CMAKE_INSTALL_DO_STRIP)
       execute_process(COMMAND "/usr/bin/strip" "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_api/lib/libcust_opapi.so")
@@ -120,6 +120,6 @@ if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_api/include" TYPE FILE FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/autogen/aclnn_softmax_custom.h")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_api/include" TYPE FILE FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/autogen/aclnn_softmax_custom.h")
 endif()
 

@@ -1,0 +1,3 @@
+all: matmul_scale_residual_add_clamp_log_sum_exp_mish_custom0
+matmul_scale_residual_add_clamp_log_sum_exp_mish_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MatmulScaleResidualAddClampLogSumExpMishCustom/build_out/op_kernel/MatmulScaleResidualAddClampLogSumExpMishCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MatmulScaleResidualAddClampLogSumExpMishCustom/build_out/op_kernel/MatmulScaleResidualAddClampLogSumExpMishCustom_ascend910b/bin_param/MatmulScaleResidualAddClampLogSumExpMishCustom-matmul_scale_residual_add_clamp_log_sum_exp_mish_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

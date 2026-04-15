@@ -1,0 +1,151 @@
+
+[
+    {
+        "op": "ResnetBasicBlockCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "conv1_weight",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "conv1_bias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bn1_scale",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bn1_bias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "conv2_weight",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "conv2_bias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bn2_scale",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bn2_bias",
+                "param_type": "required",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "downsample_conv_weight",
+                "param_type": "optional",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "downsample_conv_bias",
+                "param_type": "optional",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "downsample_bn_scale",
+                "param_type": "optional",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "downsample_bn_bias",
+                "param_type": "optional",
+                "format": [
+                    "NC"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "out",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]

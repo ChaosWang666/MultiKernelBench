@@ -1,0 +1,73 @@
+
+[
+    {
+        "op": "ConvTranspose3dScalingAvgPoolBiasAddScalingCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "in_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "stride",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "padding",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "scale1",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "scale2",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "bias_shape",
+                "param_type": "required",
+                "type": "int_array"
+            }
+        ]
+    }
+]

@@ -1,0 +1,3 @@
+all: cross_attention_custom0
+cross_attention_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/CrossAttentionCustom/build_out/op_kernel/CrossAttentionCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/CrossAttentionCustom/build_out/op_kernel/CrossAttentionCustom_ascend910b/bin_param/CrossAttentionCustom-cross_attention_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

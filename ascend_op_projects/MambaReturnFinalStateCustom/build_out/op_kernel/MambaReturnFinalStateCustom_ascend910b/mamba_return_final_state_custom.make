@@ -1,0 +1,3 @@
+all: mamba_return_final_state_custom0
+mamba_return_final_state_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MambaReturnFinalStateCustom/build_out/op_kernel/MambaReturnFinalStateCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MambaReturnFinalStateCustom/build_out/op_kernel/MambaReturnFinalStateCustom_ascend910b/bin_param/MambaReturnFinalStateCustom-mamba_return_final_state_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

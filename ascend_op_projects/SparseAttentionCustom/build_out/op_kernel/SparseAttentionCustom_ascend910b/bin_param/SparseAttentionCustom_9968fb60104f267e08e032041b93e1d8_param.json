@@ -1,0 +1,83 @@
+{
+  "op_type": "SparseAttentionCustom",
+  "op_list": [
+    {
+      "bin_filename": "SparseAttentionCustom_9968fb60104f267e08e032041b93e1d8",
+      "inputs": [
+        {
+          "name": "query",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "key",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "value",
+          "index": 2,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "batchSize",
+          "dtype": "int",
+          "value": 0
+        },
+        {
+          "name": "numHeads",
+          "dtype": "int",
+          "value": 0
+        },
+        {
+          "name": "seqLen",
+          "dtype": "int",
+          "value": 0
+        },
+        {
+          "name": "headDim",
+          "dtype": "int",
+          "value": 0
+        },
+        {
+          "name": "windowSize",
+          "dtype": "int",
+          "value": 0
+        }
+      ]
+    }
+  ]
+}

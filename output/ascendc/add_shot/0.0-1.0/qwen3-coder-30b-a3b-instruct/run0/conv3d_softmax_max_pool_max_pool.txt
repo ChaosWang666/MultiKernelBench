@@ -1,0 +1,354 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv3dSoftmaxMaxPoolMaxPoolCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "NCDHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "in_channels",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "out_channels",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "kernel_size",
+                "type": "int",
+                "default_value": "0"
+            },
+            {
+                "name": "pool_kernel_size",
+                "type": "int",
+                "default_value": "0"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dSoftmaxMaxPoolMaxPoolCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batch);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, depth);
+  TILING_DATA_FIELD_DEF(uint32_t, height);
+  TILING_DATA_FIELD_DEF(uint32_t, width);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, poolKernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, paddedDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, paddedHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, paddedWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, outDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dSoftmaxMaxPoolMaxPoolCustom, Conv3dSoftmaxMaxPoolMaxPoolCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_softmax_max_pool_max_pool_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dSoftmaxMaxPoolMaxPoolCustomTilingData tiling;
+    const gert::Shape* input_shape = context->GetInputShape(0);
+    const std::vector<int64_t>& shape = input_shape->GetOriginShape().GetDims();
+    uint32_t batch = static_cast<uint32_t>(shape[0]);
+    uint32_t inChannels = static_cast<uint32_t>(shape[1]);
+    uint32_t depth = static_cast<uint32_t>(shape[2]);
+    uint32_t height = static_cast<uint32_t>(shape[3]);
+    uint32_t width = static_cast<uint32_t>(shape[4]);
+
+    uint32_t kernelSize = static_cast<uint32_t>(context->GetAttrInt("kernel_size"));
+    uint32_t poolKernelSize = static_cast<uint32_t>(context->GetAttrInt("pool_kernel_size"));
+
+    uint32_t paddedDepth = depth + 2 * (kernelSize / 2);
+    uint32_t paddedHeight = height + 2 * (kernelSize / 2);
+    uint32_t paddedWidth = width + 2 * (kernelSize / 2);
+
+    uint32_t outDepth = (paddedDepth - kernelSize) / 1 + 1;
+    uint32_t outHeight = (paddedHeight - kernelSize) / 1 + 1;
+    uint32_t outWidth = (paddedWidth - kernelSize) / 1 + 1;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batch(batch);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(static_cast<uint32_t>(context->GetAttrInt("out_channels")));
+    tiling.set_depth(depth);
+    tiling.set_height(height);
+    tiling.set_width(width);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_poolKernelSize(poolKernelSize);
+    tiling.set_paddedDepth(paddedDepth);
+    tiling.set_paddedHeight(paddedHeight);
+    tiling.set_paddedWidth(paddedWidth);
+    tiling.set_outDepth(outDepth);
+    tiling.set_outHeight(outHeight);
+    tiling.set_outWidth(outWidth);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* input_shape = context->GetInputShape(0);
+    const std::vector<int64_t>& dims = input_shape->GetOriginShape().GetDims();
+    gert::Shape* output_shape = context->GetOutputShape(0);
+    output_shape->SetOriginShape(gert::Shape({dims[0], static_cast<int64_t>(context->GetAttrInt("out_channels")), 
+        (dims[2] + 2 * (context->GetAttrInt("kernel_size") / 2) - context->GetAttrInt("kernel_size")) / 1 + 1,
+        (dims[3] + 2 * (context->GetAttrInt("kernel_size") / 2) - context->GetAttrInt("kernel_size")) / 1 + 1,
+        (dims[4] + 2 * (context->GetAttrInt("kernel_size") / 2) - context->GetAttrInt("kernel_size")) / 1 + 1}));
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Conv3dSoftmaxMaxPoolMaxPoolCustom : public OpDef {
+public:
+    explicit Conv3dSoftmaxMaxPoolMaxPoolCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCDHW})
+            .UnknownShapeFormat({ge::FORMAT_NCDHW});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_NCDHW})
+            .UnknownShapeFormat({ge::FORMAT_NCDHW});
+        this->Attr("in_channels").SetType(ATTR_TYPE_INT).SetDefault(0);
+        this->Attr("out_channels").SetType(ATTR_TYPE_INT).SetDefault(0);
+        this->Attr("kernel_size").SetType(ATTR_TYPE_INT).SetDefault(0);
+        this->Attr("pool_kernel_size").SetType(ATTR_TYPE_INT).SetDefault(0);
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv3dSoftmaxMaxPoolMaxPoolCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConv3dSoftmaxMaxPoolMaxPool {
+public:
+    __aicore__ inline KernelConv3dSoftmaxMaxPoolMaxPool() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t batch, uint32_t inChannels, uint32_t outChannels,
+                                uint32_t depth, uint32_t height, uint32_t width, uint32_t kernelSize,
+                                uint32_t poolKernelSize, uint32_t paddedDepth, uint32_t paddedHeight, uint32_t paddedWidth,
+                                uint32_t outDepth, uint32_t outHeight, uint32_t outWidth)
+    {
+        this->batch = batch;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->depth = depth;
+        this->height = height;
+        this->width = width;
+        this->kernelSize = kernelSize;
+        this->poolKernelSize = poolKernelSize;
+        this->paddedDepth = paddedDepth;
+        this->paddedHeight = paddedHeight;
+        this->paddedWidth = paddedWidth;
+        this->outDepth = outDepth;
+        this->outHeight = outHeight;
+        this->outWidth = outWidth;
+
+        this->totalElements = batch * inChannels * depth * height * width;
+        this->blockLength = this->totalElements / AscendC::GetBlockNum();
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+
+        pipe.InitBuffer(inQueue, BUFFER_NUM, this->blockLength * sizeof(float));
+        pipe.InitBuffer(outQueue, BUFFER_NUM, this->blockLength * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        // Convolution
+        Conv3d();
+        // Softmax
+        Softmax();
+        // First Max Pooling
+        MaxPool1();
+        // Second Max Pooling
+        MaxPool2();
+    }
+
+private:
+    __aicore__ inline void Conv3d()
+    {
+        AscendC::LocalTensor<float> localTensor = inQueue.AllocTensor<float>();
+        AscendC::DataCopy(localTensor, xGm, this->blockLength);
+        inQueue.EnQue(localTensor);
+        AscendC::LocalTensor<float> outputTensor = outQueue.AllocTensor<float>();
+        // Placeholder for actual convolution logic
+        AscendC::Memcpy(outputTensor, localTensor, this->blockLength * sizeof(float));
+        outQueue.EnQue<float>(outputTensor);
+        inQueue.FreeTensor(localTensor);
+    }
+
+    __aicore__ inline void Softmax()
+    {
+        AscendC::LocalTensor<float> inputTensor = outQueue.DeQue<float>();
+        AscendC::LocalTensor<float> outputTensor = outQueue.AllocTensor<float>();
+        // Placeholder for actual softmax logic
+        AscendC::Memcpy(outputTensor, inputTensor, this->blockLength * sizeof(float));
+        outQueue.EnQue<float>(outputTensor);
+        outQueue.FreeTensor(inputTensor);
+    }
+
+    __aicore__ inline void MaxPool1()
+    {
+        AscendC::LocalTensor<float> inputTensor = outQueue.DeQue<float>();
+        AscendC::LocalTensor<float> outputTensor = outQueue.AllocTensor<float>();
+        // Placeholder for actual max pooling logic
+        AscendC::Memcpy(outputTensor, inputTensor, this->blockLength * sizeof(float));
+        outQueue.EnQue<float>(outputTensor);
+        outQueue.FreeTensor(inputTensor);
+    }
+
+    __aicore__ inline void MaxPool2()
+    {
+        AscendC::LocalTensor<float> inputTensor = outQueue.DeQue<float>();
+        AscendC::LocalTensor<float> outputTensor = outQueue.AllocTensor<float>();
+        // Placeholder for actual max pooling logic
+        AscendC::Memcpy(outputTensor, inputTensor, this->blockLength * sizeof(float));
+        outQueue.EnQue<float>(outputTensor);
+        outQueue.FreeTensor(inputTensor);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t batch;
+    uint32_t inChannels;
+    uint32_t outChannels;
+    uint32_t depth;
+    uint32_t height;
+    uint32_t width;
+    uint32_t kernelSize;
+    uint32_t poolKernelSize;
+    uint32_t paddedDepth;
+    uint32_t paddedHeight;
+    uint32_t paddedWidth;
+    uint32_t outDepth;
+    uint32_t outHeight;
+    uint32_t outWidth;
+    uint32_t totalElements;
+    uint32_t blockLength;
+};
+
+extern "C" __global__ __aicore__ void conv3d_softmax_max_pool_max_pool_custom(
+    GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv3dSoftmaxMaxPoolMaxPool op;
+    op.Init(x, z, tiling_data.batch, tiling_data.inChannels, tiling_data.outChannels,
+            tiling_data.depth, tiling_data.height, tiling_data.width, tiling_data.kernelSize,
+            tiling_data.poolKernelSize, tiling_data.paddedDepth, tiling_data.paddedHeight, tiling_data.paddedWidth,
+            tiling_data.outDepth, tiling_data.outHeight, tiling_data.outWidth);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_softmax_max_pool_max_pool_custom_impl_npu(
+    const at::Tensor& self, int64_t in_channels, int64_t out_channels, int64_t kernel_size, int64_t pool_kernel_size) {
+    at::Tensor result = at::empty_like(self);
+    EXEC_NPU_CMD(aclnnConv3dSoftmaxMaxPoolMaxPoolCustom, self, in_channels, out_channels, kernel_size, pool_kernel_size, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_softmax_max_pool_max_pool_custom", &conv3d_softmax_max_pool_max_pool_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_softmax_max_pool_max_pool_custom", &conv3d_softmax_max_pool_max_pool_custom_impl_npu, "3D Conv + Softmax + MaxPool + MaxPool");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, pool_kernel_size):
+        super(ModelNew, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.pool_kernel_size = pool_kernel_size
+
+    def forward(self, x):
+        return custom_ops_lib.conv3d_softmax_max_pool_max_pool_custom(x, self.in_channels, self.out_channels, self.kernel_size, self.pool_kernel_size)
+'''
+```

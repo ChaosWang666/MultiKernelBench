@@ -1,0 +1,412 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvDepthwise2dSquareInputSquareKernelCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "optional",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "batch_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_height",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_width",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "stride",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "padding",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "has_bias",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvDepthwise2dSquareInputSquareKernelCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, inHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, inWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, stride);
+  TILING_DATA_FIELD_DEF(uint32_t, padding);
+  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, hasBias);
+  TILING_DATA_FIELD_DEF(uint32_t, totalOutputElements);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvDepthwise2dSquareInputSquareKernelCustom, ConvDepthwise2dSquareInputSquareKernelCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_depthwise_2d_square_input_square_kernel_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvDepthwise2dSquareInputSquareKernelCustomTilingData tiling;
+
+    const auto attrs = context->GetAttrs();
+    uint32_t batchSize = *(attrs->GetInt(0));
+    uint32_t inChannels = *(attrs->GetInt(1));
+    uint32_t inHeight = *(attrs->GetInt(2));
+    uint32_t inWidth = *(attrs->GetInt(3));
+    uint32_t kernelSize = *(attrs->GetInt(4));
+    uint32_t stride = *(attrs->GetInt(5));
+    uint32_t padding = *(attrs->GetInt(6));
+    uint32_t hasBias = *(attrs->GetInt(7));
+
+    uint32_t outHeight = (inHeight + 2 * padding - kernelSize) / stride + 1;
+    uint32_t outWidth = (inWidth + 2 * padding - kernelSize) / stride + 1;
+    uint32_t totalOutputElements = batchSize * inChannels * outHeight * outWidth;
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_inHeight(inHeight);
+    tiling.set_inWidth(inWidth);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_stride(stride);
+    tiling.set_padding(padding);
+    tiling.set_outHeight(outHeight);
+    tiling.set_outWidth(outWidth);
+    tiling.set_hasBias(hasBias);
+    tiling.set_totalOutputElements(totalOutputElements);
+
+    uint32_t blockDim = BLOCK_DIM;
+    if (totalOutputElements < BLOCK_DIM) {
+        blockDim = totalOutputElements;
+    }
+    context->SetBlockDim(blockDim);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const auto attrs = context->GetAttrs();
+    uint32_t batchSize = *(attrs->GetInt(0));
+    uint32_t inChannels = *(attrs->GetInt(1));
+    uint32_t inHeight = *(attrs->GetInt(2));
+    uint32_t inWidth = *(attrs->GetInt(3));
+    uint32_t kernelSize = *(attrs->GetInt(4));
+    uint32_t stride = *(attrs->GetInt(5));
+    uint32_t padding = *(attrs->GetInt(6));
+
+    uint32_t outHeight = (inHeight + 2 * padding - kernelSize) / stride + 1;
+    uint32_t outWidth = (inWidth + 2 * padding - kernelSize) / stride + 1;
+
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = gert::Shape({(int64_t)batchSize, (int64_t)inChannels, (int64_t)outHeight, (int64_t)outWidth});
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvDepthwise2dSquareInputSquareKernelCustom : public OpDef {
+public:
+    explicit ConvDepthwise2dSquareInputSquareKernelCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Attr("batch_size").AttrType(REQUIRED).Int();
+        this->Attr("in_channels").AttrType(REQUIRED).Int();
+        this->Attr("in_height").AttrType(REQUIRED).Int();
+        this->Attr("in_width").AttrType(REQUIRED).Int();
+        this->Attr("kernel_size").AttrType(REQUIRED).Int();
+        this->Attr("stride").AttrType(REQUIRED).Int();
+        this->Attr("padding").AttrType(REQUIRED).Int();
+        this->Attr("has_bias").AttrType(REQUIRED).Int();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvDepthwise2dSquareInputSquareKernelCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+extern "C" __global__ __aicore__ void conv_depthwise_2d_square_input_square_kernel_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+
+    uint32_t batchSize = tiling_data.batchSize;
+    uint32_t inChannels = tiling_data.inChannels;
+    uint32_t inHeight = tiling_data.inHeight;
+    uint32_t inWidth = tiling_data.inWidth;
+    uint32_t kernelSize = tiling_data.kernelSize;
+    uint32_t stride = tiling_data.stride;
+    uint32_t padding = tiling_data.padding;
+    uint32_t outHeight = tiling_data.outHeight;
+    uint32_t outWidth = tiling_data.outWidth;
+    uint32_t hasBias = tiling_data.hasBias;
+    uint32_t totalOutputElements = tiling_data.totalOutputElements;
+
+    uint32_t blockIdx = AscendC::GetBlockIdx();
+    uint32_t blockNum = AscendC::GetBlockNum();
+
+    // Each block processes a chunk of output elements
+    uint32_t elementsPerBlock = (totalOutputElements + blockNum - 1) / blockNum;
+    uint32_t startIdx = blockIdx * elementsPerBlock;
+    uint32_t endIdx = startIdx + elementsPerBlock;
+    if (endIdx > totalOutputElements) {
+        endIdx = totalOutputElements;
+    }
+
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> weightGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> yGm;
+
+    xGm.SetGlobalBuffer((__gm__ float*)x, batchSize * inChannels * inHeight * inWidth);
+    weightGm.SetGlobalBuffer((__gm__ float*)weight, inChannels * 1 * kernelSize * kernelSize);
+    if (hasBias) {
+        biasGm.SetGlobalBuffer((__gm__ float*)bias, inChannels);
+    }
+    yGm.SetGlobalBuffer((__gm__ float*)y, totalOutputElements);
+
+    uint32_t outSpatial = outHeight * outWidth;
+    uint32_t inSpatial = inHeight * inWidth;
+    uint32_t kernelSpatial = kernelSize * kernelSize;
+
+    for (uint32_t idx = startIdx; idx < endIdx; idx++) {
+        // Decompose idx into (n, c, oh, ow)
+        uint32_t ow = idx % outWidth;
+        uint32_t tmp = idx / outWidth;
+        uint32_t oh = tmp % outHeight;
+        tmp = tmp / outHeight;
+        uint32_t c = tmp % inChannels;
+        uint32_t n = tmp / inChannels;
+
+        float sum = 0.0f;
+        for (uint32_t kh = 0; kh < kernelSize; kh++) {
+            for (uint32_t kw = 0; kw < kernelSize; kw++) {
+                int32_t ih = (int32_t)(oh * stride + kh) - (int32_t)padding;
+                int32_t iw = (int32_t)(ow * stride + kw) - (int32_t)padding;
+                if (ih >= 0 && ih < (int32_t)inHeight && iw >= 0 && iw < (int32_t)inWidth) {
+                    uint32_t xOffset = n * inChannels * inSpatial + c * inSpatial + (uint32_t)ih * inWidth + (uint32_t)iw;
+                    uint32_t wOffset = c * kernelSpatial + kh * kernelSize + kw;
+                    float xVal = xGm.GetValue(xOffset);
+                    float wVal = weightGm.GetValue(wOffset);
+                    sum += xVal * wVal;
+                }
+            }
+        }
+
+        if (hasBias) {
+            float biasVal = biasGm.GetValue(c);
+            sum += biasVal;
+        }
+
+        yGm.SetValue(idx, sum);
+    }
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_depthwise_2d_square_input_square_kernel_custom_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const c10::optional<at::Tensor>& bias_opt,
+    int64_t batch_size,
+    int64_t in_channels,
+    int64_t in_height,
+    int64_t in_width,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    int64_t has_bias)
+{
+    int64_t out_height = (in_height + 2 * padding - kernel_size) / stride + 1;
+    int64_t out_width = (in_width + 2 * padding - kernel_size) / stride + 1;
+
+    at::Tensor result = at::empty({batch_size, in_channels, out_height, out_width}, x.options());
+
+    if (has_bias && bias_opt.has_value()) {
+        const at::Tensor& bias = bias_opt.value();
+        EXEC_NPU_CMD(aclnnConvDepthwise2dSquareInputSquareKernelCustom, x, weight, bias, result,
+                      batch_size, in_channels, in_height, in_width, kernel_size, stride, padding, has_bias);
+    } else {
+        at::Tensor dummy_bias = at::empty({0}, x.options());
+        EXEC_NPU_CMD(aclnnConvDepthwise2dSquareInputSquareKernelCustom, x, weight, dummy_bias, result,
+                      batch_size, in_channels, in_height, in_width, kernel_size, stride, padding, has_bias);
+    }
+
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_depthwise_2d_square_input_square_kernel_custom",
+           &conv_depthwise_2d_square_input_square_kernel_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_depthwise_2d_square_input_square_kernel_custom",
+          &conv_depthwise_2d_square_input_square_kernel_custom_impl_npu,
+          "Depthwise Conv2D custom");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized depthwise 2D convolution using custom AscendC kernel.
+    """
+    def __init__(self, in_channels: int, kernel_size: int, stride: int = 1, padding: int = 0, bias: bool = False):
+        super().__init__()
+        self.in_channels = in_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.has_bias = bias
+
+        # Create the same conv2d to get the weight (and bias) parameters
+        self.conv2d = torch.nn.Conv2d(in_channels, in_channels, kernel_size,
+                                       stride=stride, padding=padding,
+                                       groups=in_channels, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.shape[0]
+        in_height = x.shape[2]
+        in_width = x.shape[3]
+
+        weight = self.conv2d.weight
+        bias_opt = self.conv2d.bias if self.has_bias else None
+        has_bias_int = 1 if self.has_bias else 0
+
+        return custom_ops_lib.conv_depthwise_2d_square_input_square_kernel_custom(
+            x, weight, bias_opt,
+            batch_size, self.in_channels, in_height, in_width,
+            self.kernel_size, self.stride, self.padding, has_bias_int
+        )
+'''
+```

@@ -1,8 +1,8 @@
-# Install script for directory: /data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/op_kernel
+# Install script for directory: /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/op_kernel
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
-  set(CMAKE_INSTALL_PREFIX "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out")
+  set(CMAKE_INSTALL_PREFIX "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out")
 endif()
 string(REGEX REPLACE "/$" "" CMAKE_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
 
@@ -29,7 +29,7 @@ endif()
 
 # Install shared libraries without execute permission?
 if(NOT DEFINED CMAKE_INSTALL_SO_NO_EXE)
-  set(CMAKE_INSTALL_SO_NO_EXE "0")
+  set(CMAKE_INSTALL_SO_NO_EXE "1")
 endif()
 
 # Is this installation the result of a crosscompile?
@@ -43,22 +43,22 @@ if(NOT DEFINED CMAKE_OBJDUMP)
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/config/ascend910b" TYPE FILE FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/tbe/op_info_cfg/ai_core/ascend910b/aic-ascend910b-ops-info.json")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/config/ascend910b" TYPE FILE FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/tbe/op_info_cfg/ai_core/ascend910b/aic-ascend910b-ops-info.json")
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/framework/tensorflow" TYPE FILE FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/tbe/op_info_cfg/ai_core/npu_supported_ops.json")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/framework/tensorflow" TYPE FILE FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/tbe/op_info_cfg/ai_core/npu_supported_ops.json")
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/customize_impl/dynamic/" TYPE DIRECTORY FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/binary/dynamic/")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe/customize_impl/dynamic/" TYPE DIRECTORY FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/binary/dynamic/")
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe//kernel/ascend910b/" TYPE DIRECTORY FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/binary/ascend910b/")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe//kernel/ascend910b/" TYPE DIRECTORY FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/binary/ascend910b/")
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe//kernel/config/" TYPE DIRECTORY FILES "/data/w00936672/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/binary/config/")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/packages/vendors/customize/op_impl/ai_core/tbe//kernel/config/" TYPE DIRECTORY FILES "/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/SoftmaxCustom/build_out/op_kernel/binary/config/")
 endif()
 

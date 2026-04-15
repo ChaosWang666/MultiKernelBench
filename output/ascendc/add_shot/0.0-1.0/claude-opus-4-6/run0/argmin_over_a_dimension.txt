@@ -1,0 +1,351 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ArgminOverADimensionCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "int64"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "dim",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ArgminOverADimensionCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, dimBefore);
+  TILING_DATA_FIELD_DEF(uint32_t, dimSize);
+  TILING_DATA_FIELD_DEF(uint32_t, dimAfter);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ArgminOverADimensionCustom, ArgminOverADimensionCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "argmin_over_a_dimension_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ArgminOverADimensionCustomTilingData tiling;
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    int32_t dimCount = xShape->GetStorageShape().GetDimNum();
+
+    const auto* attrs = context->GetAttrs();
+    int64_t dim = *(attrs->GetAttrPointer<int64_t>(0));
+    if (dim < 0) dim += dimCount;
+
+    uint32_t dimBefore = 1;
+    uint32_t dimSize = 1;
+    uint32_t dimAfter = 1;
+    uint32_t totalLength = 1;
+
+    for (int32_t i = 0; i < dimCount; i++) {
+        uint32_t s = xShape->GetStorageShape().GetDim(i);
+        totalLength *= s;
+        if (i < dim) dimBefore *= s;
+        else if (i == dim) dimSize = s;
+        else dimAfter *= s;
+    }
+
+    uint32_t numOutputElements = dimBefore * dimAfter;
+    uint32_t blockDim = 32;
+    if (numOutputElements < blockDim) blockDim = numOutputElements;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_totalLength(totalLength);
+    tiling.set_dimBefore(dimBefore);
+    tiling.set_dimSize(dimSize);
+    tiling.set_dimAfter(dimAfter);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    int32_t dimCount = x_shape->GetDimNum();
+
+    const auto* attrs = context->GetAttrs();
+    int64_t dim = *(attrs->GetAttrPointer<int64_t>(0));
+    if (dim < 0) dim += dimCount;
+
+    // Output shape removes the dim dimension
+    int32_t outIdx = 0;
+    for (int32_t i = 0; i < dimCount; i++) {
+        if (i != dim) {
+            y_shape->SetDim(outIdx, x_shape->GetDim(i));
+            outIdx++;
+        }
+    }
+    y_shape->SetDimNum(outIdx);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    context->SetOutputDataType(0, ge::DT_INT64);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ArgminOverADimensionCustom : public OpDef {
+public:
+    explicit ArgminOverADimensionCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT64})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("dim")
+            .AttrType(REQUIRED)
+            .Int();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ArgminOverADimensionCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+extern "C" __global__ __aicore__ void argmin_over_a_dimension_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+
+    uint32_t dimBefore = tiling_data.dimBefore;
+    uint32_t dimSize = tiling_data.dimSize;
+    uint32_t dimAfter = tiling_data.dimAfter;
+    uint32_t numOutputElements = dimBefore * dimAfter;
+
+    uint32_t blockIdx = AscendC::GetBlockIdx();
+    uint32_t numBlocks = AscendC::GetBlockNum();
+
+    // Each block processes a portion of the output elements
+    uint32_t elementsPerBlock = (numOutputElements + numBlocks - 1) / numBlocks;
+    uint32_t startElem = blockIdx * elementsPerBlock;
+    uint32_t endElem = startElem + elementsPerBlock;
+    if (endElem > numOutputElements) endElem = numOutputElements;
+
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<int64_t> yGm;
+    xGm.SetGlobalBuffer((__gm__ float*)x, dimBefore * dimSize * dimAfter);
+    yGm.SetGlobalBuffer((__gm__ int64_t*)y, numOutputElements);
+
+    // Process each output element assigned to this block
+    // For each output element (b, a) where b is index in dimBefore and a is index in dimAfter,
+    // we need to find argmin over dimSize elements at positions x[b * dimSize * dimAfter + k * dimAfter + a]
+    
+    // We'll use a tile-based approach with local memory
+    AscendC::TPipe pipe;
+    
+    // Allocate buffers for loading slices along the reduction dimension
+    // We process in tiles along dimSize
+    constexpr uint32_t BUFFER_NUM = 1;
+    constexpr uint32_t TILE_SIZE = 256; // number of elements per tile (must be multiple of 32 bytes / 4 = 8 floats min)
+
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+
+    // For the case where dimAfter == 1 (reducing along last or middle dim with contiguous access),
+    // we can load contiguous chunks. For dimAfter > 1, we need strided access.
+
+    if (dimAfter == 1) {
+        // Contiguous case: for each b in [startElem, endElem), 
+        // the data is at xGm[b * dimSize ... b * dimSize + dimSize - 1]
+        // We tile along dimSize
+        uint32_t alignedTileSize = ((TILE_SIZE + 7) / 8) * 8; // align to 8 floats (32 bytes)
+        if (alignedTileSize < 8) alignedTileSize = 8;
+        
+        pipe.InitBuffer(inQueue, BUFFER_NUM, alignedTileSize * sizeof(float));
+
+        for (uint32_t elem = startElem; elem < endElem; elem++) {
+            uint32_t baseOffset = elem * dimSize;
+            float minVal = 3.4028235e+38f;
+            int64_t minIdx = 0;
+
+            uint32_t processed = 0;
+            while (processed < dimSize) {
+                uint32_t remaining = dimSize - processed;
+                uint32_t curTile = remaining < alignedTileSize ? remaining : alignedTileSize;
+                // Align curTile up to 8 for DataCopy
+                uint32_t copyLen = ((curTile + 7) / 8) * 8;
+                if (baseOffset + processed + copyLen > dimBefore * dimSize * dimAfter + copyLen) {
+                    // safety, shouldn't happen for aligned total
+                }
+
+                AscendC::LocalTensor<float> xLocal = inQueue.AllocTensor<float>();
+                // Need to be careful: copyLen might read past the end of valid data
+                // We'll copy copyLen elements and only examine curTile of them
+                AscendC::DataCopy(xLocal, xGm[baseOffset + processed], copyLen);
+                inQueue.EnQue(xLocal);
+                
+                AscendC::LocalTensor<float> xProc = inQueue.DeQue<float>();
+                for (uint32_t i = 0; i < curTile; i++) {
+                    float val = xProc.GetValue(i);
+                    if (val < minVal) {
+                        minVal = val;
+                        minIdx = (int64_t)(processed + i);
+                    }
+                }
+                inQueue.FreeTensor(xProc);
+                processed += curTile;
+            }
+            // Write result - we need to handle int64_t output
+            // Use a simple GM write
+            yGm.SetValue(elem, minIdx);
+        }
+    } else {
+        // General case: dimAfter > 1
+        // For each output element, b = elem / dimAfter, a = elem % dimAfter
+        // Data at x[b * dimSize * dimAfter + k * dimAfter + a] for k in [0, dimSize)
+        // This is strided access with stride = dimAfter
+
+        // We'll process multiple output elements that share the same 'b' together
+        // when possible, loading full rows
+
+        // Simple approach: load tiles of the reduction dimension with gathering
+        uint32_t alignedTileSize = ((TILE_SIZE + 7) / 8) * 8;
+        if (alignedTileSize < 8) alignedTileSize = 8;
+        
+        // For strided access, we load one row at a time (dimAfter elements) and process
+        // all 'a' values for a given 'b' and 'k' at once
+        // A row is dimAfter elements at offset b * dimSize * dimAfter + k * dimAfter
+        
+        uint32_t rowSize = dimAfter;
+        uint32_t alignedRowSize = ((rowSize + 7) / 8) * 8;
+        
+        pipe.InitBuffer(inQueue, BUFFER_NUM, alignedRowSize * sizeof(float));
+        
+        for (uint32_t elem = startElem; elem < endElem; elem++) {
+            uint32_t b = elem / dimAfter;
+            uint32_t a = elem % dimAfter;
+            uint32_t baseOffset = b * dimSize * dimAfter;
+            
+            float minVal = 3.4028235e+38f;
+            int64_t minIdx = 0;
+
+            for (uint32_t k = 0; k < dimSize; k++) {
+                // We need value at baseOffset + k * dimAfter + a
+                // Load a row of dimAfter elements starting at baseOffset + k * dimAfter
+                AscendC::LocalTensor<float> xLocal = inQueue.AllocTensor<float>();
+                AscendC::DataCopy(xLocal, xGm[baseOffset + k * dimAfter], alignedRowSize);
+                inQueue.EnQue(xLocal);
+                
+                AscendC::LocalTensor<float> xProc = inQueue.DeQue<float>();
+                float val = xProc.GetValue(a);
+                if (val < minVal) {
+                    minVal = val;
+                    minIdx = (int64_t)k;
+                }
+                inQueue.FreeTensor(xProc);
+            }
+            yGm.SetValue(elem, minIdx);
+        }
+    }
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor argmin_over_a_dimension_custom_impl_npu(const at::Tensor& self, int64_t dim) {
+    // Compute output shape
+    auto input_sizes = self.sizes().vec();
+    int64_t ndim = input_sizes.size();
+    int64_t actual_dim = dim;
+    if (actual_dim < 0) actual_dim += ndim;
+    
+    std::vector<int64_t> output_sizes;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != actual_dim) {
+            output_sizes.push_back(input_sizes[i]);
+        }
+    }
+    
+    auto result = at::empty(output_sizes, self.options().dtype(at::kLong));
+    
+    EXEC_NPU_CMD(aclnnArgminOverADimensionCustom, self, dim, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("argmin_over_a_dimension_custom", &argmin_over_a_dimension_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("argmin_over_a_dimension_custom", &argmin_over_a_dimension_custom_impl_npu, "argmin along a dimension");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return custom_ops_lib.argmin_over_a_dimension_custom(x, self.dim)
+'''
+```

@@ -1,0 +1,373 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "InstanceNormCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(InstanceNormCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, numFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(InstanceNormCustom, InstanceNormCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "instance_norm_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 16;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    InstanceNormCustomTilingData tiling;
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    uint32_t batchSize = x_shape->GetDim(0);
+    uint32_t numFeatures = x_shape->GetDim(1);
+    uint32_t h = x_shape->GetDim(2);
+    uint32_t w = x_shape->GetDim(3);
+    uint32_t spatialSize = h * w;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_numFeatures(numFeatures);
+    tiling.set_spatialSize(spatialSize);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class InstanceNormCustom : public OpDef {
+public:
+    explicit InstanceNormCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(InstanceNormCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelInstanceNorm {
+public:
+    __aicore__ inline KernelInstanceNorm() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t numFeatures, uint32_t spatialSize, uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->numFeatures = numFeatures;
+        this->spatialSize = spatialSize;
+        this->tileNum = tileNum;
+
+        // Total number of (batch, channel) instances
+        this->totalInstances = batchSize * numFeatures;
+        
+        // Each block processes a subset of instances
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        
+        this->instancesPerBlock = (this->totalInstances + blockNum - 1) / blockNum;
+        this->startInstance = blockIdx * this->instancesPerBlock;
+        this->endInstance = this->startInstance + this->instancesPerBlock;
+        if (this->endInstance > this->totalInstances) {
+            this->endInstance = this->totalInstances;
+        }
+
+        // Align tileLength to 32 bytes (8 floats)
+        uint32_t rawTileLength = spatialSize / tileNum;
+        this->tileLength = (rawTileLength + 7) & ~7;  // align up to 8
+        if (this->tileLength > spatialSize) {
+            this->tileLength = (spatialSize + 7) & ~7;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * numFeatures * spatialSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * numFeatures * spatialSize);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
+        // Work buffer for reduce sum - needs to be large enough
+        pipe.InitBuffer(workBuf, this->tileLength * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t inst = this->startInstance; inst < this->endInstance; inst++) {
+            ProcessOneInstance(inst);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOneInstance(uint32_t instIdx)
+    {
+        uint32_t baseOffset = instIdx * this->spatialSize;
+        float eps = 1e-5f;
+
+        // First pass: compute mean
+        float sumTotal = 0.0f;
+        uint32_t remaining = this->spatialSize;
+        uint32_t offset = 0;
+        
+        while (remaining > 0) {
+            uint32_t curLen = remaining > this->tileLength ? this->tileLength : remaining;
+            // Align curLen up to 8
+            uint32_t alignedLen = (curLen + 7) & ~7;
+            
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+            // Zero out the buffer first if alignedLen > curLen
+            if (alignedLen > curLen) {
+                AscendC::Duplicate(xLocal, 0.0f, alignedLen);
+            }
+            AscendC::DataCopy(xLocal, xGm[baseOffset + offset], alignedLen);
+            inQueueX.EnQue(xLocal);
+
+            AscendC::LocalTensor<float> xProc = inQueueX.DeQue<float>();
+            // Zero out padding elements
+            if (curLen < alignedLen) {
+                for (uint32_t i = curLen; i < alignedLen; i++) {
+                    xProc.SetValue(i, 0.0f);
+                }
+            }
+            
+            AscendC::LocalTensor<float> workLocal = workBuf.Get<float>();
+            float partialSum = 0.0f;
+            // Sum reduction
+            AscendC::LocalTensor<float> tmpLocal = tmpBuf1.Get<float>();
+            AscendC::ReduceSum(tmpLocal, xProc, workLocal, alignedLen);
+            partialSum = tmpLocal.GetValue(0);
+            sumTotal += partialSum;
+
+            inQueueX.FreeTensor(xProc);
+            offset += curLen;
+            remaining -= curLen;
+        }
+
+        float mean = sumTotal / (float)this->spatialSize;
+
+        // Second pass: compute variance
+        float varTotal = 0.0f;
+        remaining = this->spatialSize;
+        offset = 0;
+
+        while (remaining > 0) {
+            uint32_t curLen = remaining > this->tileLength ? this->tileLength : remaining;
+            uint32_t alignedLen = (curLen + 7) & ~7;
+            
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+            if (alignedLen > curLen) {
+                AscendC::Duplicate(xLocal, 0.0f, alignedLen);
+            }
+            AscendC::DataCopy(xLocal, xGm[baseOffset + offset], alignedLen);
+            inQueueX.EnQue(xLocal);
+
+            AscendC::LocalTensor<float> xProc = inQueueX.DeQue<float>();
+            if (curLen < alignedLen) {
+                for (uint32_t i = curLen; i < alignedLen; i++) {
+                    xProc.SetValue(i, 0.0f);
+                }
+            }
+
+            // x - mean  
+            AscendC::LocalTensor<float> tmpLocal = tmpBuf1.Get<float>();
+            AscendC::Adds(tmpLocal, xProc, -mean, alignedLen);
+            // (x - mean)^2
+            AscendC::LocalTensor<float> tmpLocal2 = tmpBuf2.Get<float>();
+            AscendC::Mul(tmpLocal2, tmpLocal, tmpLocal, alignedLen);
+            // Zero padding for variance
+            if (curLen < alignedLen) {
+                for (uint32_t i = curLen; i < alignedLen; i++) {
+                    tmpLocal2.SetValue(i, 0.0f);
+                }
+            }
+            
+            AscendC::LocalTensor<float> workLocal = workBuf.Get<float>();
+            AscendC::LocalTensor<float> sumOut = tmpBuf1.Get<float>();
+            AscendC::ReduceSum(sumOut, tmpLocal2, workLocal, alignedLen);
+            varTotal += sumOut.GetValue(0);
+
+            inQueueX.FreeTensor(xProc);
+            offset += curLen;
+            remaining -= curLen;
+        }
+
+        float variance = varTotal / (float)this->spatialSize;
+        float invStd = 1.0f / sqrtf(variance + eps);
+
+        // Third pass: normalize and write output
+        remaining = this->spatialSize;
+        offset = 0;
+
+        while (remaining > 0) {
+            uint32_t curLen = remaining > this->tileLength ? this->tileLength : remaining;
+            uint32_t alignedLen = (curLen + 7) & ~7;
+            
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+            if (alignedLen > curLen) {
+                AscendC::Duplicate(xLocal, 0.0f, alignedLen);
+            }
+            AscendC::DataCopy(xLocal, xGm[baseOffset + offset], alignedLen);
+            inQueueX.EnQue(xLocal);
+
+            AscendC::LocalTensor<float> xProc = inQueueX.DeQue<float>();
+            
+            AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+            // (x - mean) * invStd
+            AscendC::Adds(yLocal, xProc, -mean, alignedLen);
+            AscendC::Muls(yLocal, yLocal, invStd, alignedLen);
+
+            outQueueY.EnQue(yLocal);
+            AscendC::LocalTensor<float> yOut = outQueueY.DeQue<float>();
+            AscendC::DataCopy(yGm[baseOffset + offset], yOut, alignedLen);
+            outQueueY.FreeTensor(yOut);
+
+            inQueueX.FreeTensor(xProc);
+            offset += curLen;
+            remaining -= curLen;
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2, workBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t numFeatures;
+    uint32_t spatialSize;
+    uint32_t tileNum;
+    uint32_t totalInstances;
+    uint32_t instancesPerBlock;
+    uint32_t startInstance;
+    uint32_t endInstance;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void instance_norm_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelInstanceNorm op;
+    op.Init(x, y, tiling_data.batchSize, tiling_data.numFeatures, tiling_data.spatialSize, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor instance_norm_custom_impl_npu(const at::Tensor& x) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnInstanceNormCustom, x, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("instance_norm_custom", &instance_norm_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("instance_norm_custom", &instance_norm_custom_impl_npu, "Instance Normalization custom");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model that performs Instance Normalization using a custom AscendC kernel.
+    """
+    def __init__(self, num_features: int) -> None:
+        super().__init__()
+        self.num_features = num_features
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return custom_ops_lib.instance_norm_custom(x)
+'''
+```

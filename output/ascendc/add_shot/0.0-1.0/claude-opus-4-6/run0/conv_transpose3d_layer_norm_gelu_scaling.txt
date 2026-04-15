@@ -1,0 +1,412 @@
+
+
+Looking at the architecture, I need to fuse the LayerNorm + GELU + Scaling operations into a custom AscendC kernel, while keeping the ConvTranspose3d as a standard PyTorch operation (since it's complex and already well-optimized).
+
+The fused kernel will operate on the output of ConvTranspose3d, which has shape (batch_size, out_channels, D', H', W'). The LayerNorm is applied over the last dimension (out_channels), followed by GELU and scaling.
+
+After ConvTranspose3d, the tensor shape is (32, 64, 32, 64, 64). LayerNorm is applied over the last dim (out_channels=64) since the input to LayerNorm is after the conv, and `nn.LayerNorm(out_channels)` normalizes over the last dimension. But wait - the conv output is (B, C, D, H, W) and LayerNorm(out_channels) would normalize over the last dim W=64. Actually, looking more carefully, `nn.LayerNorm(out_channels)` with out_channels=64 normalizes over the last dimension, which is W. But the normalized_shape is [64] and W'=64 coincidentally.
+
+Let me re-examine: The conv output shape is (B, out_channels, D', H', W') where D'=32, H'=64, W'=64. LayerNorm(out_channels=64) normalizes over last dim of size 64 (which is W'). This works because W'=64=out_channels.
+
+I'll create a custom kernel that fuses LayerNorm + GELU + Scaling over the last dimension.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose3dLayerNormGeluScalingCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "gamma",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "beta",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose3dLayerNormGeluScalingCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalRows);
+  TILING_DATA_FIELD_DEF(uint32_t, normSize);
+  TILING_DATA_FIELD_DEF(float, eps);
+  TILING_DATA_FIELD_DEF(float, scalingFactor);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose3dLayerNormGeluScalingCustom, ConvTranspose3dLayerNormGeluScalingCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose3d_layer_norm_gelu_scaling_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose3dLayerNormGeluScalingCustomTilingData tiling;
+    
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    int32_t numDims = xShape->GetStorageShape().GetDimNum();
+    uint32_t normSize = xShape->GetStorageShape().GetDim(numDims - 1);
+    uint32_t totalLength = xShape->GetStorageShape().GetShapeSize();
+    uint32_t totalRows = totalLength / normSize;
+    
+    // Get eps and scaling_factor from attrs
+    const auto* attrs = context->GetAttrs();
+    float eps = *(attrs->GetAttrPointer<float>(0));
+    float scalingFactor = *(attrs->GetAttrPointer<float>(1));
+    
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalRows(totalRows);
+    tiling.set_normSize(normSize);
+    tiling.set_eps(eps);
+    tiling.set_scalingFactor(scalingFactor);
+    
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext* context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvTranspose3dLayerNormGeluScalingCustom : public OpDef {
+public:
+    explicit ConvTranspose3dLayerNormGeluScalingCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("gamma")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("beta")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("eps").AttrType(OPTIONAL).Float(1e-5);
+        this->Attr("scaling_factor").AttrType(OPTIONAL).Float(1.0);
+        
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose3dLayerNormGeluScalingCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+using namespace AscendC;
+
+constexpr int32_t BUFFER_NUM = 1;
+
+class KernelLayerNormGeluScaling {
+public:
+    __aicore__ inline KernelLayerNormGeluScaling() {}
+    
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR gamma, GM_ADDR beta, GM_ADDR z,
+                                 uint32_t totalRows, uint32_t normSize, float eps, float scalingFactor)
+    {
+        this->totalRows = totalRows;
+        this->normSize = normSize;
+        this->eps = eps;
+        this->scalingFactor = scalingFactor;
+        
+        uint32_t blockNum = GetBlockNum();
+        uint32_t blockIdx = GetBlockIdx();
+        
+        uint32_t rowsPerBlock = totalRows / blockNum;
+        uint32_t remainRows = totalRows % blockNum;
+        
+        if (blockIdx < remainRows) {
+            this->startRow = blockIdx * (rowsPerBlock + 1);
+            this->myRows = rowsPerBlock + 1;
+        } else {
+            this->startRow = remainRows * (rowsPerBlock + 1) + (blockIdx - remainRows) * rowsPerBlock;
+            this->myRows = rowsPerBlock;
+        }
+        
+        // Align normSize to 32 bytes / 4 = 8 floats
+        this->alignedNormSize = ((normSize + 7) / 8) * 8;
+        
+        xGm.SetGlobalBuffer((__gm__ float*)x + this->startRow * normSize, this->myRows * normSize);
+        gammaGm.SetGlobalBuffer((__gm__ float*)gamma, normSize);
+        betaGm.SetGlobalBuffer((__gm__ float*)beta, normSize);
+        zGm.SetGlobalBuffer((__gm__ float*)z + this->startRow * normSize, this->myRows * normSize);
+        
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->alignedNormSize * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->alignedNormSize * sizeof(float));
+        pipe.InitBuffer(gammaQueue, BUFFER_NUM, this->alignedNormSize * sizeof(float));
+        pipe.InitBuffer(betaQueue, BUFFER_NUM, this->alignedNormSize * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, BUFFER_NUM, this->alignedNormSize * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, BUFFER_NUM, this->alignedNormSize * sizeof(float));
+    }
+    
+    __aicore__ inline void Process()
+    {
+        for (uint32_t i = 0; i < this->myRows; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint32_t row)
+    {
+        LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        DataCopy(xLocal, xGm[row * normSize], this->alignedNormSize);
+        inQueueX.EnQue(xLocal);
+    }
+    
+    __aicore__ inline void Compute(uint32_t row)
+    {
+        LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        LocalTensor<float> gammaLocal = gammaQueue.AllocTensor<float>();
+        LocalTensor<float> betaLocal = betaQueue.AllocTensor<float>();
+        LocalTensor<float> tmp1 = tmpBuf1.AllocTensor<float>();
+        LocalTensor<float> tmp2 = tmpBuf2.AllocTensor<float>();
+        
+        // Load gamma and beta
+        DataCopy(gammaLocal, gammaGm[0], this->alignedNormSize);
+        DataCopy(betaLocal, betaGm[0], this->alignedNormSize);
+        
+        // Compute mean: sum(x) / normSize
+        float sumVal = 0.0f;
+        ReduceSum(tmp1, xLocal, tmp2, this->alignedNormSize);
+        sumVal = tmp1.GetValue(0);
+        float mean = sumVal / (float)normSize;
+        
+        // x = x - mean
+        Adds(tmp1, xLocal, -mean, this->alignedNormSize);
+        
+        // Compute variance: sum((x - mean)^2) / normSize
+        Mul(tmp2, tmp1, tmp1, this->alignedNormSize);
+        
+        float varSum = 0.0f;
+        LocalTensor<float> tmp3 = xLocal; // reuse xLocal as temp
+        ReduceSum(tmp3, tmp2, zLocal, this->alignedNormSize);
+        varSum = tmp3.GetValue(0);
+        float variance = varSum / (float)normSize;
+        
+        // Normalize: (x - mean) / sqrt(variance + eps)
+        float invStd = 1.0f / sqrtf(variance + eps);
+        Muls(tmp2, tmp1, invStd, this->alignedNormSize);
+        
+        // Apply gamma and beta: gamma * normalized + beta  
+        Mul(tmp1, tmp2, gammaLocal, this->alignedNormSize);
+        Add(tmp2, tmp1, betaLocal, this->alignedNormSize);
+        
+        // GELU: x * 0.5 * (1 + erf(x / sqrt(2)))
+        // Using tanh approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        const float sqrt2OverPi = 0.7978845608f;
+        const float coeff = 0.044715f;
+        
+        // tmp1 = x^2
+        Mul(tmp1, tmp2, tmp2, this->alignedNormSize);
+        // tmp1 = coeff * x^2
+        Muls(tmp1, tmp1, coeff, this->alignedNormSize);
+        // tmp1 = 1 + coeff * x^2
+        Adds(tmp1, tmp1, 1.0f, this->alignedNormSize);
+        // tmp1 = x * (1 + coeff * x^2)
+        Mul(tmp1, tmp1, tmp2, this->alignedNormSize);
+        // tmp1 = sqrt(2/pi) * x * (1 + coeff * x^2)
+        Muls(tmp1, tmp1, sqrt2OverPi, this->alignedNormSize);
+        
+        // zLocal = tanh(tmp1)
+        // Use exp-based tanh: tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+        Muls(zLocal, tmp1, 2.0f, this->alignedNormSize);
+        Exp(zLocal, zLocal, this->alignedNormSize);
+        // tmp3 = exp(2x) + 1
+        Adds(tmp1, zLocal, 1.0f, this->alignedNormSize);
+        // zLocal = exp(2x) - 1
+        Adds(zLocal, zLocal, -1.0f, this->alignedNormSize);
+        // zLocal = (exp(2x) - 1) / (exp(2x) + 1) = tanh
+        Div(zLocal, zLocal, tmp1, this->alignedNormSize);
+        
+        // zLocal = 1 + tanh(...)
+        Adds(zLocal, zLocal, 1.0f, this->alignedNormSize);
+        // zLocal = x * (1 + tanh(...))
+        Mul(zLocal, zLocal, tmp2, this->alignedNormSize);
+        // zLocal = 0.5 * x * (1 + tanh(...))
+        Muls(zLocal, zLocal, 0.5f * this->scalingFactor, this->alignedNormSize);
+        
+        outQueueZ.EnQue(zLocal);
+        inQueueX.FreeTensor(xLocal);
+        gammaQueue.FreeTensor(gammaLocal);
+        betaQueue.FreeTensor(betaLocal);
+        tmpBuf1.FreeTensor(tmp1);
+        tmpBuf2.FreeTensor(tmp2);
+    }
+    
+    __aicore__ inline void CopyOut(uint32_t row)
+    {
+        LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        DataCopy(zGm[row * normSize], zLocal, this->alignedNormSize);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    TPipe pipe;
+    TQue<TPosition::VECIN, BUFFER_NUM> inQueueX;
+    TQue<TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    TQue<TPosition::VECIN, BUFFER_NUM> gammaQueue;
+    TQue<TPosition::VECIN, BUFFER_NUM> betaQueue;
+    TBuf<TPosition::VECCALC> tmpBuf1;
+    TBuf<TPosition::VECCALC> tmpBuf2;
+    GlobalTensor<float> xGm, gammaGm, betaGm, zGm;
+    uint32_t totalRows;
+    uint32_t normSize;
+    uint32_t alignedNormSize;
+    uint32_t startRow;
+    uint32_t myRows;
+    float eps;
+    float scalingFactor;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose3d_layer_norm_gelu_scaling_custom(
+    GM_ADDR x, GM_ADDR gamma, GM_ADDR beta, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelLayerNormGeluScaling op;
+    op.Init(x, gamma, beta, z, tiling_data.totalRows, tiling_data.normSize, tiling_data.eps, tiling_data.scalingFactor);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose3d_layer_norm_gelu_scaling_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& gamma, const at::Tensor& beta,
+    double eps, double scaling_factor)
+{
+    at::Tensor result = at::empty_like(x);
+    float eps_f = static_cast<float>(eps);
+    float sf_f = static_cast<float>(scaling_factor);
+    EXEC_NPU_CMD(aclnnConvTranspose3dLayerNormGeluScalingCustom, x, gamma, beta, result, eps_f, sf_f);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose3d_layer_norm_gelu_scaling_custom", &conv_transpose3d_layer_norm_gelu_scaling_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose3d_layer_norm_gelu_scaling_custom",
+          &conv_transpose3d_layer_norm_gelu_scaling_custom_impl_npu,
+          "LayerNorm + GELU + Scaling fused kernel");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Model that performs a 3D transposed convolution, then applies a fused
+    LayerNorm + GELU + Scaling custom kernel.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias=True, eps=1e-5, scaling_factor=1.0):
+        super().__init__()
+        self.conv_transpose = torch.nn.ConvTranspose3d(
+            in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias
+        )
+        self.layer_norm = torch.nn.LayerNorm(out_channels, eps=eps)
+        self.eps = eps
+        self.scaling_factor = scaling_factor
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        gamma = self.layer_norm.weight
+        beta = self.layer_norm.bias
+        x = x.contiguous()
+        x = custom_ops_lib.conv_transpose3d_layer_norm_gelu_scaling_custom(
+            x, gamma, beta, self.eps, self.scaling_factor
+        )
+        return x
+'''
+```

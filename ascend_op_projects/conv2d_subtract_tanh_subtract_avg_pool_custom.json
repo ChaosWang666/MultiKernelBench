@@ -1,0 +1,63 @@
+
+[
+    {
+        "op": "Conv2dSubtractTanhSubtractAvgPoolCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "in_channels",
+                "type": "int",
+                "value": 64
+            },
+            {
+                "name": "out_channels",
+                "type": "int",
+                "value": 128
+            },
+            {
+                "name": "kernel_size",
+                "type": "int",
+                "value": 3
+            },
+            {
+                "name": "subtract1_value",
+                "type": "float",
+                "value": 0.5
+            },
+            {
+                "name": "subtract2_value",
+                "type": "float",
+                "value": 0.2
+            },
+            {
+                "name": "kernel_size_pool",
+                "type": "int",
+                "value": 2
+            }
+        ]
+    }
+]

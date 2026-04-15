@@ -1,0 +1,381 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "BatchNormCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "running_mean",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "running_var",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(BatchNormCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, numFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, height);
+  TILING_DATA_FIELD_DEF(uint32_t, width);
+  TILING_DATA_FIELD_DEF(float, eps);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(BatchNormCustom, BatchNormCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "batch_norm_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    BatchNormCustomTilingData tiling;
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
+    uint32_t numFeatures = xShape->GetStorageShape().GetDim(1);
+    uint32_t height = xShape->GetStorageShape().GetDim(2);
+    uint32_t width = xShape->GetStorageShape().GetDim(3);
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_numFeatures(numFeatures);
+    tiling.set_height(height);
+    tiling.set_width(width);
+    tiling.set_eps(1e-5f);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class BatchNormCustom : public OpDef {
+public:
+    explicit BatchNormCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("running_mean")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("running_var")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(BatchNormCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelBatchNorm {
+public:
+    __aicore__ inline KernelBatchNorm() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias,
+                                 GM_ADDR runningMean, GM_ADDR runningVar,
+                                 GM_ADDR y,
+                                 uint32_t batchSize, uint32_t numFeatures,
+                                 uint32_t height, uint32_t width, float eps)
+    {
+        this->batchSize = batchSize;
+        this->numFeatures = numFeatures;
+        this->height = height;
+        this->width = width;
+        this->eps = eps;
+        this->spatialSize = height * width;
+        this->totalElements = batchSize * numFeatures * spatialSize;
+
+        // Each block processes a subset of (batch, channel) pairs
+        uint32_t totalBC = batchSize * numFeatures;
+        uint32_t numBlocks = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        this->bcStart = blockIdx * ((totalBC + numBlocks - 1) / numBlocks);
+        this->bcEnd = (blockIdx + 1) * ((totalBC + numBlocks - 1) / numBlocks);
+        if (this->bcEnd > totalBC) this->bcEnd = totalBC;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, this->totalElements);
+        yGm.SetGlobalBuffer((__gm__ float *)y, this->totalElements);
+        weightGm.SetGlobalBuffer((__gm__ float *)weight, numFeatures);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, numFeatures);
+        meanGm.SetGlobalBuffer((__gm__ float *)runningMean, numFeatures);
+        varGm.SetGlobalBuffer((__gm__ float *)runningVar, numFeatures);
+
+        // Compute tile parameters for spatial dimension processing
+        // We process spatialSize elements per (batch, channel) pair
+        // Align tileLength to 32 bytes / 4 bytes = 8 elements
+        uint32_t alignNum = 8;
+        this->tileNum = BUFFER_NUM;
+        this->tileLength = (this->spatialSize + this->tileNum - 1) / this->tileNum;
+        // align up tileLength
+        this->tileLength = ((this->tileLength + alignNum - 1) / alignNum) * alignNum;
+        // Recalculate: last tile may be smaller
+        this->lastTileLength = this->spatialSize - this->tileLength * (this->tileNum - 1);
+        if (this->lastTileLength <= 0) {
+            this->tileNum = (this->spatialSize + this->tileLength - 1) / this->tileLength;
+            this->lastTileLength = this->spatialSize - this->tileLength * (this->tileNum - 1);
+        }
+        this->alignedLastTile = ((this->lastTileLength + alignNum - 1) / alignNum) * alignNum;
+
+        uint32_t bufSize = this->tileLength * sizeof(float);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, bufSize);
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, bufSize);
+        pipe.InitBuffer(tmpBuf, 1, bufSize);
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t bc = this->bcStart; bc < this->bcEnd; bc++) {
+            uint32_t c = bc % this->numFeatures;
+            uint32_t gmOffset = bc * this->spatialSize;
+
+            // Load BN parameters for this channel
+            float mean_val = 0.0f;
+            float var_val = 0.0f;
+            float w_val = 1.0f;
+            float b_val = 0.0f;
+
+            // We need to read single values from GM
+            // Use a temporary local tensor approach
+            {
+                AscendC::LocalTensor<float> tmpLocal = tmpBuf.AllocTensor<float>();
+                // Read mean
+                AscendC::DataCopy(tmpLocal, meanGm[c / 8 * 8], 8);
+                AscendC::PipeBarrier<PIPE_ALL>();
+                mean_val = tmpLocal.GetValue(c % 8);
+                // Read var
+                AscendC::DataCopy(tmpLocal, varGm[c / 8 * 8], 8);
+                AscendC::PipeBarrier<PIPE_ALL>();
+                var_val = tmpLocal.GetValue(c % 8);
+                // Read weight
+                AscendC::DataCopy(tmpLocal, weightGm[c / 8 * 8], 8);
+                AscendC::PipeBarrier<PIPE_ALL>();
+                w_val = tmpLocal.GetValue(c % 8);
+                // Read bias
+                AscendC::DataCopy(tmpLocal, biasGm[c / 8 * 8], 8);
+                AscendC::PipeBarrier<PIPE_ALL>();
+                b_val = tmpLocal.GetValue(c % 8);
+                tmpBuf.FreeTensor(tmpLocal);
+            }
+
+            // Compute scale = weight / sqrt(var + eps) and shift = bias - mean * scale
+            float invStd = 1.0f / sqrtf(var_val + this->eps);
+            float scale = w_val * invStd;
+            float shift = b_val - mean_val * scale;
+
+            for (uint32_t t = 0; t < this->tileNum; t++) {
+                uint32_t curTileLen = (t < this->tileNum - 1) ? this->tileLength : this->lastTileLength;
+                uint32_t alignedLen = (t < this->tileNum - 1) ? this->tileLength : this->alignedLastTile;
+
+                // CopyIn
+                AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+                AscendC::DataCopy(xLocal, xGm[gmOffset + t * this->tileLength], alignedLen);
+                inQueueX.EnQue(xLocal);
+
+                // Compute: y = x * scale + shift
+                AscendC::LocalTensor<float> xIn = inQueueX.DeQue<float>();
+                AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+                AscendC::Muls(yLocal, xIn, scale, alignedLen);
+                AscendC::Adds(yLocal, yLocal, shift, alignedLen);
+                outQueueY.EnQue(yLocal);
+                inQueueX.FreeTensor(xIn);
+
+                // CopyOut
+                AscendC::LocalTensor<float> yOut = outQueueY.DeQue<float>();
+                AscendC::DataCopy(yGm[gmOffset + t * this->tileLength], yOut, alignedLen);
+                outQueueY.FreeTensor(yOut);
+            }
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<float> xGm, yGm, weightGm, biasGm, meanGm, varGm;
+    uint32_t batchSize, numFeatures, height, width;
+    uint32_t spatialSize, totalElements;
+    uint32_t bcStart, bcEnd;
+    uint32_t tileNum, tileLength, lastTileLength, alignedLastTile;
+    float eps;
+};
+
+extern "C" __global__ __aicore__ void batch_norm_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR bias,
+                                                         GM_ADDR running_mean, GM_ADDR running_var,
+                                                         GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelBatchNorm op;
+    op.Init(x, weight, bias, running_mean, running_var, y,
+            tiling_data.batchSize, tiling_data.numFeatures,
+            tiling_data.height, tiling_data.width, tiling_data.eps);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor batch_norm_custom_impl_npu(const at::Tensor& x, const at::Tensor& weight,
+                                       const at::Tensor& bias, const at::Tensor& running_mean,
+                                       const at::Tensor& running_var) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnBatchNormCustom, x, weight, bias, running_mean, running_var, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("batch_norm_custom", &batch_norm_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("batch_norm_custom", &batch_norm_custom_impl_npu, "Batch Normalization Custom");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model that performs Batch Normalization using a custom AscendC kernel.
+    """
+    def __init__(self, num_features: int):
+        super().__init__()
+        self.bn = torch.nn.BatchNorm2d(num_features=num_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Use running_mean and running_var in eval mode
+        # The custom kernel applies: y = weight * (x - running_mean) / sqrt(running_var + eps) + bias
+        weight = self.bn.weight.contiguous()
+        bias = self.bn.bias.contiguous()
+        running_mean = self.bn.running_mean.contiguous()
+        running_var = self.bn.running_var.contiguous()
+        return custom_ops_lib.batch_norm_custom(x.contiguous(), weight, bias, running_mean, running_var)
+'''
+```

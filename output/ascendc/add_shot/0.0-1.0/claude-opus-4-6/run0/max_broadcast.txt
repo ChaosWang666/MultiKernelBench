@@ -1,0 +1,398 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "MaxBroadcastCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MaxBroadcastCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, dim0);
+  TILING_DATA_FIELD_DEF(uint32_t, dim1);
+  TILING_DATA_FIELD_DEF(uint32_t, dim2);
+  TILING_DATA_FIELD_DEF(uint32_t, aDim0);
+  TILING_DATA_FIELD_DEF(uint32_t, aDim1);
+  TILING_DATA_FIELD_DEF(uint32_t, aDim2);
+  TILING_DATA_FIELD_DEF(uint32_t, bDim0);
+  TILING_DATA_FIELD_DEF(uint32_t, bDim1);
+  TILING_DATA_FIELD_DEF(uint32_t, bDim2);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MaxBroadcastCustom, MaxBroadcastCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "max_broadcast_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 16;
+const uint32_t TILE_NUM = 16;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MaxBroadcastCustomTilingData tiling;
+
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto yShape = context->GetInputShape(1)->GetOriginShape();
+
+    uint32_t aDim0 = xShape.GetDimNum() >= 3 ? xShape.GetDim(0) : 1;
+    uint32_t aDim1 = xShape.GetDimNum() >= 3 ? xShape.GetDim(1) : (xShape.GetDimNum() >= 2 ? xShape.GetDim(0) : 1);
+    uint32_t aDim2 = xShape.GetDimNum() >= 3 ? xShape.GetDim(2) : (xShape.GetDimNum() >= 2 ? xShape.GetDim(1) : xShape.GetDim(0));
+
+    uint32_t bDim0 = yShape.GetDimNum() >= 3 ? yShape.GetDim(0) : 1;
+    uint32_t bDim1 = yShape.GetDimNum() >= 3 ? yShape.GetDim(1) : (yShape.GetDimNum() >= 2 ? yShape.GetDim(0) : 1);
+    uint32_t bDim2 = yShape.GetDimNum() >= 3 ? yShape.GetDim(2) : (yShape.GetDimNum() >= 2 ? yShape.GetDim(1) : yShape.GetDim(0));
+
+    uint32_t dim0 = aDim0 > bDim0 ? aDim0 : bDim0;
+    uint32_t dim1 = aDim1 > bDim1 ? aDim1 : bDim1;
+    uint32_t dim2 = aDim2 > bDim2 ? aDim2 : bDim2;
+
+    uint32_t totalLength = dim0 * dim1 * dim2;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.set_dim0(dim0);
+    tiling.set_dim1(dim1);
+    tiling.set_dim2(dim2);
+    tiling.set_aDim0(aDim0);
+    tiling.set_aDim1(aDim1);
+    tiling.set_aDim2(aDim2);
+    tiling.set_bDim0(bDim0);
+    tiling.set_bDim1(bDim1);
+    tiling.set_bDim2(bDim2);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* y_shape = context->GetInputShape(1);
+    gert::Shape* z_shape = context->GetOutputShape(0);
+
+    int xDims = x_shape->GetDimNum();
+    int yDims = y_shape->GetDimNum();
+    int maxDims = xDims > yDims ? xDims : yDims;
+
+    for (int i = 0; i < maxDims; i++) {
+        int xi = i < xDims ? x_shape->GetDim(xDims - 1 - i) : 1;
+        int yi = i < yDims ? y_shape->GetDim(yDims - 1 - i) : 1;
+        int oi = xi > yi ? xi : yi;
+        z_shape->SetDim(maxDims - 1 - i, oi);
+    }
+
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MaxBroadcastCustom : public OpDef {
+public:
+    explicit MaxBroadcastCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MaxBroadcastCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelMaxBroadcast {
+public:
+    __aicore__ inline KernelMaxBroadcast() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z,
+                                 uint32_t totalLength, uint32_t tileNum,
+                                 uint32_t dim0, uint32_t dim1, uint32_t dim2,
+                                 uint32_t aDim0, uint32_t aDim1, uint32_t aDim2,
+                                 uint32_t bDim0, uint32_t bDim1, uint32_t bDim2)
+    {
+        this->dim0 = dim0;
+        this->dim1 = dim1;
+        this->dim2 = dim2;
+        this->aDim0 = aDim0;
+        this->aDim1 = aDim1;
+        this->aDim2 = aDim2;
+        this->bDim0 = bDim0;
+        this->bDim1 = bDim1;
+        this->bDim2 = bDim2;
+        this->totalLength = totalLength;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        // Total rows = dim0 * dim1, each row has dim2 elements
+        uint32_t totalRows = dim0 * dim1;
+        uint32_t rowsPerBlock = totalRows / blockNum;
+        uint32_t remainRows = totalRows % blockNum;
+
+        if (blockIdx < remainRows) {
+            this->startRow = blockIdx * (rowsPerBlock + 1);
+            this->numRows = rowsPerBlock + 1;
+        } else {
+            this->startRow = remainRows * (rowsPerBlock + 1) + (blockIdx - remainRows) * rowsPerBlock;
+            this->numRows = rowsPerBlock;
+        }
+
+        this->blockLength = this->numRows * dim2;
+
+        // Align tileLength to 32 bytes (8 floats)
+        uint32_t alignNum = 8;
+        this->tileLength = dim2;
+        if (this->tileLength % alignNum != 0) {
+            this->tileLengthAligned = (this->tileLength + alignNum - 1) / alignNum * alignNum;
+        } else {
+            this->tileLengthAligned = this->tileLength;
+        }
+
+        uint32_t aSize = aDim0 * aDim1 * aDim2;
+        uint32_t bSize = bDim0 * bDim1 * bDim2;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, aSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y, bSize);
+        zGm.SetGlobalBuffer((__gm__ float *)z, totalLength);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLengthAligned * sizeof(float));
+        pipe.InitBuffer(inQueueY, BUFFER_NUM, this->tileLengthAligned * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLengthAligned * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t i = 0; i < this->numRows; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t rowIdx)
+    {
+        uint32_t globalRow = this->startRow + rowIdx;
+        uint32_t d0 = globalRow / dim1;
+        uint32_t d1 = globalRow % dim1;
+
+        // Compute source indices for a
+        uint32_t aD0 = (aDim0 == 1) ? 0 : d0;
+        uint32_t aD1 = (aDim1 == 1) ? 0 : d1;
+        uint32_t aOffset = aD0 * aDim1 * aDim2 + aD1 * aDim2;
+
+        // Compute source indices for b
+        uint32_t bD0 = (bDim0 == 1) ? 0 : d0;
+        uint32_t bD1 = (bDim1 == 1) ? 0 : d1;
+        uint32_t bOffset = bD0 * bDim1 * bDim2 + bD1 * bDim2;
+
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> yLocal = inQueueY.AllocTensor<float>();
+
+        // Handle broadcasting along dim2
+        if (aDim2 == 1) {
+            // a is broadcast along dim2: need to fill with single value
+            // Read scalar and broadcast
+            AscendC::DataCopy(xLocal, xGm[aOffset], this->tileLengthAligned);
+            // We'll handle scalar broadcast in Compute
+        } else {
+            AscendC::DataCopy(xLocal, xGm[aOffset], this->tileLengthAligned);
+        }
+
+        if (bDim2 == 1) {
+            AscendC::DataCopy(yLocal, yGm[bOffset], this->tileLengthAligned);
+        } else {
+            AscendC::DataCopy(yLocal, yGm[bOffset], this->tileLengthAligned);
+        }
+
+        inQueueX.EnQue(xLocal);
+        inQueueY.EnQue(yLocal);
+    }
+
+    __aicore__ inline void Compute(int32_t rowIdx)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = inQueueY.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+
+        if (aDim2 == 1 && bDim2 == 1) {
+            // Both scalar along dim2, just max of two scalars repeated
+            AscendC::Max(zLocal, xLocal, yLocal, this->tileLengthAligned);
+        } else if (aDim2 == 1) {
+            // Broadcast a scalar across dim2
+            AscendC::Adds(zLocal, yLocal, (float)0, this->tileLengthAligned);
+            // xLocal[0] has the scalar value, we need to broadcast it
+            AscendC::Maxs(zLocal, yLocal, xLocal.GetValue(0), this->tileLengthAligned);
+        } else if (bDim2 == 1) {
+            // Broadcast b scalar across dim2
+            AscendC::Maxs(zLocal, xLocal, yLocal.GetValue(0), this->tileLengthAligned);
+        } else {
+            AscendC::Max(zLocal, xLocal, yLocal, this->tileLengthAligned);
+        }
+
+        outQueueZ.EnQue<float>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+        inQueueY.FreeTensor(yLocal);
+    }
+
+    __aicore__ inline void CopyOut(int32_t rowIdx)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        uint32_t globalRow = this->startRow + rowIdx;
+        uint32_t zOffset = globalRow * dim2;
+        AscendC::DataCopy(zGm[zOffset], zLocal, this->tileLengthAligned);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t totalLength;
+    uint32_t blockLength;
+    uint32_t tileLength;
+    uint32_t tileLengthAligned;
+    uint32_t startRow;
+    uint32_t numRows;
+    uint32_t dim0, dim1, dim2;
+    uint32_t aDim0, aDim1, aDim2;
+    uint32_t bDim0, bDim1, bDim2;
+};
+
+extern "C" __global__ __aicore__ void max_broadcast_custom(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMaxBroadcast op;
+    op.Init(x, y, z,
+            tiling_data.totalLength, tiling_data.tileNum,
+            tiling_data.dim0, tiling_data.dim1, tiling_data.dim2,
+            tiling_data.aDim0, tiling_data.aDim1, tiling_data.aDim2,
+            tiling_data.bDim0, tiling_data.bDim1, tiling_data.bDim2);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor max_broadcast_custom_impl_npu(const at::Tensor& self, const at::Tensor& other) {
+    // Compute broadcast output shape
+    auto out_sizes = at::infer_size(self.sizes(), other.sizes());
+    at::Tensor result = at::empty(out_sizes, self.options());
+
+    // Ensure contiguous
+    auto self_contig = self.contiguous();
+    auto other_contig = other.contiguous();
+
+    EXEC_NPU_CMD(aclnnMaxBroadcastCustom, self_contig, other_contig, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("max_broadcast_custom", &max_broadcast_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("max_broadcast_custom", &max_broadcast_custom_impl_npu, "element-wise max with broadcasting");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a, b):
+        return custom_ops_lib.max_broadcast_custom(a, b)
+'''
+```

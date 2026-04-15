@@ -1,0 +1,103 @@
+{
+ "binFileName": "ConvTranspose2dMishAddHardtanhScalingCustom_d0865063af16e746ea29dcf743e4574c",
+ "binFileSuffix": ".o",
+ "blockDim": -1,
+ "coreType": "VectorCore",
+ "core_type": "AIV",
+ "intercoreSync": 0,
+ "kernelName": "ConvTranspose2dMishAddHardtanhScalingCustom_d0865063af16e746ea29dcf743e4574c",
+ "magic": "RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+ "memoryStamping": [],
+ "opParaSize": 16,
+ "parameters": [
+  null,
+  null,
+  null,
+  null,
+  null
+ ],
+ "sha256": "94a8bc98f64134af33ac5b9d1541da95f0c5a9b2361028dda7b672af079326d0",
+ "workspace": {
+  "num": 1,
+  "size": [
+   -1
+  ],
+  "type": [
+   0
+  ]
+ },
+ "kernelList": [
+  {
+   "kernelName": "ConvTranspose2dMishAddHardtanhScalingCustom_d0865063af16e746ea29dcf743e4574c_0"
+  }
+ ],
+ "optionalInputMode": "gen_placeholder",
+ "optionalOutputMode": "gen_placeholder",
+ "supportSuperKernel": 1,
+ "compileInfo": {},
+ "supportInfo": {
+  "implMode": "high_performance",
+  "int64Mode": false,
+  "simplifiedKeyMode": 0,
+  "simplifiedKey": [
+   "ConvTranspose2dMishAddHardtanhScalingCustom/d=0,p=1/0,2/0,2/0,2/0,2",
+   "ConvTranspose2dMishAddHardtanhScalingCustom/d=0,p=0/0,2/0,2/0,2/0,2",
+   "ConvTranspose2dMishAddHardtanhScalingCustom/d=1,p=1/0,2/0,2/0,2/0,2",
+   "ConvTranspose2dMishAddHardtanhScalingCustom/d=1,p=0/0,2/0,2/0,2/0,2"
+  ],
+  "optionalInputMode": "gen_placeholder",
+  "optionalOutputMode": "gen_placeholder",
+  "staticKey": "e7ee671befb09f01a579e6b447052e4f8660d41790aaa0c02a813a8d991f88b7,10ece6b820443a55859e93e431b9869965527700534b902d054c8d6c436c9db4",
+  "inputs": [
+   {
+    "name": "x",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   },
+   {
+    "name": "add_value",
+    "index": 1,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   },
+   {
+    "name": "scale",
+    "index": 2,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "z",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "opMode": "dynamic",
+  "deterministic": "ignore"
+ },
+ "filePath": "ascend910b/conv_transpose2d_mish_add_hardtanh_scaling_custom/ConvTranspose2dMishAddHardtanhScalingCustom_d0865063af16e746ea29dcf743e4574c.json"
+}

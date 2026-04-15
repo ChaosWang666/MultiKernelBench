@@ -1,0 +1,39 @@
+{
+  "LeakyReluCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "LeakyReluCustom/d=0,p=1/0,2/0,2",
+          "LeakyReluCustom/d=0,p=0/0,2/0,2",
+          "LeakyReluCustom/d=1,p=1/0,2/0,2",
+          "LeakyReluCustom/d=1,p=0/0,2/0,2"
+        ],
+        "binPath": "ascend910b/leaky_relu_custom/LeakyReluCustom_ab8f2a732efc8ff07062c79bec6b5fca.o",
+        "jsonPath": "ascend910b/leaky_relu_custom/LeakyReluCustom_ab8f2a732efc8ff07062c79bec6b5fca.json"
+      }
+    ]
+  }
+}

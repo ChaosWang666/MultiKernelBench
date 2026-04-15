@@ -1,0 +1,3 @@
+all: grid_sample_random_warp_custom0
+grid_sample_random_warp_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GridSampleRandomWarpCustom/build_out/op_kernel/GridSampleRandomWarpCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GridSampleRandomWarpCustom/build_out/op_kernel/GridSampleRandomWarpCustom_ascend910b/bin_param/GridSampleRandomWarpCustom-grid_sample_random_warp_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

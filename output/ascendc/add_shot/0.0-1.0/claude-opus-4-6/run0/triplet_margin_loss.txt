@@ -1,0 +1,690 @@
+
+
+Looking at this architecture, I need to implement a Triplet Margin Loss custom kernel. The Triplet Margin Loss is defined as:
+
+`loss = max(0, ||anchor - positive||_2 - ||anchor - negative||_2 + margin)`
+
+averaged over the batch.
+
+Let me implement this as a custom AscendC kernel.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "TripletMarginLossCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "anchor",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "positive",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "negative",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "loss",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(TripletMarginLossCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, dimSize);
+  TILING_DATA_FIELD_DEF(float, margin);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(TripletMarginLossCustom, TripletMarginLossCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "triplet_margin_loss_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    TripletMarginLossCustomTilingData tiling;
+    const gert::StorageShape* anchorShape = context->GetInputShape(0);
+    uint32_t batchSize = anchorShape->GetStorageShape().GetDim(0);
+    uint32_t dimSize = anchorShape->GetStorageShape().GetDim(1);
+
+    // Use enough blocks but not more than batch size
+    uint32_t blockDim = 32;
+    if (blockDim > batchSize) blockDim = batchSize;
+
+    context->SetBlockDim(blockDim);
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_dimSize(dimSize);
+
+    // Get margin from attrs - default 1.0
+    const float* marginPtr = context->GetAttrs()->GetAttrPointer<float>(0);
+    float margin = 1.0f;
+    if (marginPtr != nullptr) {
+        margin = *marginPtr;
+    }
+    tiling.set_margin(margin);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    // Output is a scalar (shape [1])
+    *y_shape = gert::Shape({1});
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class TripletMarginLossCustom : public OpDef {
+public:
+    explicit TripletMarginLossCustom(const char* name) : OpDef(name)
+    {
+        this->Input("anchor")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("positive")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("negative")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("loss")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("margin").AttrType(OPTIONAL).Float(1.0);
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(TripletMarginLossCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelTripletMarginLoss {
+public:
+    __aicore__ inline KernelTripletMarginLoss() {}
+    __aicore__ inline void Init(GM_ADDR anchor, GM_ADDR positive, GM_ADDR negative, GM_ADDR loss,
+                                uint32_t batchSize, uint32_t dimSize, float margin)
+    {
+        this->batchSize = batchSize;
+        this->dimSize = dimSize;
+        this->margin = margin;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        // Distribute batch samples across blocks
+        this->batchPerBlock = (batchSize + blockNum - 1) / blockNum;
+        this->startBatch = blockIdx * this->batchPerBlock;
+        this->endBatch = startBatch + this->batchPerBlock;
+        if (this->endBatch > batchSize) this->endBatch = batchSize;
+        this->actualBatch = (this->endBatch > this->startBatch) ? (this->endBatch - this->startBatch) : 0;
+
+        // Set up global memory pointers
+        anchorGm.SetGlobalBuffer((__gm__ float*)anchor, batchSize * dimSize);
+        positiveGm.SetGlobalBuffer((__gm__ float*)positive, batchSize * dimSize);
+        negativeGm.SetGlobalBuffer((__gm__ float*)negative, batchSize * dimSize);
+        lossGm.SetGlobalBuffer((__gm__ float*)loss, 1);
+
+        // We process each sample's dimension in tiles
+        // Align tile size to 32 bytes = 8 floats
+        uint32_t alignNum = 8;
+
+        // Determine tile size for processing dimension
+        // We want to fit tiles in UB. Each tile needs space for anchor, positive, negative, diff, squared
+        // Let's use a tile size that fits well
+        uint32_t maxTileSize = 8192; // floats per tile
+        if (dimSize <= maxTileSize) {
+            this->tileDim = ((dimSize + alignNum - 1) / alignNum) * alignNum;
+            this->tileNumDim = 1;
+        } else {
+            this->tileDim = maxTileSize;
+            this->tileNumDim = (dimSize + maxTileSize - 1) / maxTileSize;
+        }
+        this->lastTileDim = dimSize - (this->tileNumDim - 1) * (this->tileNumDim > 1 ? maxTileSize : dimSize);
+        if (this->tileNumDim == 1) {
+            this->lastTileDim = dimSize;
+        } else {
+            this->lastTileDim = dimSize - (this->tileNumDim - 1) * maxTileSize;
+        }
+
+        // Allocate buffers: we need space for anchor_tile, pos_tile, neg_tile, diff, temp
+        uint32_t bufBytes = this->tileDim * sizeof(float);
+        pipe.InitBuffer(inQueueA, 1, bufBytes);
+        pipe.InitBuffer(inQueueP, 1, bufBytes);
+        pipe.InitBuffer(inQueueN, 1, bufBytes);
+        pipe.InitBuffer(outQueue, 1, bufBytes);
+        pipe.InitBuffer(tmpBuf1, 1, bufBytes);
+        // For partial sums per sample and reduction
+        uint32_t reduceBufSize = ((this->actualBatch + alignNum - 1) / alignNum) * alignNum;
+        if (reduceBufSize < alignNum) reduceBufSize = alignNum;
+        this->reduceBufLen = reduceBufSize;
+        pipe.InitBuffer(tmpBuf2, 1, reduceBufSize * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (this->actualBatch == 0) return;
+
+        uint32_t alignNum = 8;
+        // We'll store per-sample loss in tmpBuf2
+        AscendC::LocalTensor<float> sampleLoss = tmpBuf2.AllocTensor<float>();
+        // zero it out
+        AscendC::Duplicate(sampleLoss, 0.0f, this->reduceBufLen);
+
+        for (uint32_t b = 0; b < this->actualBatch; b++) {
+            uint32_t globalBatchIdx = this->startBatch + b;
+            float distPos = 0.0f;
+            float distNeg = 0.0f;
+
+            // Process dimension in tiles
+            uint32_t dimProcessed = 0;
+            for (uint32_t t = 0; t < this->tileNumDim; t++) {
+                uint32_t curDim;
+                if (t == this->tileNumDim - 1) {
+                    curDim = this->lastTileDim;
+                } else {
+                    curDim = (this->tileNumDim == 1) ? this->dimSize : 8192;
+                }
+                uint32_t curDimAligned = ((curDim + alignNum - 1) / alignNum) * alignNum;
+
+                // Copy anchor tile
+                AscendC::LocalTensor<float> aLocal = inQueueA.AllocTensor<float>();
+                AscendC::LocalTensor<float> pLocal = inQueueP.AllocTensor<float>();
+                AscendC::LocalTensor<float> nLocal = inQueueN.AllocTensor<float>();
+                AscendC::LocalTensor<float> diffLocal = outQueue.AllocTensor<float>();
+                AscendC::LocalTensor<float> tmpLocal = tmpBuf1.AllocTensor<float>();
+
+                uint32_t gmOffset = globalBatchIdx * this->dimSize + dimProcessed;
+                AscendC::DataCopy(aLocal, anchorGm[gmOffset], curDimAligned);
+                AscendC::DataCopy(pLocal, positiveGm[gmOffset], curDimAligned);
+                AscendC::DataCopy(nLocal, negativeGm[gmOffset], curDimAligned);
+
+                // Compute (anchor - positive)^2 sum
+                AscendC::Sub(diffLocal, aLocal, pLocal, curDimAligned);
+                AscendC::Mul(tmpLocal, diffLocal, diffLocal, curDimAligned);
+                // Zero out padded elements if needed
+                if (curDim < curDimAligned) {
+                    for (uint32_t i = curDim; i < curDimAligned; i++) {
+                        tmpLocal.SetValue(i, 0.0f);
+                    }
+                }
+                // Reduce sum
+                float sumPos = 0.0f;
+                AscendC::ReduceSum(diffLocal, tmpLocal, tmpLocal, curDimAligned);
+                sumPos = diffLocal.GetValue(0);
+                distPos += sumPos;
+
+                // Compute (anchor - negative)^2 sum
+                AscendC::Sub(diffLocal, aLocal, nLocal, curDimAligned);
+                AscendC::Mul(tmpLocal, diffLocal, diffLocal, curDimAligned);
+                if (curDim < curDimAligned) {
+                    for (uint32_t i = curDim; i < curDimAligned; i++) {
+                        tmpLocal.SetValue(i, 0.0f);
+                    }
+                }
+                float sumNeg = 0.0f;
+                AscendC::ReduceSum(diffLocal, tmpLocal, tmpLocal, curDimAligned);
+                sumNeg = diffLocal.GetValue(0);
+                distNeg += sumNeg;
+
+                dimProcessed += curDim;
+
+                inQueueA.FreeTensor(aLocal);
+                inQueueP.FreeTensor(pLocal);
+                inQueueN.FreeTensor(nLocal);
+                outQueue.FreeTensor(diffLocal);
+                tmpBuf1.FreeTensor(tmpLocal);
+            }
+
+            // distPos = sqrt(distPos), distNeg = sqrt(distNeg)
+            // loss_sample = max(0, sqrt(distPos) - sqrt(distNeg) + margin)
+            float sqrtPos = 0.0f;
+            float sqrtNeg = 0.0f;
+            if (distPos > 0.0f) {
+                // Manual sqrt approximation using Newton's method
+                sqrtPos = distPos;
+                for (int iter = 0; iter < 20; iter++) {
+                    sqrtPos = 0.5f * (sqrtPos + distPos / sqrtPos);
+                }
+            }
+            if (distNeg > 0.0f) {
+                sqrtNeg = distNeg;
+                for (int iter = 0; iter < 20; iter++) {
+                    sqrtNeg = 0.5f * (sqrtNeg + distNeg / sqrtNeg);
+                }
+            }
+
+            float lossVal = sqrtPos - sqrtNeg + this->margin;
+            if (lossVal < 0.0f) lossVal = 0.0f;
+            sampleLoss.SetValue(b, lossVal);
+        }
+
+        // Sum all sample losses and divide by batchSize for mean
+        // We need the global mean, so each block computes its partial sum
+        // and writes it, then we handle final reduction
+        uint32_t alignNum = 8;
+        AscendC::LocalTensor<float> tmpReduce = tmpBuf1.AllocTensor<float>();
+        uint32_t reduceLen = this->reduceBufLen;
+        // zero out padding
+        for (uint32_t i = this->actualBatch; i < reduceLen; i++) {
+            sampleLoss.SetValue(i, 0.0f);
+        }
+        if (reduceLen >= alignNum) {
+            AscendC::ReduceSum(tmpReduce, sampleLoss, tmpReduce, reduceLen);
+        } else {
+            AscendC::ReduceSum(tmpReduce, sampleLoss, tmpReduce, alignNum);
+        }
+        float partialSum = tmpReduce.GetValue(0);
+        float meanLoss = partialSum / (float)this->batchSize;
+
+        // Use atomic add to accumulate to output
+        // Only block 0 initializes the output
+        tmpReduce.SetValue(0, meanLoss);
+        // Pad for alignment
+        for (uint32_t i = 1; i < alignNum; i++) {
+            tmpReduce.SetValue(i, 0.0f);
+        }
+
+        AscendC::SetAtomicAdd<float>();
+        AscendC::DataCopy(lossGm[0], tmpReduce, alignNum);
+        AscendC::SetAtomicNone();
+
+        tmpBuf1.FreeTensor(tmpReduce);
+        tmpBuf2.FreeTensor(sampleLoss);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::TPosition::VECIN> inQueueA, inQueueP, inQueueN;
+    AscendC::TBuf<AscendC::TPosition::VECOUT> outQueue;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
+    AscendC::GlobalTensor<float> anchorGm, positiveGm, negativeGm, lossGm;
+    uint32_t batchSize;
+    uint32_t dimSize;
+    float margin;
+    uint32_t batchPerBlock;
+    uint32_t startBatch;
+    uint32_t endBatch;
+    uint32_t actualBatch;
+    uint32_t tileDim;
+    uint32_t tileNumDim;
+    uint32_t lastTileDim;
+    uint32_t reduceBufLen;
+};
+
+extern "C" __global__ __aicore__ void triplet_margin_loss_custom(GM_ADDR anchor, GM_ADDR positive, GM_ADDR negative, GM_ADDR loss, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelTripletMarginLoss op;
+    op.Init(anchor, positive, negative, loss, tiling_data.batchSize, tiling_data.dimSize, tiling_data.margin);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor triplet_margin_loss_custom_impl_npu(const at::Tensor& anchor, const at::Tensor& positive, const at::Tensor& negative, float margin) {
+    at::Tensor loss = at::zeros({1}, anchor.options());
+    EXEC_NPU_CMD(aclnnTripletMarginLossCustom, anchor, positive, negative, loss, margin);
+    return loss;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("triplet_margin_loss_custom", &triplet_margin_loss_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("triplet_margin_loss_custom", &triplet_margin_loss_custom_impl_npu, "Triplet Margin Loss");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model that computes Triplet Margin Loss using custom AscendC kernel.
+    """
+    def __init__(self, margin=1.0):
+        super(ModelNew, self).__init__()
+        self.margin = margin
+
+    def forward(self, anchor, positive, negative):
+        result = custom_ops_lib.triplet_margin_loss_custom(anchor, positive, negative, self.margin)
+        return result.squeeze()
+'''
+```
+
+Wait, I need to reconsider. The AscendC approach for such a large problem (32768 x 8192) with per-sample dimension reduction is quite complex. Let me reconsider the kernel design to be more practical and correct, especially around the ReduceSum API and buffer management.
+
+Let me also reconsider the atomic add approach - the output needs to be zeroed first, and then each block atomically adds its contribution.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "TripletMarginLossCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "anchor",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "positive",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "negative",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "loss",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(TripletMarginLossCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, dimSize);
+  TILING_DATA_FIELD_DEF(float, margin);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(TripletMarginLossCustom, TripletMarginLossCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "triplet_margin_loss_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    TripletMarginLossCustomTilingData tiling;
+    const gert::StorageShape* anchorShape = context->GetInputShape(0);
+    uint32_t batchSize = anchorShape->GetStorageShape().GetDim(0);
+    uint32_t dimSize = anchorShape->GetStorageShape().GetDim(1);
+
+    uint32_t blockDim = 32;
+    if (blockDim > batchSize) blockDim = batchSize;
+
+    context->SetBlockDim(blockDim);
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_dimSize(dimSize);
+
+    const float* marginPtr = context->GetAttrs()->GetAttrPointer<float>(0);
+    float margin = 1.0f;
+    if (marginPtr != nullptr) {
+        margin = *marginPtr;
+    }
+    tiling.set_margin(margin);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = gert::Shape({1});
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class TripletMarginLossCustom : public OpDef {
+public:
+    explicit TripletMarginLossCustom(const char* name) : OpDef(name)
+    {
+        this->Input("anchor")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("positive")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("negative")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("loss")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("margin").AttrType(OPTIONAL).Float(1.0);
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(TripletMarginLossCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t TILE_SIZE = 4096;
+constexpr int32_t ALIGN_NUM = 8;
+
+class KernelTripletMarginLoss {
+public:
+    __aicore__ inline KernelTripletMarginLoss() {}
+    __aicore__ inline void Init(GM_ADDR anchor, GM_ADDR positive, GM_ADDR negative, GM_ADDR loss,
+                                uint32_t batchSize, uint32_t dimSize, float margin)
+    {
+        this->batchSize = batchSize;
+        this->dimSize = dimSize;
+        this->margin = margin;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        this->batchPerBlock = (batchSize + blockNum - 1) / blockNum;
+        this->startBatch = blockIdx * this->batchPerBlock;
+        this->endBatch = startBatch + this->batchPerBlock;
+        if (this->endBatch > batchSize) this->endBatch = batchSize;
+        this->actualBatch = (this->endBatch > this->startBatch) ? (this->endBatch - this->startBatch) : 0;
+
+        anchorGm.SetGlobalBuffer((__gm__ float*)anchor, (uint64_t)batchSize * dimSize);
+        positiveGm.SetGlobalBuffer((__gm__ float*)positive, (uint64_t)batchSize * dimSize);
+        negativeGm.SetGlobalBuffer((__gm__ float*)negative, (uint64_t)batchSize * dimSize);
+        lossGm.SetGlobalBuffer((__gm__ float*)loss, 1);
+
+        uint32_t tileDimAligned = ((TILE_SIZE + ALIGN_NUM - 1) / ALIGN_NUM) * ALIGN_NUM;
+        uint32_t bufBytes = tileDimAligned * sizeof(float);
+
+        pipe.InitBuffer(buf0, 1, bufBytes);
+        pipe.InitBuffer(buf1, 1, bufBytes);
+        pipe.InitBuffer(buf2, 1, bufBytes);
+        pipe.InitBuffer(buf3, 1, bufBytes);
+        pipe.InitBuffer(buf4, 1, bufBytes);
+        pipe.InitBuffer(buf5, 1, ALIGN_NUM * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        float totalLoss = 0.0f;
+
+        for (uint32_t b = 0; b < this->actualBatch; b++) {
+            uint32_t globalBatchIdx = this->startBatch + b;
+            float distPosSq = 0.0f;
+            float distNegSq = 0.0f;
+
+            uint32_t dimProcessed = 0;
+            while (dimProcessed < this->dimSize) {
+                uint32_t curDim = this->dimSize - dimProcessed;
+                if (curDim > TILE_SIZE) curDim = TILE_SIZE;
+                uint32_t curDimAligned = ((curDim + ALIGN_NUM - 1) / ALIGN_NUM) * ALIGN_NUM;
+
+                uint64_t gmOffset = (uint64_t)globalBatchIdx * this->dimSize + dimProcessed;
+
+                AscendC::LocalTensor<float> aLocal = buf0.Get<float>();
+                AscendC::LocalTensor<float> pLocal = buf1.Get<float>();
+                AscendC::LocalTensor<float> nLocal = buf2.Get<float>();
+                AscendC::LocalTensor<float> diffLocal = buf3.Get<float>();
+                AscendC::LocalTensor<float> sqLocal = buf4.Get<float>();
+
+                AscendC::DataCopy(aLocal, anchorGm[gmOffset], curDimAligned);
+                AscendC::DataCopy(pLocal, positiveGm[gmOffset], curDimAligned);
+                AscendC::DataCopy(nLocal, negativeGm[gmOffset], curDimAligned);
+                AscendC::DataCopyPad(aLocal, anchorGm[gmOffset], {(uint16_t)1, (uint16_t)(curDim * 4), 0, 0, 0});
+                AscendC::DataCopyPad(pLocal, positiveGm[gmOffset], {(uint16_t)1, (uint16_t)(curDim * 4), 0, 0, 0});
+                AscendC::DataCopyPad(nLocal, negativeGm[gmOffset], {(uint16_t)1, (uint16_t)(curDim * 4), 0, 0, 0});
+
+                // dist_pos += sum((a - p)^2)
+                AscendC::Sub(diffLocal, aLocal, pLocal, curDimAligned);
+                AscendC::Mul(sqLocal, diffLocal, diffLocal, curDimAligned);
+                // Zero padding
+                for (uint32_t i = curDim; i < curDimAligned; i++) {
+                    sqLocal.SetValue(i, 0.0f);
+                }
+                float partSum = 0.0f;
+                AscendC::LocalTensor<float> workLocal = buf5.Get<float>();
+                AscendC::ReduceSum(workLocal, sqLocal, workLocal, curDimAligned);
+                partSum = workLocal.GetValue(0);
+                distPosSq += partSum;
+
+                // dist_neg += sum((a - n)^2)
+                AscendC::Sub(diffLocal, aLocal, nLocal, curDimAligned);
+                AscendC::Mul(sqLocal, diffLocal, diffLocal, curDimAligned);
+                for (uint32_t i = curDim; i < curDimAligned; i++) {
+                    sqLocal.SetValue(i, 0.0f);
+                }
+                Asc

@@ -1,0 +1,78 @@
+{
+  "op_type": "MultiQueryAttentionCustom",
+  "op_list": [
+    {
+      "bin_filename": "MultiQueryAttentionCustom_414bae1155986a23db59e77395aa2d0a",
+      "inputs": [
+        {
+          "name": "q",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "k",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "v",
+          "index": 2,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "batch_size",
+          "dtype": "int",
+          "value": 0
+        },
+        {
+          "name": "seq_len",
+          "dtype": "int",
+          "value": 0
+        },
+        {
+          "name": "num_heads",
+          "dtype": "int",
+          "value": 0
+        },
+        {
+          "name": "head_dim",
+          "dtype": "int",
+          "value": 0
+        }
+      ]
+    }
+  ]
+}

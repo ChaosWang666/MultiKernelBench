@@ -1,0 +1,328 @@
+
+
+Looking at the architecture, the transposed convolution is complex and best left to PyTorch/NPU's built-in implementation. However, the post-convolution operations (bias add, clamp, scale, clamp, divide) can be fused into a single custom kernel for better performance.
+
+The fused operation is: `clamp(clamp(x + bias, 0, 1) * scaling_factor, 0, 1) / scaling_factor`
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose2dBiasAddClampScalingClampDivideCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "scaling_factor",
+                "param_type": "required",
+                "type": "float"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose2dBiasAddClampScalingClampDivideCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(float, scalingFactor);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose2dBiasAddClampScalingClampDivideCustom, ConvTranspose2dBiasAddClampScalingClampDivideCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose2d_bias_add_clamp_scaling_clamp_divide_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 512;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose2dBiasAddClampScalingClampDivideCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    
+    // x shape: [N, C, H, W]
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t outChannels = shape.GetDim(1);
+    uint32_t H = shape.GetDim(2);
+    uint32_t W = shape.GetDim(3);
+    uint32_t spatialSize = H * W;
+    
+    // Get scaling_factor attribute
+    const auto *attrs = context->GetAttrs();
+    float scalingFactor = *(attrs->GetFloat(0));
+    
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.set_outChannels(outChannels);
+    tiling.set_spatialSize(spatialSize);
+    tiling.set_scalingFactor(scalingFactor);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvTranspose2dBiasAddClampScalingClampDivideCustom : public OpDef {
+public:
+    explicit ConvTranspose2dBiasAddClampScalingClampDivideCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("scaling_factor")
+            .Float();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose2dBiasAddClampScalingClampDivideCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelBiasAddClampScaleClampDiv {
+public:
+    __aicore__ inline KernelBiasAddClampScaleClampDiv() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR z,
+                                 uint32_t totalLength, uint32_t tileNum,
+                                 uint32_t outChannels, uint32_t spatialSize,
+                                 float scalingFactor)
+    {
+        this->totalLength = totalLength;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->outChannels = outChannels;
+        this->spatialSize = spatialSize;
+        this->scalingFactor = scalingFactor;
+        this->invScalingFactor = 1.0f / scalingFactor;
+        this->blockOffset = this->blockLength * AscendC::GetBlockIdx();
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockOffset, this->blockLength);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, outChannels);
+        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockOffset, this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::LocalTensor<float> biasLocal = tmpBuf.Get<float>();
+
+        // Compute global offset for this tile
+        uint32_t globalOffset = this->blockOffset + progress * this->tileLength;
+
+        // Build bias vector for this tile
+        // x shape: [N, C, H, W], so for global index i: channel = (i / spatialSize) % outChannels
+        for (uint32_t j = 0; j < this->tileLength; j++) {
+            uint32_t gIdx = globalOffset + j;
+            uint32_t channel = (gIdx / this->spatialSize) % this->outChannels;
+            biasLocal.SetValue(j, biasGm.GetValue(channel));
+        }
+
+        // x = x + bias
+        AscendC::Add(zLocal, xLocal, biasLocal, this->tileLength);
+
+        // clamp(x, 0, 1)
+        float minVal = 0.0f;
+        float maxVal = 1.0f;
+        AscendC::Maxs(zLocal, zLocal, minVal, this->tileLength);
+        AscendC::Mins(zLocal, zLocal, maxVal, this->tileLength);
+
+        // x = x * scaling_factor
+        AscendC::Muls(zLocal, zLocal, this->scalingFactor, this->tileLength);
+
+        // clamp(x, 0, 1)
+        AscendC::Maxs(zLocal, zLocal, minVal, this->tileLength);
+        AscendC::Mins(zLocal, zLocal, maxVal, this->tileLength);
+
+        // x = x / scaling_factor
+        AscendC::Muls(zLocal, zLocal, this->invScalingFactor, this->tileLength);
+
+        outQueueZ.EnQue<float>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t totalLength;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t outChannels;
+    uint32_t spatialSize;
+    uint32_t blockOffset;
+    float scalingFactor;
+    float invScalingFactor;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose2d_bias_add_clamp_scaling_clamp_divide_custom(GM_ADDR x, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelBiasAddClampScaleClampDiv op;
+    op.Init(x, bias, z, tiling_data.totalLength, tiling_data.tileNum,
+            tiling_data.outChannels, tiling_data.spatialSize, tiling_data.scalingFactor);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose2d_bias_add_clamp_scaling_clamp_divide_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& bias, float scaling_factor) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnConvTranspose2dBiasAddClampScalingClampDivideCustom, x, bias, result, scaling_factor);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose2d_bias_add_clamp_scaling_clamp_divide_custom", &conv_transpose2d_bias_add_clamp_scaling_clamp_divide_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose2d_bias_add_clamp_scaling_clamp_divide_custom", &conv_transpose2d_bias_add_clamp_scaling_clamp_divide_custom_impl_npu, "fused bias_add + clamp + scale + clamp + div");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    """
+    Optimized model that performs transposed convolution via PyTorch, then fuses
+    bias add, clamp, scale, clamp, divide into a single custom AscendC kernel.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, output_padding, bias_shape, scaling_factor):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, output_padding=output_padding)
+        self.bias = nn.Parameter(torch.randn(bias_shape))
+        self.scaling_factor = scaling_factor
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = custom_ops_lib.conv_transpose2d_bias_add_clamp_scaling_clamp_divide_custom(
+            x, self.bias, self.scaling_factor)
+        return x
+'''
+```

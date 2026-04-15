@@ -1,0 +1,367 @@
+
+
+Looking at the RegNet architecture, I'll identify a key operation to optimize with a custom AscendC kernel. The Global Average Pooling (`torch.mean(x, dim=[2, 3])`) followed by the linear layer is a good candidate. However, for a more impactful and straightforward optimization, I'll create a custom kernel that fuses the ReLU activation, which is used repeatedly throughout the network.
+
+Actually, looking more carefully, a better target is the Global Average Pooling operation (`torch.mean(x, dim=[2,3])`) which reduces a 4D tensor to 2D by averaging over spatial dimensions. This is a clean, self-contained operation that can benefit from a custom kernel.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "RegnetCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(RegnetCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(RegnetCustom, RegnetCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "regnet_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 8;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    RegnetCustomTilingData tiling;
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
+    uint32_t channels = xShape->GetStorageShape().GetDim(1);
+    uint32_t height = xShape->GetStorageShape().GetDim(2);
+    uint32_t width = xShape->GetStorageShape().GetDim(3);
+    uint32_t spatialSize = height * width;
+
+    uint32_t totalBC = batchSize * channels;
+    uint32_t blockDim = BLOCK_DIM;
+    if (totalBC < blockDim) {
+        blockDim = totalBC;
+    }
+
+    context->SetBlockDim(blockDim);
+    tiling.set_batchSize(batchSize);
+    tiling.set_channels(channels);
+    tiling.set_spatialSize(spatialSize);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    // Output shape is (batch, channels)
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, x_shape->GetDim(1));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class RegnetCustom : public OpDef {
+public:
+    explicit RegnetCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(RegnetCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelGlobalAvgPool {
+public:
+    __aicore__ inline KernelGlobalAvgPool() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t channels, uint32_t spatialSize, uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->channels = channels;
+        this->spatialSize = spatialSize;
+        this->tileNum = tileNum;
+
+        uint32_t totalBC = batchSize * channels;
+        uint32_t numBlocks = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        // Each block processes a subset of (batch, channel) pairs
+        this->bcPerBlock = (totalBC + numBlocks - 1) / numBlocks;
+        this->bcStart = blockIdx * this->bcPerBlock;
+        this->bcEnd = this->bcStart + this->bcPerBlock;
+        if (this->bcEnd > totalBC) {
+            this->bcEnd = totalBC;
+        }
+
+        // Align tile length to 32 bytes (8 floats)
+        uint32_t alignNum = 8;
+        if (spatialSize <= alignNum) {
+            this->tileLength = ((spatialSize + alignNum - 1) / alignNum) * alignNum;
+            this->actualTileNum = 1;
+        } else {
+            uint32_t rawTile = (spatialSize + tileNum - 1) / tileNum;
+            this->tileLength = ((rawTile + alignNum - 1) / alignNum) * alignNum;
+            this->actualTileNum = (spatialSize + this->tileLength - 1) / this->tileLength;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * channels * spatialSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * channels);
+
+        // Buffer for input tiles and a small work buffer for partial sums
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueZ, 1, alignNum * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t bc = this->bcStart; bc < this->bcEnd; bc++) {
+            ProcessOne(bc);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOne(uint32_t bcIdx)
+    {
+        float totalSum = 0.0f;
+        uint32_t baseOffset = bcIdx * this->spatialSize;
+        uint32_t remaining = this->spatialSize;
+
+        for (uint32_t t = 0; t < this->actualTileNum; t++) {
+            uint32_t curLen = this->tileLength;
+            uint32_t actualLen = remaining;
+            if (actualLen > curLen) {
+                actualLen = curLen;
+            }
+
+            // CopyIn
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+
+            // If last tile might be partial, we need to handle alignment
+            uint32_t copyLen = ((actualLen + 7) / 8) * 8;
+            if (copyLen > this->tileLength) {
+                copyLen = this->tileLength;
+            }
+            AscendC::DataCopy(xLocal, xGm[baseOffset + t * this->tileLength], copyLen);
+            inQueueX.EnQue(xLocal);
+
+            // Compute partial sum
+            AscendC::LocalTensor<float> xIn = inQueueX.DeQue<float>();
+
+            // Zero out elements beyond actualLen if partial tile
+            if (actualLen < copyLen) {
+                for (uint32_t i = actualLen; i < copyLen; i++) {
+                    xLocal.SetValue(i, 0.0f);
+                }
+            }
+
+            // Use ReduceSum to sum elements
+            AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+            // ReduceSum: reduce copyLen elements
+            AscendC::ReduceSum(zLocal, xIn, copyLen, false);
+            float partialSum = zLocal.GetValue(0);
+            totalSum += partialSum;
+
+            outQueueZ.FreeTensor(zLocal);
+            inQueueX.FreeTensor(xIn);
+
+            remaining -= actualLen;
+        }
+
+        // Write result: mean = totalSum / spatialSize
+        float mean = totalSum / (float)this->spatialSize;
+
+        // Write single value - need aligned write
+        AscendC::LocalTensor<float> zOut = outQueueZ.AllocTensor<float>();
+        zOut.SetValue(0, mean);
+        // We write just one float but DataCopy needs alignment
+        // Use DataCopyPad or write with SetValue to global memory
+        outQueueZ.EnQue(zOut);
+        AscendC::LocalTensor<float> zResult = outQueueZ.DeQue<float>();
+        // Copy 8 floats (minimum aligned), but we only care about first
+        // We'll just set the GM value directly
+        AscendC::DataCopy(yGm[bcIdx], zResult, 8);
+        outQueueZ.FreeTensor(zResult);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueZ;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t channels;
+    uint32_t spatialSize;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t actualTileNum;
+    uint32_t bcPerBlock;
+    uint32_t bcStart;
+    uint32_t bcEnd;
+};
+
+extern "C" __global__ __aicore__ void regnet_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGlobalAvgPool op;
+    op.Init(x, y, tiling_data.batchSize, tiling_data.channels, tiling_data.spatialSize, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor regnet_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes();
+    int64_t batch = sizes[0];
+    int64_t channels = sizes[1];
+    at::Tensor result = at::empty({batch, channels}, self.options());
+    EXEC_NPU_CMD(aclnnRegnetCustom, self, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("regnet_custom", &regnet_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("regnet_custom", &regnet_custom_impl_npu, "Global Average Pooling over spatial dims");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+import torch.nn as nn
+
+class ModelNew(nn.Module):
+    def __init__(self, input_channels, stages, block_widths, output_classes):
+        """
+        :param input_channels: int, Number of input channels for the first layer
+        :param stages: int, Number of stages in the RegNet architecture
+        :param block_widths: List[int], Width (number of channels) for each block in the stages
+        :param output_classes: int, Number of output classes for classification
+        """
+        super(ModelNew, self).__init__()
+
+        self.stages = stages
+        self.block_widths = block_widths
+        
+        layers = []
+        current_channels = input_channels
+        
+        # Construct the stages with their respective blocks
+        for i in range(stages):
+            layers.append(self._make_stage(current_channels, block_widths[i]))
+            current_channels = block_widths[i]
+        
+        self.feature_extractor = nn.Sequential(*layers)
+        
+        # Final fully connected layer for classification
+        self.fc = nn.Linear(block_widths[-1], output_classes)
+    
+    def _make_stage(self, in_channels, out_channels):
+        """
+        Creates a simple block for each stage.
+        :param in_channels: int, number of input channels
+        :param out_channels: int, number of output channels
+        :return: nn.Sequential block with convolutional layers
+        """
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+
+    def forward(self, x):
+        """
+        Forward pass through the RegNet model with custom global average pooling.
+        :param x: torch.Tensor of shape (batch_size, input_channels, height, width)
+        :return: torch.Tensor of shape (batch_size, output_classes)
+        """
+        x = self.feature_extractor(x)
+        # Use custom AscendC kernel for Global Average Pooling instead of torch.mean(x, dim=[2, 3])
+        x = custom_ops_lib.regnet_custom(x)
+        x = self.fc(x)
+        return x
+'''
+```

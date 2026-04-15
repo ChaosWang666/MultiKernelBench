@@ -1,0 +1,60 @@
+{
+  "binList": [
+    {
+      "implMode": "high_performance",
+      "int64Mode": false,
+      "simplifiedKeyMode": 0,
+      "simplifiedKey": [
+        "ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom/d=0,p=1/0,2/0,2/0,2",
+        "ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom/d=0,p=0/0,2/0,2/0,2",
+        "ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom/d=1,p=1/0,2/0,2/0,2",
+        "ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom/d=1,p=0/0,2/0,2/0,2"
+      ],
+      "staticKey": "55e84ffac41fa7325a9f15f74c4d444618458c8c02467f776f20e7d2933e345e,295935613b943d6a71aa3e5b596ee7da1f284cfde70cbf59960f8c546b5d4d30",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "bias",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "z",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "opMode": "dynamic",
+      "optionalInputMode": "gen_placeholder",
+      "deterministic": "ignore",
+      "optionalOutputMode": "gen_placeholder",
+      "binInfo": {
+        "jsonFilePath": "ascend910b/conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom/ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom_2447004d60e272985d2c486a695604d8.json"
+      }
+    }
+  ]
+}

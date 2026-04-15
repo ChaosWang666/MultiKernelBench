@@ -1,0 +1,51 @@
+{
+  "RmspropCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "param",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "grad",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "v",
+          "index": 2,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "param_out",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "RmspropCustom/d=0,p=1/0,2/0,2/0,2/0,2",
+          "RmspropCustom/d=0,p=0/0,2/0,2/0,2/0,2",
+          "RmspropCustom/d=1,p=1/0,2/0,2/0,2/0,2",
+          "RmspropCustom/d=1,p=0/0,2/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/rmsprop_custom/RmspropCustom_4d15d908f4aee901c92d716f47067fbc.o",
+        "jsonPath": "ascend910b/rmsprop_custom/RmspropCustom_4d15d908f4aee901c92d716f47067fbc.json"
+      }
+    ]
+  }
+}

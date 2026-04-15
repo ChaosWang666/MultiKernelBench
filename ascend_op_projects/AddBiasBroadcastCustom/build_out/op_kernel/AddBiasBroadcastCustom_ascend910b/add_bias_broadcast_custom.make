@@ -1,0 +1,3 @@
+all: add_bias_broadcast_custom0
+add_bias_broadcast_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/AddBiasBroadcastCustom/build_out/op_kernel/AddBiasBroadcastCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/AddBiasBroadcastCustom/build_out/op_kernel/AddBiasBroadcastCustom_ascend910b/bin_param/AddBiasBroadcastCustom-add_bias_broadcast_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

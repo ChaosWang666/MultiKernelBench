@@ -1,0 +1,294 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "FourDimTensorMatrixMultiplicationCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "A",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "B",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "C",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(FourDimTensorMatrixMultiplicationCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, b);
+  TILING_DATA_FIELD_DEF(uint32_t, i);
+  TILING_DATA_FIELD_DEF(uint32_t, j);
+  TILING_DATA_FIELD_DEF(uint32_t, l);
+  TILING_DATA_FIELD_DEF(uint32_t, k);
+  TILING_DATA_FIELD_DEF(uint32_t, tileL);
+  TILING_DATA_FIELD_DEF(uint32_t, tileK);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(FourDimTensorMatrixMultiplicationCustom, FourDimTensorMatrixMultiplicationCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "four_dim_tensor_matrix_multiplication_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+
+    FourDimTensorMatrixMultiplicationCustomTilingData tiling;
+    const gert::Shape* a_shape = context->GetInputShape(0);
+    const gert::Shape* b_shape = context->GetInputShape(1);
+    const std::vector<int64_t>& a_dims = a_shape->GetOriginShape().GetDims();
+    const std::vector<int64_t>& b_dims = b_shape->GetOriginShape().GetDims();
+
+    uint32_t b = static_cast<uint32_t>(a_dims[0]);
+    uint32_t i = static_cast<uint32_t>(a_dims[1]);
+    uint32_t j = static_cast<uint32_t>(a_dims[2]);
+    uint32_t l = static_cast<uint32_t>(a_dims[3]);
+    uint32_t k = static_cast<uint32_t>(b_dims[1]);
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_b(b);
+    tiling.set_i(i);
+    tiling.set_j(j);
+    tiling.set_l(l);
+    tiling.set_k(k);
+    tiling.set_tileL(l);
+    tiling.set_tileK(k);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* a_shape = context->GetInputShape(0);
+    const gert::Shape* b_shape = context->GetInputShape(1);
+    const std::vector<int64_t>& a_dims = a_shape->GetOriginShape().GetDims();
+    const std::vector<int64_t>& b_dims = b_shape->GetOriginShape().GetDims();
+    gert::Shape* c_shape = context->GetOutputShape(0);
+    std::vector<int64_t> output_dims = {a_dims[0], a_dims[1], a_dims[2], b_dims[1]};
+    *c_shape = gert::Shape(output_dims);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class FourDimTensorMatrixMultiplicationCustom : public OpDef {
+public:
+    explicit FourDimTensorMatrixMultiplicationCustom(const char* name) : OpDef(name)
+    {
+        this->Input("A")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("B")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("C")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(FourDimTensorMatrixMultiplicationCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+
+class KernelFourDimTensorMatrixMultiplication {
+public:
+    __aicore__ inline KernelFourDimTensorMatrixMultiplication() {}
+    __aicore__ inline void Init(GM_ADDR A, GM_ADDR B, GM_ADDR C, uint32_t b, uint32_t i, uint32_t j, uint32_t l, uint32_t k, uint32_t tileL, uint32_t tileK)
+    {
+        this->b = b;
+        this->i = i;
+        this->j = j;
+        this->l = l;
+        this->k = k;
+        this->tileL = tileL;
+        this->tileK = tileK;
+
+        this->blockLength = b * i * j * l / AscendC::GetBlockNum();
+        this->blockLengthK = b * i * j * k / AscendC::GetBlockNum();
+
+        A_Gm.SetGlobalBuffer((__gm__ float *)A + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        B_Gm.SetGlobalBuffer((__gm__ float *)B, l * k);
+        C_Gm.SetGlobalBuffer((__gm__ float *)C + this->blockLengthK * AscendC::GetBlockIdx(), this->blockLengthK);
+
+        pipe.InitBuffer(inQueueA, BUFFER_NUM, this->tileL * sizeof(float));
+        pipe.InitBuffer(inQueueB, BUFFER_NUM, this->tileK * sizeof(float));
+        pipe.InitBuffer(outQueueC, BUFFER_NUM, this->tileK * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        for (uint32_t bi = 0; bi < b; ++bi) {
+            for (uint32_t ii = 0; ii < i; ++ii) {
+                for (uint32_t jj = 0; jj < j; ++jj) {
+                    for (uint32_t ll = 0; ll < l; ll += tileL) {
+                        for (uint32_t kk = 0; kk < k; kk += tileK) {
+                            CopyIn(bi, ii, jj, ll, kk);
+                            Compute(bi, ii, jj, ll, kk);
+                            CopyOut(bi, ii, jj, ll, kk);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint32_t bi, uint32_t ii, uint32_t jj, uint32_t ll, uint32_t kk)
+    {
+        uint32_t offsetA = bi * i * j * l + ii * j * l + jj * l + ll;
+        uint32_t offsetB = ll * k + kk;
+        uint32_t lenA = (ll + tileL > l) ? (l - ll) : tileL;
+        uint32_t lenB = (kk + tileK > k) ? (k - kk) : tileK;
+
+        AscendC::LocalTensor<float> ALocal = inQueueA.AllocTensor<float>();
+        AscendC::LocalTensor<float> BLocal = inQueueB.AllocTensor<float>();
+        AscendC::DataCopy(ALocal, A_Gm[offsetA], lenA);
+        AscendC::DataCopy(BLocal, B_Gm[offsetB], lenB);
+        inQueueA.EnQue(ALocal);
+        inQueueB.EnQue(BLocal);
+    }
+    __aicore__ inline void Compute(uint32_t bi, uint32_t ii, uint32_t jj, uint32_t ll, uint32_t kk)
+    {
+        AscendC::LocalTensor<float> ALocal = inQueueA.DeQue<float>();
+        AscendC::LocalTensor<float> BLocal = inQueueB.DeQue<float>();
+        AscendC::LocalTensor<float> CLocal = outQueueC.AllocTensor<float>();
+        AscendC::MatMul(CLocal, ALocal, BLocal, ll, kk, tileL, tileK, false, false);
+        outQueueC.EnQue<float>(CLocal);
+        inQueueA.FreeTensor(ALocal);
+        inQueueB.FreeTensor(BLocal);
+    }
+    __aicore__ inline void CopyOut(uint32_t bi, uint32_t ii, uint32_t jj, uint32_t ll, uint32_t kk)
+    {
+        uint32_t offsetC = bi * i * j * k + ii * j * k + jj * k + kk;
+        AscendC::LocalTensor<float> CLocal = outQueueC.DeQue<float>();
+        AscendC::DataCopy(C_Gm[offsetC], CLocal, tileK);
+        outQueueC.FreeTensor(CLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueA, inQueueB;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueC;
+    AscendC::GlobalTensor<float> A_Gm;
+    AscendC::GlobalTensor<float> B_Gm;
+    AscendC::GlobalTensor<float> C_Gm;
+    uint32_t b;
+    uint32_t i;
+    uint32_t j;
+    uint32_t l;
+    uint32_t k;
+    uint32_t tileL;
+    uint32_t tileK;
+    uint32_t blockLength;
+    uint32_t blockLengthK;
+};
+
+extern "C" __global__ __aicore__ void four_dim_tensor_matrix_multiplication_custom(GM_ADDR A, GM_ADDR B, GM_ADDR C, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelFourDimTensorMatrixMultiplication op;
+    op.Init(A, B, C, tiling_data.b, tiling_data.i, tiling_data.j, tiling_data.l, tiling_data.k, tiling_data.tileL, tiling_data.tileK);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor four_dim_tensor_matrix_multiplication_custom_impl_npu(const at::Tensor& A, const at::Tensor& B) {
+    at::Tensor result = at::empty({A.size(0), A.size(1), A.size(2), B.size(1)}, at::TensorOptions(at::kFloat).device(at::kNPU));
+    EXEC_NPU_CMD(aclnnFourDimTensorMatrixMultiplicationCustom, A, B, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("four_dim_tensor_matrix_multiplication_custom", &four_dim_tensor_matrix_multiplication_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("four_dim_tensor_matrix_multiplication_custom", &four_dim_tensor_matrix_multiplication_custom_impl_npu, "4D tensor matrix multiplication");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, A, B):
+        return custom_ops_lib.four_dim_tensor_matrix_multiplication_custom(A, B)
+'''
+```

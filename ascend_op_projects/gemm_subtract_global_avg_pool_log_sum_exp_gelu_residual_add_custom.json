@@ -1,0 +1,35 @@
+
+[
+    {
+        "op": "GemmSubtractGlobalAvgPoolLogSumExpGeluResidualAddCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "gemm_out",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "subtract_vec",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "original_x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "output",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]

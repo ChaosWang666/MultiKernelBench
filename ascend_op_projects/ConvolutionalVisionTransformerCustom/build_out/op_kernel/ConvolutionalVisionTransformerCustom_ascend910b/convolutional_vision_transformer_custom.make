@@ -1,0 +1,3 @@
+all: convolutional_vision_transformer_custom0
+convolutional_vision_transformer_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/ConvolutionalVisionTransformerCustom/build_out/op_kernel/ConvolutionalVisionTransformerCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/ConvolutionalVisionTransformerCustom/build_out/op_kernel/ConvolutionalVisionTransformerCustom_ascend910b/bin_param/ConvolutionalVisionTransformerCustom-convolutional_vision_transformer_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

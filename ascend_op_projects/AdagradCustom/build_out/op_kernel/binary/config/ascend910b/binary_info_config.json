@@ -1,0 +1,59 @@
+{
+  "AdagradCustom": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "param",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "grad",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "accum",
+          "index": 2,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "param_out",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "lr"
+        },
+        {
+          "name": "eps"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 2,
+        "simplifiedKey": [
+          "AdagradCustom/d=0,p=1/0,2/0,2/0,2/0,2",
+          "AdagradCustom/d=0,p=0/0,2/0,2/0,2/0,2",
+          "AdagradCustom/d=1,p=1/0,2/0,2/0,2/0,2",
+          "AdagradCustom/d=1,p=0/0,2/0,2/0,2/0,2"
+        ],
+        "binPath": "ascend910b/adagrad_custom/AdagradCustom_21614f3c72dc461c18e974793bcd1039.o",
+        "jsonPath": "ascend910b/adagrad_custom/AdagradCustom_21614f3c72dc461c18e974793bcd1039.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,3 @@
+all: max_broadcast_custom0
+max_broadcast_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MaxBroadcastCustom/build_out/op_kernel/MaxBroadcastCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MaxBroadcastCustom/build_out/op_kernel/MaxBroadcastCustom_ascend910b/bin_param/MaxBroadcastCustom-max_broadcast_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

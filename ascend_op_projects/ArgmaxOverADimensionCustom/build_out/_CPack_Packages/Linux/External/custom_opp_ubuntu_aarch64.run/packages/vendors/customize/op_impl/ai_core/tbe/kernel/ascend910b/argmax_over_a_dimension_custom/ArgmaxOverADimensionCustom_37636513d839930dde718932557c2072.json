@@ -1,0 +1,86 @@
+{
+ "binFileName": "ArgmaxOverADimensionCustom_37636513d839930dde718932557c2072",
+ "binFileSuffix": ".o",
+ "blockDim": -1,
+ "coreType": "VectorCore",
+ "core_type": "AIV",
+ "intercoreSync": 0,
+ "kernelName": "ArgmaxOverADimensionCustom_37636513d839930dde718932557c2072",
+ "magic": "RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+ "memoryStamping": [],
+ "opParaSize": 32,
+ "parameters": [
+  null,
+  null,
+  null
+ ],
+ "sha256": "946913b8ff63b91092a1e5e75a2e3a3120ed4781699974daf4b263a2c6445986",
+ "workspace": {
+  "num": 1,
+  "size": [
+   -1
+  ],
+  "type": [
+   0
+  ]
+ },
+ "kernelList": [
+  {
+   "kernelName": "ArgmaxOverADimensionCustom_37636513d839930dde718932557c2072_0"
+  }
+ ],
+ "optionalInputMode": "gen_placeholder",
+ "optionalOutputMode": "gen_placeholder",
+ "supportSuperKernel": 1,
+ "compileInfo": {},
+ "supportInfo": {
+  "implMode": "high_performance",
+  "int64Mode": false,
+  "simplifiedKeyMode": 0,
+  "simplifiedKey": [
+   "ArgmaxOverADimensionCustom/d=0,p=1/0,2/9,2",
+   "ArgmaxOverADimensionCustom/d=0,p=0/0,2/9,2",
+   "ArgmaxOverADimensionCustom/d=1,p=1/0,2/9,2",
+   "ArgmaxOverADimensionCustom/d=1,p=0/0,2/9,2"
+  ],
+  "optionalInputMode": "gen_placeholder",
+  "optionalOutputMode": "gen_placeholder",
+  "staticKey": "078a8c381edaebb731590ecf7606f3ea0b3216c7c21bfaa19d0f421cf2aa684d,f9679e7d0870d397be9c587a68f58c3d95d2b0faa2b9a2404cc1ec680d47a38a",
+  "inputs": [
+   {
+    "name": "x",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "y",
+    "index": 0,
+    "dtype": "int64",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "attrs": [
+   {
+    "name": "dim",
+    "dtype": "int",
+    "value": 0
+   }
+  ],
+  "opMode": "dynamic",
+  "deterministic": "ignore"
+ },
+ "filePath": "ascend910b/argmax_over_a_dimension_custom/ArgmaxOverADimensionCustom_37636513d839930dde718932557c2072.json"
+}

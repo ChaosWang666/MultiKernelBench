@@ -1,0 +1,3 @@
+all: densenet201_custom0
+densenet201_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/Densenet201Custom/build_out/op_kernel/Densenet201Custom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/Densenet201Custom/build_out/op_kernel/Densenet201Custom_ascend910b/bin_param/Densenet201Custom-densenet201_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

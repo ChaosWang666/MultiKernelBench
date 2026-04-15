@@ -1,0 +1,34 @@
+{
+  "op_type": "GemmGroupNormMinBiasAddCustom",
+  "op_list": [
+    {
+      "bin_filename": "GemmGroupNormMinBiasAddCustom_e382995d8d649738111c5543faa71a1d",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "z",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ]
+    }
+  ]
+}

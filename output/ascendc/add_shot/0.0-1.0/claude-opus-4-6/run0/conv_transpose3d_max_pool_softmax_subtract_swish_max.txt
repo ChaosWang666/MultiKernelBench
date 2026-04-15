@@ -1,0 +1,406 @@
+
+
+Looking at this architecture, I need to analyze which operations can be fused into a custom kernel. The model performs:
+1. ConvTranspose3d - complex operation, best left to existing optimized implementation
+2. MaxPool3d - complex operation, best left to existing optimized implementation  
+3. Softmax (dim=1) → Subtract → Swish → Max (dim=1) - these can be fused
+
+I'll create a custom kernel that fuses softmax, subtract, swish, and max across channels.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose3dMaxPoolSoftmaxSubtractSwishMaxCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "subtract_val",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose3dMaxPoolSoftmaxSubtractSwishMaxCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(uint32_t, totalSpatial);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose3dMaxPoolSoftmaxSubtractSwishMaxCustom, ConvTranspose3dMaxPoolSoftmaxSubtractSwishMaxCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose3d_max_pool_softmax_subtract_swish_max_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 16;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose3dMaxPoolSoftmaxSubtractSwishMaxCustomTilingData tiling;
+    
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    // x shape: [batch, channels, D, H, W]
+    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
+    uint32_t channels = xShape->GetStorageShape().GetDim(1);
+    uint32_t D = xShape->GetStorageShape().GetDim(2);
+    uint32_t H = xShape->GetStorageShape().GetDim(3);
+    uint32_t W = xShape->GetStorageShape().GetDim(4);
+    uint32_t spatialSize = D * H * W;
+    uint32_t totalSpatial = batchSize * spatialSize;
+    
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_channels(channels);
+    tiling.set_spatialSize(spatialSize);
+    tiling.set_totalSpatial(totalSpatial);
+    tiling.set_tileNum(TILE_NUM);
+    
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    // Output shape: [batch, D, H, W] - channels dimension removed by max
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, x_shape->GetDim(2));
+    y_shape->SetDim(2, x_shape->GetDim(3));
+    y_shape->SetDim(3, x_shape->GetDim(4));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvTranspose3dMaxPoolSoftmaxSubtractSwishMaxCustom : public OpDef {
+public:
+    explicit ConvTranspose3dMaxPoolSoftmaxSubtractSwishMaxCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("subtract_val")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose3dMaxPoolSoftmaxSubtractSwishMaxCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelSoftmaxSubtractSwishMax {
+public:
+    __aicore__ inline KernelSoftmaxSubtractSwishMax() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR subtractVal, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t channels, 
+                                 uint32_t spatialSize, uint32_t totalSpatial, uint32_t tileNum)
+    {
+        this->channels = channels;
+        this->spatialSize = spatialSize;
+        this->totalSpatial = totalSpatial;
+        
+        // Each block processes a portion of the total spatial elements
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        
+        this->spatialPerBlock = totalSpatial / blockNum;
+        uint32_t remainder = totalSpatial % blockNum;
+        if (blockIdx < remainder) {
+            this->spatialPerBlock += 1;
+            this->startSpatial = blockIdx * this->spatialPerBlock;
+        } else {
+            this->startSpatial = blockIdx * this->spatialPerBlock + remainder;
+        }
+        
+        this->tileNum = tileNum;
+        if (this->tileNum > this->spatialPerBlock) {
+            this->tileNum = this->spatialPerBlock;
+        }
+        if (this->tileNum == 0) this->tileNum = 1;
+        this->tileLength = this->spatialPerBlock / this->tileNum;
+        this->tailLength = this->spatialPerBlock - this->tileLength * (this->tileNum - 1);
+        
+        // Align tile length to 8 (32 bytes / 4 bytes per float)
+        // We'll handle alignment in processing
+        
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * channels * spatialSize);
+        subtractGm.SetGlobalBuffer((__gm__ float *)subtractVal, channels);
+        yGm.SetGlobalBuffer((__gm__ float *)y, totalSpatial);
+        
+        // We need channels * tileLength per buffer for input
+        // and tileLength per buffer for output
+        uint32_t maxTile = (this->tailLength > this->tileLength) ? this->tailLength : this->tileLength;
+        // Align to 8
+        uint32_t alignedTile = (maxTile + 7) / 8 * 8;
+        uint32_t alignedChan = (channels + 7) / 8 * 8;
+        
+        this->alignedTileLen = alignedTile;
+        this->alignedChan = alignedChan;
+        
+        pipe.InitBuffer(inQueueX, 1, alignedChan * alignedTile * sizeof(float));
+        pipe.InitBuffer(outQueueY, 1, alignedTile * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, 1, alignedTile * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, 1, alignedTile * sizeof(float));
+        pipe.InitBuffer(subtractBuf, 1, alignedChan * sizeof(float));
+    }
+    
+    __aicore__ inline void Process()
+    {
+        // Load subtract values once
+        for (uint32_t i = 0; i < this->tileNum; i++) {
+            uint32_t curLen = (i < this->tileNum - 1) ? this->tileLength : this->tailLength;
+            if (curLen == 0) continue;
+            ProcessTile(i, curLen);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessTile(int32_t tileIdx, uint32_t curLen)
+    {
+        uint32_t alignedLen = (curLen + 7) / 8 * 8;
+        uint32_t spatialOffset = this->startSpatial + tileIdx * this->tileLength;
+        
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp1 = tmpBuf1.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp2 = tmpBuf2.AllocTensor<float>();
+        
+        // Load data for all channels at this spatial tile
+        // x layout: [batch, channels, spatialSize]
+        // spatialOffset maps to batch_idx * spatialSize + spatial_idx_within_batch
+        for (uint32_t c = 0; c < this->channels; c++) {
+            for (uint32_t s = 0; s < curLen; s++) {
+                uint32_t globalSpatial = spatialOffset + s;
+                uint32_t b = globalSpatial / this->spatialSize;
+                uint32_t si = globalSpatial % this->spatialSize;
+                uint32_t srcIdx = b * this->channels * this->spatialSize + c * this->spatialSize + si;
+                xLocal.SetValue(c * alignedLen + s, xGm.GetValue(srcIdx));
+            }
+        }
+        
+        // Softmax across channels for each spatial position
+        // Step 1: Find max across channels for numerical stability
+        AscendC::Duplicate<float>(yLocal, -3.4028235e+38f, alignedLen);
+        for (uint32_t c = 0; c < this->channels; c++) {
+            AscendC::Max(yLocal, yLocal, xLocal[c * alignedLen], alignedLen);
+        }
+        
+        // Step 2: Compute exp(x - max) and sum
+        AscendC::Duplicate<float>(tmp1, 0.0f, alignedLen); // sum of exp
+        for (uint32_t c = 0; c < this->channels; c++) {
+            AscendC::Sub(tmp2, xLocal[c * alignedLen], yLocal, alignedLen);
+            AscendC::Exp(tmp2, tmp2, alignedLen);
+            // Store back exp values
+            AscendC::DataCopy(xLocal[c * alignedLen], tmp2, alignedLen);
+            AscendC::Add(tmp1, tmp1, tmp2, alignedLen);
+        }
+        
+        // Step 3: Divide by sum -> softmax result stored back in xLocal
+        for (uint32_t c = 0; c < this->channels; c++) {
+            AscendC::Div(xLocal[c * alignedLen], xLocal[c * alignedLen], tmp1, alignedLen);
+        }
+        
+        // Subtract, Swish, then Max across channels
+        // Load subtract values
+        AscendC::LocalTensor<float> subLocal = subtractBuf.AllocTensor<float>();
+        AscendC::DataCopy(subLocal, subtractGm, this->alignedChan);
+        
+        // Initialize max output to -inf
+        AscendC::Duplicate<float>(yLocal, -3.4028235e+38f, alignedLen);
+        
+        for (uint32_t c = 0; c < this->channels; c++) {
+            float subVal = subLocal.GetValue(c);
+            // Subtract: x = softmax - subtract_val
+            AscendC::Adds(xLocal[c * alignedLen], xLocal[c * alignedLen], -subVal, alignedLen);
+            
+            // Swish: sigmoid(x) * x
+            // sigmoid(x) = 1 / (1 + exp(-x))
+            // Compute -x
+            AscendC::Muls(tmp2, xLocal[c * alignedLen], -1.0f, alignedLen);
+            AscendC::Exp(tmp2, tmp2, alignedLen);
+            AscendC::Adds(tmp2, tmp2, 1.0f, alignedLen);
+            AscendC::Div(tmp1, xLocal[c * alignedLen], tmp2, alignedLen); // x / (1 + exp(-x))
+            
+            // Max across channels
+            AscendC::Max(yLocal, yLocal, tmp1, alignedLen);
+        }
+        
+        subtractBuf.FreeTensor(subLocal);
+        
+        // Write output
+        for (uint32_t s = 0; s < curLen; s++) {
+            yGm.SetValue(spatialOffset + s, yLocal.GetValue(s));
+        }
+        
+        tmpBuf2.FreeTensor(tmp2);
+        tmpBuf1.FreeTensor(tmp1);
+        outQueueY.FreeTensor(yLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueY;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> tmpBuf1;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> tmpBuf2;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> subtractBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> subtractGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t channels;
+    uint32_t spatialSize;
+    uint32_t totalSpatial;
+    uint32_t spatialPerBlock;
+    uint32_t startSpatial;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t tailLength;
+    uint32_t alignedTileLen;
+    uint32_t alignedChan;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose3d_max_pool_softmax_subtract_swish_max_custom(
+    GM_ADDR x, GM_ADDR subtractVal, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelSoftmaxSubtractSwishMax op;
+    op.Init(x, subtractVal, y, 
+            tiling_data.batchSize, tiling_data.channels,
+            tiling_data.spatialSize, tiling_data.totalSpatial, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose3d_max_pool_softmax_subtract_swish_max_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& subtract_val) {
+    // x: [batch, channels, D, H, W]
+    // output: [batch, D, H, W]
+    auto batch = x.size(0);
+    auto D = x.size(2);
+    auto H = x.size(3);
+    auto W = x.size(4);
+    at::Tensor result = at::empty({batch, D, H, W}, x.options());
+    
+    EXEC_NPU_CMD(aclnnConvTranspose3dMaxPoolSoftmaxSubtractSwishMaxCustom, x, subtract_val, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose3d_max_pool_softmax_subtract_swish_max_custom", 
+           &conv_transpose3d_max_pool_softmax_subtract_swish_max_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose3d_max_pool_softmax_subtract_swish_max_custom", 
+          &conv_transpose3d_max_pool_softmax_subtract_swish_max_custom_impl_npu, 
+          "Fused softmax-subtract-swish-max");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model that uses custom AscendC kernel for fused softmax-subtract-swish-max.
+    ConvTranspose3d and MaxPool3d use standard PyTorch implementations.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, output_padding, pool_kernel_size, pool_stride, pool_padding):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = torch.nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, output_padding=output_padding)
+        self.max_pool = torch.nn.MaxPool3d(kernel_size=pool_kernel_size, stride=pool_stride, padding=pool_padding)
+        self.subtract = torch.nn.Parameter(torch.randn(out_channels))
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = self.max_pool(x)
+        # Fused: softmax(dim=1) -> subtract -> swish -> max(dim=1)
+        x = x.contiguous()
+        subtract_val = self.subtract.contiguous()
+        x = custom_ops_lib.conv_transpose3d_max_pool_softmax_subtract_swish_max_custom(x, subtract_val)
+        return x
+'''
+```

@@ -1,0 +1,445 @@
+
+
+Looking at this architecture, I need to implement a GRU (Gated Recurrent Unit) custom kernel for Ascend. The GRU is a multi-layer, unidirectional RNN with the standard GRU equations:
+
+- r_t = σ(W_ir x_t + b_ir + W_hr h_{t-1} + b_hr) (reset gate)
+- z_t = σ(W_iz x_t + b_iz + W_hz h_{t-1} + b_hz) (update gate)  
+- n_t = tanh(W_in x_t + b_in + r_t * (W_hn h_{t-1} + b_hn)) (new gate)
+- h_t = (1 - z_t) * n_t + z_t * h_{t-1}
+
+Given the complexity of a full multi-layer GRU with all weights/biases in a single AscendC kernel, I'll implement a single GRU cell computation as the custom kernel and orchestrate the layers/timesteps from Python. The kernel will handle the core element-wise operations (sigmoid, tanh, gating) after the matrix multiplications are done on the host side using existing GEMM operators.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "GruCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "gates_x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "gates_h",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "h_prev",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "h_new",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GruCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, hiddenSize);
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GruCustom, GruCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "gru_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 8;
+const uint32_t TILE_NUM = 8;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    GruCustomTilingData tiling;
+    const gert::Shape* gates_x_shape = context->GetInputShape(0);
+    // gates_x shape: (batch_size, 3 * hidden_size)
+    uint32_t batchSize = gates_x_shape->GetDim(0);
+    uint32_t threeHidden = gates_x_shape->GetDim(1);
+    uint32_t hiddenSize = threeHidden / 3;
+    uint32_t totalLength = batchSize * hiddenSize;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_hiddenSize(hiddenSize);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* h_prev_shape = context->GetInputShape(2);
+    gert::Shape* h_new_shape = context->GetOutputShape(0);
+    *h_new_shape = *h_prev_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class GruCustom : public OpDef {
+public:
+    explicit GruCustom(const char* name) : OpDef(name)
+    {
+        this->Input("gates_x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("gates_h")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("h_prev")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("h_new")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(GruCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+// GRU cell element-wise operations:
+// Input: gates_x = [rx, zx, nx] each (batch, hidden) stacked as (batch, 3*hidden)
+//        gates_h = [rh, zh, nh] each (batch, hidden) stacked as (batch, 3*hidden)
+//        h_prev  = (batch, hidden)
+// r = sigmoid(rx + rh)
+// z = sigmoid(zx + zh)
+// n = tanh(nx + r * nh)
+// h_new = (1 - z) * n + z * h_prev
+
+class KernelGruCell {
+public:
+    __aicore__ inline KernelGruCell() {}
+    __aicore__ inline void Init(GM_ADDR gates_x, GM_ADDR gates_h, GM_ADDR h_prev, GM_ADDR h_new,
+                                 uint32_t batchSize, uint32_t hiddenSize, uint32_t totalLength, uint32_t tileNum)
+    {
+        this->batchSize = batchSize;
+        this->hiddenSize = hiddenSize;
+        this->totalLength = totalLength;
+        
+        // We process totalLength elements (batch * hidden) across blocks
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        
+        // Ensure tileLength is aligned to 32 bytes (8 floats)
+        if (this->tileLength == 0) {
+            this->tileLength = this->blockLength;
+            this->tileNum = 1;
+        }
+
+        uint32_t blockOffset = this->blockLength * AscendC::GetBlockIdx();
+        
+        // For gates_x and gates_h, we need to handle the 3*hidden layout
+        // gates_x is (batch, 3*hidden), we need r,z,n components
+        // We'll treat it as flat: for element i in [0, batch*hidden),
+        //   batch_idx = i / hidden, hidden_idx = i % hidden
+        //   rx = gates_x[batch_idx * 3*hidden + hidden_idx]
+        //   zx = gates_x[batch_idx * 3*hidden + hidden + hidden_idx]
+        //   nx = gates_x[batch_idx * 3*hidden + 2*hidden + hidden_idx]
+        // This non-contiguous access is complex. Instead, we'll assume the caller
+        // has pre-sliced the gates into contiguous r, z, n components.
+        
+        // Actually, let's redesign: gates_x is (batch*3*hidden) flat,
+        // gates_h is (batch*3*hidden) flat, h_prev is (batch*hidden) flat
+        // The caller will pass pre-chunked tensors: rx, zx, nx concatenated,
+        // and rh, zh, nh concatenated, each of size (batch*hidden).
+        // So gates_x[0:batch*hidden] = rx, gates_x[batch*hidden:2*batch*hidden] = zx, etc.
+        
+        rxGm.SetGlobalBuffer((__gm__ float *)gates_x + blockOffset, this->blockLength);
+        zxGm.SetGlobalBuffer((__gm__ float *)gates_x + totalLength + blockOffset, this->blockLength);
+        nxGm.SetGlobalBuffer((__gm__ float *)gates_x + 2 * totalLength + blockOffset, this->blockLength);
+        
+        rhGm.SetGlobalBuffer((__gm__ float *)gates_h + blockOffset, this->blockLength);
+        zhGm.SetGlobalBuffer((__gm__ float *)gates_h + totalLength + blockOffset, this->blockLength);
+        nhGm.SetGlobalBuffer((__gm__ float *)gates_h + 2 * totalLength + blockOffset, this->blockLength);
+        
+        hPrevGm.SetGlobalBuffer((__gm__ float *)h_prev + blockOffset, this->blockLength);
+        hNewGm.SetGlobalBuffer((__gm__ float *)h_new + blockOffset, this->blockLength);
+        
+        pipe.InitBuffer(inQueueRx, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueZx, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueNx, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueRh, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueZh, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueNh, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueHprev, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueue, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
+    }
+    
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<float> rxLocal = inQueueRx.AllocTensor<float>();
+        AscendC::LocalTensor<float> zxLocal = inQueueZx.AllocTensor<float>();
+        AscendC::LocalTensor<float> nxLocal = inQueueNx.AllocTensor<float>();
+        AscendC::LocalTensor<float> rhLocal = inQueueRh.AllocTensor<float>();
+        AscendC::LocalTensor<float> zhLocal = inQueueZh.AllocTensor<float>();
+        AscendC::LocalTensor<float> nhLocal = inQueueNh.AllocTensor<float>();
+        AscendC::LocalTensor<float> hpLocal = inQueueHprev.AllocTensor<float>();
+        
+        uint32_t offset = progress * this->tileLength;
+        AscendC::DataCopy(rxLocal, rxGm[offset], this->tileLength);
+        AscendC::DataCopy(zxLocal, zxGm[offset], this->tileLength);
+        AscendC::DataCopy(nxLocal, nxGm[offset], this->tileLength);
+        AscendC::DataCopy(rhLocal, rhGm[offset], this->tileLength);
+        AscendC::DataCopy(zhLocal, zhGm[offset], this->tileLength);
+        AscendC::DataCopy(nhLocal, nhGm[offset], this->tileLength);
+        AscendC::DataCopy(hpLocal, hPrevGm[offset], this->tileLength);
+        
+        inQueueRx.EnQue(rxLocal);
+        inQueueZx.EnQue(zxLocal);
+        inQueueNx.EnQue(nxLocal);
+        inQueueRh.EnQue(rhLocal);
+        inQueueZh.EnQue(zhLocal);
+        inQueueNh.EnQue(nhLocal);
+        inQueueHprev.EnQue(hpLocal);
+    }
+    
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<float> rxLocal = inQueueRx.DeQue<float>();
+        AscendC::LocalTensor<float> zxLocal = inQueueZx.DeQue<float>();
+        AscendC::LocalTensor<float> nxLocal = inQueueNx.DeQue<float>();
+        AscendC::LocalTensor<float> rhLocal = inQueueRh.DeQue<float>();
+        AscendC::LocalTensor<float> zhLocal = inQueueZh.DeQue<float>();
+        AscendC::LocalTensor<float> nhLocal = inQueueNh.DeQue<float>();
+        AscendC::LocalTensor<float> hpLocal = inQueueHprev.DeQue<float>();
+        AscendC::LocalTensor<float> outLocal = outQueue.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp1 = tmpBuf1.Get<float>();
+        AscendC::LocalTensor<float> tmp2 = tmpBuf2.Get<float>();
+        
+        // r = sigmoid(rx + rh)
+        AscendC::Add(rxLocal, rxLocal, rhLocal, this->tileLength);
+        AscendC::Sigmoid(rxLocal, rxLocal, this->tileLength);
+        
+        // z = sigmoid(zx + zh)
+        AscendC::Add(zxLocal, zxLocal, zhLocal, this->tileLength);
+        AscendC::Sigmoid(zxLocal, zxLocal, this->tileLength);
+        
+        // n = tanh(nx + r * nh)
+        AscendC::Mul(nhLocal, rxLocal, nhLocal, this->tileLength);
+        AscendC::Add(nxLocal, nxLocal, nhLocal, this->tileLength);
+        AscendC::Tanh(nxLocal, nxLocal, this->tileLength);
+        
+        // h_new = (1 - z) * n + z * h_prev
+        // = n - z*n + z*h_prev
+        // = n + z*(h_prev - n)
+        AscendC::Sub(tmp1, hpLocal, nxLocal, this->tileLength);
+        AscendC::Mul(tmp2, zxLocal, tmp1, this->tileLength);
+        AscendC::Add(outLocal, nxLocal, tmp2, this->tileLength);
+        
+        outQueue.EnQue(outLocal);
+        inQueueRx.FreeTensor(rxLocal);
+        inQueueZx.FreeTensor(zxLocal);
+        inQueueNx.FreeTensor(nxLocal);
+        inQueueRh.FreeTensor(rhLocal);
+        inQueueZh.FreeTensor(zhLocal);
+        inQueueNh.FreeTensor(nhLocal);
+        inQueueHprev.FreeTensor(hpLocal);
+    }
+    
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<float> outLocal = outQueue.DeQue<float>();
+        AscendC::DataCopy(hNewGm[progress * this->tileLength], outLocal, this->tileLength);
+        outQueue.FreeTensor(outLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueRx, inQueueZx, inQueueNx;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueRh, inQueueZh, inQueueNh;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueHprev;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
+    AscendC::GlobalTensor<float> rxGm, zxGm, nxGm;
+    AscendC::GlobalTensor<float> rhGm, zhGm, nhGm;
+    AscendC::GlobalTensor<float> hPrevGm, hNewGm;
+    uint32_t batchSize;
+    uint32_t hiddenSize;
+    uint32_t totalLength;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void gru_custom(GM_ADDR gates_x, GM_ADDR gates_h, GM_ADDR h_prev, GM_ADDR h_new, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGruCell op;
+    op.Init(gates_x, gates_h, h_prev, h_new,
+            tiling_data.batchSize, tiling_data.hiddenSize,
+            tiling_data.totalLength, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gru_custom_impl_npu(const at::Tensor& gates_x, const at::Tensor& gates_h, const at::Tensor& h_prev) {
+    at::Tensor result = at::empty_like(h_prev);
+    EXEC_NPU_CMD(aclnnGruCustom, gates_x, gates_h, h_prev, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gru_custom", &gru_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gru_custom", &gru_custom_impl_npu, "GRU cell custom kernel");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers=3, bias=True, batch_first=False):
+        super(ModelNew, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bias = bias
+        self.batch_first = batch_first
+
+        # Extract weights from a standard GRU to maintain compatibility
+        self.gru_ref = torch.nn.GRU(input_size, hidden_size, num_layers, bias, batch_first, dropout=0, bidirectional=False)
+
+    def forward(self, x, h0):
+        if self.batch_first:
+            x = x.transpose(0, 1)  # convert to (seq_len, batch, input_size)
+
+        seq_len = x.size(0)
+        batch_size = x.size(1)
+
+        # Initialize hidden states for each layer
+        h = [h0[i] for i in range(self.num_layers)]
+
+        # Collect per-layer weights
+        weights_ih = []
+        weights_hh = []
+        biases_ih = []
+        biases_hh = []
+        for layer in range(self.num_layers):
+            weights_ih.append(getattr(self.gru_ref, f'weight_ih_l{layer}'))
+            weights_hh.append(getattr(self.gru_ref, f'weight_hh_l{layer}'))
+            if self.bias:
+                biases_ih.append(getattr(self.gru_ref, f'bias_ih_l{layer}'))
+                biases_hh.append(getattr(self.gru_ref, f'bias_hh_l{layer}'))
+
+        outputs = []
+        for t in range(seq_len):
+            inp = x[t]  # (batch, input_size) for layer 0
+            for layer in range(self.num_layers):
+                h_prev = h[layer]  # (batch, hidden_size)
+                # gates_x = inp @ W_ih^T + b_ih  -> (batch, 3*hidden)
+                gates_x = torch.mm(inp, weights_ih[layer].t())
+                if self.bias:
+                    gates_x = gates_x + biases_ih[layer]
+                # gates_h = h_prev @ W_hh^T + b_hh -> (batch, 3*hidden)
+                gates_h = torch.mm(h_prev, weights_hh[layer].t())
+                if self.bias:
+                    gates_h = gates_h + biases_hh[layer]
+
+                # Reshape gates to (3, batch*hidden) for the kernel
+                # gates_x: (batch, 3*hidden) -> chunk into r,z,n each (batch, hidden)
+                # Then concatenate as (3*batch*hidden,) contiguous
+                gx_r = gates_x[:, :self.hidden_size].contiguous()
+                gx_z = gates_x[:, self.hidden_size:2*self.hidden_size].contiguous()
+                gx_n = gates_x[:, 2*self.hidden_size:].contiguous()
+                gates_x_flat = torch.cat([gx_r.reshape(-1), gx_z.reshape(-1), gx_n.reshape(-1)], dim=0)
+
+                gh_r = gates_h[:, :self.hidden_size].contiguous()
+                gh_z = gates_h[:, self.hidden_size:2*self.hidden_size].contiguous()
+                gh_n = gates_h[:, 2*self.hidden_size:].contiguous()
+                gates_h_flat = torch.cat([gh_r.reshape(-1), gh_z.reshape(-1), gh_n.reshape(-1)], dim=0)
+
+                h_prev_flat = h_prev.contiguous()
+
+                h_new = custom_ops_lib.gru_custom(gates_x_flat, gates_h_flat, h_prev_flat.reshape(-1).unsqueeze(0).reshape(batch_size, self.hidden_size))
+                h[layer] = h_new
+                inp = h_new  # input to next layer
+
+            outputs.append(h[self.num_layers - 1])
+
+        output = torch.stack(outputs, dim=0)  # (seq_len, batch, hidden)
+
+        if self.batch_first:
+            output = output.transpose(0, 1)
+
+        return output
+'''
+```

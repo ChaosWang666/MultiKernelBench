@@ -1,0 +1,3 @@
+all: matmul_with_irregular_shapes_custom0
+matmul_with_irregular_shapes_custom0:
+	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MatmulWithIrregularShapesCustom/build_out/op_kernel/MatmulWithIrregularShapesCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/MatmulWithIrregularShapesCustom/build_out/op_kernel/MatmulWithIrregularShapesCustom_ascend910b/bin_param/MatmulWithIrregularShapesCustom-matmul_with_irregular_shapes_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

@@ -1,0 +1,10 @@
+# Hashes of file build rules.
+1f17f3f0e6c80686b5c7dc3c7d16a876 CMakeFiles/gen_version_info
+4e1ac3f02da1168c014c005508466e0b CMakeFiles/modify_vendor
+9b27aa750f64bc3aa8b3beb7b5538d6d op_host/CMakeFiles/optiling_compat
+ee6b682a8d23c6f316249fc70cab272d op_kernel/CMakeFiles/ascendc_bin_ascend910b_gen_ops_config
+f121099672f50aebd098ac9edbbdbdfd op_kernel/CMakeFiles/npu_supported_ops
+f121099672f50aebd098ac9edbbdbdfd op_kernel/CMakeFiles/ops_info_gen_ascend910b
+8a3aa710b716c4cf571d879c06f2293b op_kernel/tbe/op_info_cfg/ai_core/ascend910b/aic-ascend910b-ops-info.json
+d009a58f77e1ee7dc1d898558d5777dc op_kernel/tbe/op_info_cfg/ai_core/npu_supported_ops.json
+d4e44626cd303bf055163ad1c3d2c1ee scripts/install.sh

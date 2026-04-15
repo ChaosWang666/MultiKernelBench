@@ -1,0 +1,58 @@
+
+[
+    {
+        "op": "GemmGroupNormHardtanhCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "in_features",
+                "param_type": "required",
+                "type": "int64"
+            },
+            {
+                "name": "out_features",
+                "param_type": "required",
+                "type": "int64"
+            },
+            {
+                "name": "num_groups",
+                "param_type": "required",
+                "type": "int64"
+            },
+            {
+                "name": "hardtanh_min",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "hardtanh_max",
+                "param_type": "required",
+                "type": "float"
+            }
+        ]
+    }
+]

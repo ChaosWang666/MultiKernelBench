@@ -1,0 +1,393 @@
+
+
+Looking at the architecture, I need to analyze the operations:
+1. Linear (matmul + bias): `x = self.linear(x)` → (batch_size, out_features)
+2. Sum over dim=1: `torch.sum(x, dim=1, keepdim=True)` → (batch_size, 1)
+3. Max over dim=1: `torch.max(x, dim=1, keepdim=True)[0]` → (batch_size, 1) - but input is already (batch_size, 1), so this is identity
+4. Mean over dim=1: `torch.mean(x, dim=1, keepdim=True)` → (batch_size, 1) - input is (batch_size, 1), so identity
+5. LogSumExp over dim=1: → (batch_size, 1) - input is (batch_size, 1), so just identity (logsumexp of single element = element)
+6. LogSumExp over dim=1: → same as above
+
+So after the sum, everything is essentially identity operations on a (batch_size, 1) tensor. The key fusion is: linear + sum across out_features dimension. The result for each batch element is: sum_j(sum_i(x_i * W_ji) + b_j) = sum over all elements of (x @ W^T) + sum(bias).
+
+Let me implement a custom kernel that fuses the linear transformation and summation, then the remaining operations (max, mean, logsumexp, logsumexp on single-element dim) are trivially the identity.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "MatmulSumMaxAvgPoolLogSumExpLogSumExpCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulSumMaxAvgPoolLogSumExpLogSumExpCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, outFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, biasSum_flag);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulSumMaxAvgPoolLogSumExpLogSumExpCustom, MatmulSumMaxAvgPoolLogSumExpLogSumExpCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulSumMaxAvgPoolLogSumExpLogSumExpCustomTilingData tiling;
+    
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    const gert::StorageShape* wShape = context->GetInputShape(1);
+    
+    uint32_t batchSize = xShape->GetOriginShape().GetDim(0);
+    uint32_t inFeatures = xShape->GetOriginShape().GetDim(1);
+    uint32_t outFeatures = wShape->GetOriginShape().GetDim(0);
+    
+    uint32_t blockDim = batchSize < 32 ? batchSize : 32;
+    context->SetBlockDim(blockDim);
+    
+    tiling.set_batchSize(batchSize);
+    tiling.set_inFeatures(inFeatures);
+    tiling.set_outFeatures(outFeatures);
+    tiling.set_biasSum_flag(1);
+    
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, 1);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MatmulSumMaxAvgPoolLogSumExpLogSumExpCustom : public OpDef {
+public:
+    explicit MatmulSumMaxAvgPoolLogSumExpLogSumExpCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MatmulSumMaxAvgPoolLogSumExpLogSumExpCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 1;
+
+class KernelMatmulSumMaxAvgPoolLogSumExpLogSumExp {
+public:
+    __aicore__ inline KernelMatmulSumMaxAvgPoolLogSumExpLogSumExp() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z,
+                                 uint32_t batchSize, uint32_t inFeatures, uint32_t outFeatures)
+    {
+        this->batchSize = batchSize;
+        this->inFeatures = inFeatures;
+        this->outFeatures = outFeatures;
+        
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        
+        // Each block handles a subset of the batch
+        this->batchPerBlock = (batchSize + blockNum - 1) / blockNum;
+        this->batchStart = blockIdx * this->batchPerBlock;
+        this->batchEnd = this->batchStart + this->batchPerBlock;
+        if (this->batchEnd > batchSize) {
+            this->batchEnd = batchSize;
+        }
+        
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inFeatures);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, outFeatures * inFeatures);
+        bGm.SetGlobalBuffer((__gm__ float *)bias, outFeatures);
+        zGm.SetGlobalBuffer((__gm__ float *)z, batchSize);
+        
+        // We'll process chunks of inFeatures at a time
+        // Tile size for inFeatures dimension
+        uint32_t ubSize = 128 * 1024; // approximate UB size budget
+        // We need space for: xTile(tileK), wTile(tileK), partial sum accumulator, bias chunk, temp
+        // Let's use tileK elements for x and w tiles
+        this->tileK = 1024; // number of inFeature elements per tile
+        if (this->tileK > inFeatures) this->tileK = inFeatures;
+        // Align to 8 floats (32 bytes)
+        this->tileK = (this->tileK / 8) * 8;
+        
+        this->tileJ = 64; // number of outFeature elements per tile for bias accumulation
+        if (this->tileJ > outFeatures) this->tileJ = outFeatures;
+        this->tileJ = (this->tileJ / 8) * 8;
+        
+        pipe.InitBuffer(inQueueX, 1, this->tileK * sizeof(float));
+        pipe.InitBuffer(inQueueW, 1, this->tileK * sizeof(float));
+        pipe.InitBuffer(outQueue, 1, this->tileJ * sizeof(float));
+        pipe.InitBuffer(tmpBuf, 1, this->tileJ * sizeof(float));
+    }
+    
+    __aicore__ inline void Process()
+    {
+        if (this->batchStart >= this->batchEnd) return;
+        
+        for (uint32_t b = this->batchStart; b < this->batchEnd; b++) {
+            ProcessOneBatch(b);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOneBatch(uint32_t b)
+    {
+        // For each batch element, compute:
+        // result = sum_j( sum_i(x[b,i] * weight[j,i]) + bias[j] )
+        // This equals: sum_j(dot(x[b,:], weight[j,:])) + sum(bias)
+        // = sum over all j of dot products + sum(bias)
+        
+        // Strategy: accumulate the total sum across all outFeatures
+        // For each output feature j: dot = sum_i x[b,i]*w[j,i], then total += dot + bias[j]
+        // Equivalently: total = sum_j dot_j + sum_j bias_j
+        
+        // We'll compute sum_j(dot(x[b], w[j])) by iterating over j, and for each j iterate over i in tiles
+        
+        float totalSum = 0.0f;
+        
+        // Process outFeatures one at a time (or in small groups)
+        // For each output neuron j, compute dot product with input
+        for (uint32_t j = 0; j < outFeatures; j++) {
+            float dotProduct = 0.0f;
+            uint32_t kTiles = (inFeatures + tileK - 1) / tileK;
+            
+            for (uint32_t kt = 0; kt < kTiles; kt++) {
+                uint32_t kOffset = kt * tileK;
+                uint32_t kLen = tileK;
+                if (kOffset + kLen > inFeatures) kLen = inFeatures - kOffset;
+                // Align kLen
+                uint32_t kLenAligned = (kLen + 7) / 8 * 8;
+                
+                AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+                AscendC::LocalTensor<float> wLocal = inQueueW.AllocTensor<float>();
+                
+                // Copy x[b, kOffset:kOffset+kLen]
+                AscendC::DataCopy(xLocal, xGm[b * inFeatures + kOffset], kLenAligned);
+                // Copy w[j, kOffset:kOffset+kLen]
+                AscendC::DataCopy(wLocal, wGm[j * inFeatures + kOffset], kLenAligned);
+                
+                // Multiply element-wise
+                AscendC::Mul(xLocal, xLocal, wLocal, kLenAligned);
+                
+                // Reduce sum
+                float partialSum = 0.0f;
+                // Use ReduceSum if available, otherwise manual
+                AscendC::LocalTensor<float> tmpLocal = outQueue.AllocTensor<float>();
+                uint32_t reduceLen = kLenAligned;
+                // ReduceSum needs work buffer
+                AscendC::LocalTensor<float> workLocal = tmpBuf.AllocTensor<float>();
+                AscendC::ReduceSum(tmpLocal, xLocal, workLocal, reduceLen);
+                partialSum = tmpLocal.GetValue(0);
+                
+                dotProduct += partialSum;
+                
+                tmpBuf.FreeTensor(workLocal);
+                outQueue.FreeTensor(tmpLocal);
+                inQueueX.FreeTensor(xLocal);
+                inQueueW.FreeTensor(wLocal);
+            }
+            
+            totalSum += dotProduct;
+        }
+        
+        // Add bias sum
+        // Compute sum of bias
+        float biasSum = 0.0f;
+        uint32_t biasTiles = (outFeatures + tileJ - 1) / tileJ;
+        for (uint32_t bt = 0; bt < biasTiles; bt++) {
+            uint32_t bOffset = bt * tileJ;
+            uint32_t bLen = tileJ;
+            if (bOffset + bLen > outFeatures) bLen = outFeatures - bOffset;
+            uint32_t bLenAligned = (bLen + 7) / 8 * 8;
+            
+            AscendC::LocalTensor<float> biasLocal = outQueue.AllocTensor<float>();
+            AscendC::DataCopy(biasLocal, bGm[bOffset], bLenAligned);
+            
+            AscendC::LocalTensor<float> tmpLocal2 = inQueueX.AllocTensor<float>();
+            AscendC::LocalTensor<float> workLocal2 = tmpBuf.AllocTensor<float>();
+            AscendC::ReduceSum(tmpLocal2, biasLocal, workLocal2, bLenAligned);
+            biasSum += tmpLocal2.GetValue(0);
+            
+            tmpBuf.FreeTensor(workLocal2);
+            inQueueX.FreeTensor(tmpLocal2);
+            outQueue.FreeTensor(biasLocal);
+        }
+        
+        totalSum += biasSum;
+        
+        // After sum, the remaining ops (max, mean, logsumexp, logsumexp) on a (1,) tensor are identity
+        // Write result
+        // We need to write a single float; use a small tensor
+        AscendC::LocalTensor<float> resLocal = outQueue.AllocTensor<float>();
+        resLocal.SetValue(0, totalSum);
+        // pad remaining with 0
+        for (uint32_t i = 1; i < 8; i++) {
+            resLocal.SetValue(i, 0.0f);
+        }
+        AscendC::DataCopy(zGm[b], resLocal, 8);
+        outQueue.FreeTensor(resLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX, inQueueW;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueue;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<float> xGm, wGm, bGm, zGm;
+    uint32_t batchSize, inFeatures, outFeatures;
+    uint32_t batchPerBlock, batchStart, batchEnd;
+    uint32_t tileK, tileJ;
+};
+
+extern "C" __global__ __aicore__ void matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMatmulSumMaxAvgPoolLogSumExpLogSumExp op;
+    op.Init(x, weight, bias, z, tiling_data.batchSize, tiling_data.inFeatures, tiling_data.outFeatures);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias) {
+    int batch_size = x.size(0);
+    at::Tensor result = at::empty({batch_size, 1}, x.options());
+    EXEC_NPU_CMD(aclnnMatmulSumMaxAvgPoolLogSumExpLogSumExpCustom, x, weight, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom",
+           &matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom",
+          &matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom_impl_npu,
+          "Fused matmul+sum+max+avgpool+logsumexp+logsumexp");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_features, out_features) -> None:
+        super().__init__()
+        self.linear = torch.nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        return custom_ops_lib.matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom(
+            x, self.linear.weight, self.linear.bias)
+'''
+```

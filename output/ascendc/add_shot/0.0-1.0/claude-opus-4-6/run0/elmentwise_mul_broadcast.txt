@@ -1,0 +1,393 @@
+
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ElmentwiseMulBroadcastCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ElmentwiseMulBroadcastCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, dim0);
+  TILING_DATA_FIELD_DEF(uint32_t, dim1);
+  TILING_DATA_FIELD_DEF(uint32_t, dim2);
+  TILING_DATA_FIELD_DEF(uint32_t, aStride0);
+  TILING_DATA_FIELD_DEF(uint32_t, aStride1);
+  TILING_DATA_FIELD_DEF(uint32_t, bStride0);
+  TILING_DATA_FIELD_DEF(uint32_t, bStride1);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ElmentwiseMulBroadcastCustom, ElmentwiseMulBroadcastCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "elmentwise_mul_broadcast_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 8;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ElmentwiseMulBroadcastCustomTilingData tiling;
+
+    // Get input shapes
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* y_shape = context->GetInputShape(1);
+
+    // Assume 3D tensors: a is (dim0_a, dim1_a, dim2), b is (dim0_b, dim1_b, dim2)
+    // Output shape is (max(dim0_a,dim0_b), max(dim1_a,dim1_b), dim2)
+    uint32_t a_d0 = x_shape->GetDim(0);
+    uint32_t a_d1 = x_shape->GetDim(1);
+    uint32_t a_d2 = x_shape->GetDim(2);
+
+    uint32_t b_d0 = y_shape->GetDim(0);
+    uint32_t b_d1 = y_shape->GetDim(1);
+    uint32_t b_d2 = y_shape->GetDim(2);
+
+    uint32_t out_d0 = a_d0 > b_d0 ? a_d0 : b_d0;
+    uint32_t out_d1 = a_d1 > b_d1 ? a_d1 : b_d1;
+    uint32_t out_d2 = a_d2 > b_d2 ? a_d2 : b_d2;
+
+    uint32_t totalLength = out_d0 * out_d1 * out_d2;
+
+    // Compute strides for broadcasting
+    // If a dim is 1, stride for that dim is 0 (broadcast), else normal stride
+    uint32_t aStride0 = (a_d0 == 1) ? 0 : a_d1 * a_d2;
+    uint32_t aStride1 = (a_d1 == 1) ? 0 : a_d2;
+    uint32_t bStride0 = (b_d0 == 1) ? 0 : b_d1 * b_d2;
+    uint32_t bStride1 = (b_d1 == 1) ? 0 : b_d2;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.set_dim0(out_d0);
+    tiling.set_dim1(out_d1);
+    tiling.set_dim2(out_d2);
+    tiling.set_aStride0(aStride0);
+    tiling.set_aStride1(aStride1);
+    tiling.set_bStride0(bStride0);
+    tiling.set_bStride1(bStride1);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* y_shape = context->GetInputShape(1);
+    gert::Shape* z_shape = context->GetOutputShape(0);
+
+    // Broadcast shape inference for 3D
+    int64_t d0 = x_shape->GetDim(0) > y_shape->GetDim(0) ? x_shape->GetDim(0) : y_shape->GetDim(0);
+    int64_t d1 = x_shape->GetDim(1) > y_shape->GetDim(1) ? x_shape->GetDim(1) : y_shape->GetDim(1);
+    int64_t d2 = x_shape->GetDim(2) > y_shape->GetDim(2) ? x_shape->GetDim(2) : y_shape->GetDim(2);
+
+    z_shape->SetDimNum(3);
+    z_shape->SetDim(0, d0);
+    z_shape->SetDim(1, d1);
+    z_shape->SetDim(2, d2);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ElmentwiseMulBroadcastCustom : public OpDef {
+public:
+    explicit ElmentwiseMulBroadcastCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ElmentwiseMulBroadcastCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelMulBroadcast {
+public:
+    __aicore__ inline KernelMulBroadcast() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z,
+                                 uint32_t totalLength, uint32_t tileNum,
+                                 uint32_t dim0, uint32_t dim1, uint32_t dim2,
+                                 uint32_t aStride0, uint32_t aStride1,
+                                 uint32_t bStride0, uint32_t bStride1)
+    {
+        this->totalLength = totalLength;
+        this->dim0 = dim0;
+        this->dim1 = dim1;
+        this->dim2 = dim2;
+        this->aStride0 = aStride0;
+        this->aStride1 = aStride1;
+        this->bStride0 = bStride0;
+        this->bStride1 = bStride1;
+
+        // Total number of rows (dim0 * dim1), each row has dim2 elements
+        uint32_t totalRows = dim0 * dim1;
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        // Divide rows among blocks
+        uint32_t rowsPerBlock = (totalRows + blockNum - 1) / blockNum;
+        this->startRow = blockIdx * rowsPerBlock;
+        this->endRow = this->startRow + rowsPerBlock;
+        if (this->endRow > totalRows) {
+            this->endRow = totalRows;
+        }
+        this->rowLength = dim2;
+
+        uint32_t myRows = (this->endRow > this->startRow) ? (this->endRow - this->startRow) : 0;
+        this->blockLength = myRows * this->rowLength;
+
+        this->tileNum = tileNum;
+        if (this->blockLength > 0) {
+            // Each tile processes some number of elements
+            this->tileLength = this->blockLength / (tileNum * BUFFER_NUM);
+            if (this->tileLength == 0) {
+                this->tileLength = this->blockLength;
+                this->tileNum = 1;
+            }
+        } else {
+            this->tileLength = 0;
+            this->tileNum = 0;
+        }
+
+        // Align tileLength to 8 (32 bytes / 4 bytes per float = 8 floats)
+        // Make sure tileLength is multiple of 8 for DataCopy alignment
+        if (this->tileLength > 0) {
+            this->tileLength = (this->tileLength / 8) * 8;
+            if (this->tileLength == 0) {
+                this->tileLength = 8;
+            }
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, dim0 * dim1 * dim2);
+        yGm.SetGlobalBuffer((__gm__ float *)y, dim0 * dim1 * dim2);
+        zGm.SetGlobalBuffer((__gm__ float *)z, totalLength);
+
+        if (this->tileLength > 0) {
+            pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+            pipe.InitBuffer(inQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+            pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
+        }
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (this->blockLength == 0 || this->tileLength == 0) return;
+
+        // Process row by row within our block's assigned rows
+        uint32_t elemsDone = 0;
+        for (uint32_t row = this->startRow; row < this->endRow; row++) {
+            uint32_t i0 = row / this->dim1;
+            uint32_t i1 = row % this->dim1;
+            uint32_t aRowOffset = i0 * this->aStride0 + i1 * this->aStride1;
+            uint32_t bRowOffset = i0 * this->bStride0 + i1 * this->bStride1;
+            uint32_t zRowOffset = row * this->rowLength;
+
+            // Process this row in tiles
+            uint32_t rowRemaining = this->rowLength;
+            uint32_t rowOffset = 0;
+            while (rowRemaining > 0) {
+                uint32_t copyLen = rowRemaining;
+                if (copyLen > this->tileLength) copyLen = this->tileLength;
+                // Align to 8
+                uint32_t alignedLen = ((copyLen + 7) / 8) * 8;
+                if (alignedLen > this->tileLength) alignedLen = this->tileLength;
+
+                CopyInRow(aRowOffset + rowOffset, bRowOffset + rowOffset, alignedLen);
+                ComputeTile(alignedLen);
+                CopyOutRow(zRowOffset + rowOffset, alignedLen);
+
+                rowOffset += copyLen;
+                rowRemaining -= copyLen;
+            }
+        }
+    }
+
+private:
+    __aicore__ inline void CopyInRow(uint32_t aOffset, uint32_t bOffset, uint32_t len)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> yLocal = inQueueY.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[aOffset], len);
+        AscendC::DataCopy(yLocal, yGm[bOffset], len);
+        inQueueX.EnQue(xLocal);
+        inQueueY.EnQue(yLocal);
+    }
+
+    __aicore__ inline void ComputeTile(uint32_t len)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = inQueueY.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::Mul(zLocal, xLocal, yLocal, len);
+        outQueueZ.EnQue<float>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+        inQueueY.FreeTensor(yLocal);
+    }
+
+    __aicore__ inline void CopyOutRow(uint32_t zOffset, uint32_t len)
+    {
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[zOffset], zLocal, len);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t totalLength;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t dim0, dim1, dim2;
+    uint32_t aStride0, aStride1;
+    uint32_t bStride0, bStride1;
+    uint32_t startRow, endRow;
+    uint32_t rowLength;
+};
+
+extern "C" __global__ __aicore__ void elmentwise_mul_broadcast_custom(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMulBroadcast op;
+    op.Init(x, y, z,
+            tiling_data.totalLength, tiling_data.tileNum,
+            tiling_data.dim0, tiling_data.dim1, tiling_data.dim2,
+            tiling_data.aStride0, tiling_data.aStride1,
+            tiling_data.bStride0, tiling_data.bStride1);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor elmentwise_mul_broadcast_custom_impl_npu(const at::Tensor& self, const at::Tensor& other) {
+    // Compute broadcast output shape
+    auto out_shape = at::infer_size(self.sizes(), other.sizes());
+    at::Tensor result = at::empty(out_shape, self.options());
+
+    // Ensure contiguous
+    auto self_contig = self.contiguous();
+    auto other_contig = other.contiguous();
+
+    EXEC_NPU_CMD(aclnnElmentwiseMulBroadcastCustom, self_contig, other_contig, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("elmentwise_mul_broadcast_custom", &elmentwise_mul_broadcast_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("elmentwise_mul_broadcast_custom", &elmentwise_mul_broadcast_custom_impl_npu, "elementwise mul with broadcast");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, a, b):
+        # Expand to broadcast shape before calling kernel
+        out_shape = torch.broadcast_shapes(a.shape, b.shape)
+        a_expanded = a.expand(out_shape).contiguous()
+        b_expanded = b.expand(out_shape).contiguous()
+        return custom_ops_lib.elmentwise_mul_broadcast_custom(a_expanded, b_expanded)
+'''
+```

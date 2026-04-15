@@ -1,0 +1,61 @@
+
+[
+    {
+        "op": "SqueezeNetCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "squeeze_weight",
+                "param_type": "required",
+                "format": [
+                    "OIHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "expand1x1_weight",
+                "param_type": "required",
+                "format": [
+                    "OIHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "expand3x3_weight",
+                "param_type": "required",
+                "format": [
+                    "OIHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "NCHW"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]

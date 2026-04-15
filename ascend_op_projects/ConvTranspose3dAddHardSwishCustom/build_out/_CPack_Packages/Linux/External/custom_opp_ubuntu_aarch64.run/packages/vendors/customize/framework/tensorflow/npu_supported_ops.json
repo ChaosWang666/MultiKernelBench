@@ -1,0 +1,6 @@
+{
+  "ConvTranspose3dAddHardSwishCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

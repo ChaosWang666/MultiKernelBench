@@ -1,0 +1,385 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "GroupQueryAttentionCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "query",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "key",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "value",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "output",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GroupQueryAttentionCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, seqLen);
+  TILING_DATA_FIELD_DEF(uint32_t, numHeads);
+  TILING_DATA_FIELD_DEF(uint32_t, numKvHeads);
+  TILING_DATA_FIELD_DEF(uint32_t, headDim);
+  TILING_DATA_FIELD_DEF(uint32_t, groupSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GroupQueryAttentionCustom, GroupQueryAttentionCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "group_query_attention_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 4096;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+
+    GroupQueryAttentionCustomTilingData tiling;
+    uint32_t batchSize = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    uint32_t seqLen = context->GetInputShape(0)->GetOriginShape().GetDim(1);
+    uint32_t numHeads = context->GetInputShape(0)->GetOriginShape().GetDim(2);
+    uint32_t headDim = context->GetInputShape(0)->GetOriginShape().GetDim(3);
+    uint32_t numKvHeads = context->GetInputShape(1)->GetOriginShape().GetDim(2);
+    uint32_t groupSize = numHeads / numKvHeads;
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_seqLen(seqLen);
+    tiling.set_numHeads(numHeads);
+    tiling.set_numKvHeads(numKvHeads);
+    tiling.set_headDim(headDim);
+    tiling.set_groupSize(groupSize);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* q_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *q_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class GroupQueryAttentionCustom : public OpDef {
+public:
+    explicit GroupQueryAttentionCustom(const char* name) : OpDef(name)
+    {
+        this->Input("query")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("key")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("value")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("output")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(GroupQueryAttentionCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+
+class KernelGroupQueryAttention {
+public:
+    __aicore__ inline KernelGroupQueryAttention() {}
+    __aicore__ inline void Init(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR output,
+                                uint32_t batchSize, uint32_t seqLen, uint32_t numHeads, uint32_t numKvHeads, uint32_t headDim, uint32_t groupSize)
+    {
+        this->batchSize = batchSize;
+        this->seqLen = seqLen;
+        this->numHeads = numHeads;
+        this->numKvHeads = numKvHeads;
+        this->headDim = headDim;
+        this->groupSize = groupSize;
+        this->blockLength = seqLen * headDim;
+        this->totalLength = batchSize * seqLen * numHeads * headDim;
+
+        queryGm.SetGlobalBuffer((__gm__ float *)query, this->totalLength);
+        keyGm.SetGlobalBuffer((__gm__ float *)key, this->batchSize * seqLen * numKvHeads * headDim);
+        valueGm.SetGlobalBuffer((__gm__ float *)value, this->batchSize * seqLen * numKvHeads * headDim);
+        outputGm.SetGlobalBuffer((__gm__ float *)output, this->totalLength);
+        
+        pipe.InitBuffer(inQueueQuery, BUFFER_NUM, this->blockLength * sizeof(float));
+        pipe.InitBuffer(inQueueKey, BUFFER_NUM, this->blockLength * sizeof(float));
+        pipe.InitBuffer(inQueueValue, BUFFER_NUM, this->blockLength * sizeof(float));
+        pipe.InitBuffer(outQueueAttn, BUFFER_NUM, this->seqLen * this->seqLen * sizeof(float));
+        pipe.InitBuffer(outQueueOutput, BUFFER_NUM, this->blockLength * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        for (uint32_t batch = 0; batch < batchSize; ++batch) {
+            for (uint32_t head = 0; head < numHeads; head += groupSize) {
+                ProcessHead(batch, head);
+            }
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessHead(uint32_t batch, uint32_t headStart)
+    {
+        uint32_t headEnd = headStart + groupSize;
+        for (uint32_t head = headStart; head < headEnd; ++head) {
+            CopyIn(batch, head);
+            ComputeAttn(batch, head);
+            ComputeOutput(batch, head);
+            CopyOut(batch, head);
+        }
+    }
+
+    __aicore__ inline void CopyIn(uint32_t batch, uint32_t head)
+    {
+        uint32_t offsetQ = batch * seqLen * numHeads * headDim + head * seqLen * headDim;
+        uint32_t offsetK = batch * seqLen * numKvHeads * headDim + (head / groupSize) * seqLen * headDim;
+        uint32_t offsetV = batch * seqLen * numKvHeads * headDim + (head / groupSize) * seqLen * headDim;
+
+        AscendC::LocalTensor<float> queryLocal = inQueueQuery.AllocTensor<float>();
+        AscendC::LocalTensor<float> keyLocal = inQueueKey.AllocTensor<float>();
+        AscendC::LocalTensor<float> valueLocal = inQueueValue.AllocTensor<float>();
+
+        AscendC::DataCopy(queryLocal, queryGm[offsetQ], seqLen * headDim);
+        AscendC::DataCopy(keyLocal, keyGm[offsetK], seqLen * headDim);
+        AscendC::DataCopy(valueLocal, valueGm[offsetV], seqLen * headDim);
+
+        inQueueQuery.EnQue(queryLocal);
+        inQueueKey.EnQue(keyLocal);
+        inQueueValue.EnQue(valueLocal);
+    }
+
+    __aicore__ inline void ComputeAttn(uint32_t batch, uint32_t head)
+    {
+        AscendC::LocalTensor<float> queryLocal = inQueueQuery.DeQue<float>();
+        AscendC::LocalTensor<float> keyLocal = inQueueKey.DeQue<float>();
+        AscendC::LocalTensor<float> attnLocal = outQueueAttn.AllocTensor<float>();
+
+        // Simple matrix multiplication for attention scores
+        for (uint32_t i = 0; i < seqLen; ++i) {
+            for (uint32_t j = 0; j < seqLen; ++j) {
+                float sum = 0.0f;
+                for (uint32_t k = 0; k < headDim; ++k) {
+                    sum += queryLocal[i * headDim + k] * keyLocal[j * headDim + k];
+                }
+                attnLocal[i * seqLen + j] = sum / sqrtf(static_cast<float>(headDim));
+            }
+        }
+
+        outQueueAttn.EnQue<float>(attnLocal);
+        inQueueQuery.FreeTensor(queryLocal);
+        inQueueKey.FreeTensor(keyLocal);
+    }
+
+    __aicore__ inline void ComputeOutput(uint32_t batch, uint32_t head)
+    {
+        AscendC::LocalTensor<float> attnLocal = outQueueAttn.DeQue<float>();
+        AscendC::LocalTensor<float> valueLocal = inQueueValue.DeQue<float>();
+        AscendC::LocalTensor<float> outputLocal = outQueueOutput.AllocTensor<float>();
+
+        // Apply softmax and compute output
+        for (uint32_t i = 0; i < seqLen; ++i) {
+            float maxVal = -1e9f;
+            for (uint32_t j = 0; j < seqLen; ++j) {
+                maxVal = fmaxf(maxVal, attnLocal[i * seqLen + j]);
+            }
+            float sum = 0.0f;
+            for (uint32_t j = 0; j < seqLen; ++j) {
+                float expVal = expf(attnLocal[i * seqLen + j] - maxVal);
+                attnLocal[i * seqLen + j] = expVal;
+                sum += expVal;
+            }
+            for (uint32_t j = 0; j < seqLen; ++j) {
+                attnLocal[i * seqLen + j] /= sum;
+            }
+        }
+
+        for (uint32_t i = 0; i < seqLen; ++i) {
+            for (uint32_t k = 0; k < headDim; ++k) {
+                float sum = 0.0f;
+                for (uint32_t j = 0; j < seqLen; ++j) {
+                    sum += attnLocal[i * seqLen + j] * valueLocal[j * headDim + k];
+                }
+                outputLocal[i * headDim + k] = sum;
+            }
+        }
+
+        outQueueOutput.EnQue<float>(outputLocal);
+        outQueueAttn.FreeTensor(attnLocal);
+        inQueueValue.FreeTensor(valueLocal);
+    }
+
+    __aicore__ inline void CopyOut(uint32_t batch, uint32_t head)
+    {
+        uint32_t offsetOut = batch * seqLen * numHeads * headDim + head * seqLen * headDim;
+        AscendC::LocalTensor<float> outputLocal = outQueueOutput.DeQue<float>();
+        AscendC::DataCopy(outputGm[offsetOut], outputLocal, seqLen * headDim);
+        outQueueOutput.FreeTensor(outputLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueQuery, inQueueKey, inQueueValue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueAttn, outQueueOutput;
+    AscendC::GlobalTensor<float> queryGm, keyGm, valueGm, outputGm;
+    uint32_t batchSize;
+    uint32_t seqLen;
+    uint32_t numHeads;
+    uint32_t numKvHeads;
+    uint32_t headDim;
+    uint32_t groupSize;
+    uint32_t blockLength;
+    uint32_t totalLength;
+};
+
+extern "C" __global__ __aicore__ void group_query_attention_custom(
+    GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR output, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGroupQueryAttention op;
+    op.Init(query, key, value, output,
+            tiling_data.batchSize, tiling_data.seqLen, tiling_data.numHeads, tiling_data.numKvHeads, tiling_data.headDim, tiling_data.groupSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor group_query_attention_custom_impl_npu(const at::Tensor& query, const at::Tensor& key, const at::Tensor& value) {
+    at::Tensor result = at::empty_like(query);
+    EXEC_NPU_CMD(aclnnGroupQueryAttentionCustom, query, key, value, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("group_query_attention_custom", &group_query_attention_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("group_query_attention_custom", &group_query_attention_custom_impl_npu, "Group Query Attention");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, d_model=1024, num_heads=16, num_kv_heads=4):
+        super().__init__()
+        assert num_heads % num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.group_size = num_heads // num_kv_heads
+
+        self.q_proj = torch.nn.Linear(d_model, d_model)
+        self.k_proj = torch.nn.Linear(d_model, d_model * num_kv_heads // num_heads)
+        self.v_proj = torch.nn.Linear(d_model, d_model * num_kv_heads // num_heads)
+        self.out_proj = torch.nn.Linear(d_model, d_model)
+
+    def forward(self, x):
+        B, L, D = x.shape
+        H, H_kv = self.num_heads, self.num_kv_heads
+        head_dim = D // H
+
+        # projections
+        Q = self.q_proj(x).view(B, L, H, head_dim)
+        K = self.k_proj(x).view(B, L, H_kv, head_dim)
+        V = self.v_proj(x).view(B, L, H_kv, head_dim)
+
+        # Expand K/V to match query groups
+        if self.group_size > 1:
+            K = K.repeat_interleave(self.group_size, dim=2)
+            V = V.repeat_interleave(self.group_size, dim=2)
+
+        # attention
+        attn = custom_ops_lib.group_query_attention_custom(Q, K, V)
+        out = attn.reshape(B, L, D)
+        return self.out_proj(out)
+'''
+```

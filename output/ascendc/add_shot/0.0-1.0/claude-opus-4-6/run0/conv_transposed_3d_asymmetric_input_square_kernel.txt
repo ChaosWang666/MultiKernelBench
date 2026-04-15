@@ -1,0 +1,654 @@
+
+
+Looking at this architecture, it performs a 3D transposed convolution. Implementing a full transposed 3D convolution from scratch in AscendC is extremely complex. The practical approach is to leverage the existing AICPU/AICore capabilities through the ACL (Ascend Computing Language) operator interface while wrapping it as a custom operator.
+
+For a 3D transposed convolution, the approach is to use the existing `aclnnConvTranspose3d` or implement via im2col-like approaches. Given the complexity, I'll create a custom operator that wraps the transposed 3D convolution properly.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvTransposed3dAsymmetricInputSquareKernelCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "bias",
+                "param_type": "optional",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "attr_desc": [
+            {
+                "name": "stride_d",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "stride_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "stride_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "pad_d",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "pad_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "pad_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "outpad_d",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "outpad_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "outpad_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "dilation_d",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "dilation_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "dilation_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "groups",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "batch_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_depth",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_height",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_width",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_d",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_h",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_w",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_depth",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_height",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_width",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "has_bias",
+                "param_type": "required",
+                "type": "int"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTransposed3dAsymmetricInputSquareKernelCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, inDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, inHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, inWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelD);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelH);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelW);
+  TILING_DATA_FIELD_DEF(uint32_t, outDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, strideD);
+  TILING_DATA_FIELD_DEF(uint32_t, strideH);
+  TILING_DATA_FIELD_DEF(uint32_t, strideW);
+  TILING_DATA_FIELD_DEF(uint32_t, padD);
+  TILING_DATA_FIELD_DEF(uint32_t, padH);
+  TILING_DATA_FIELD_DEF(uint32_t, padW);
+  TILING_DATA_FIELD_DEF(uint32_t, dilationD);
+  TILING_DATA_FIELD_DEF(uint32_t, dilationH);
+  TILING_DATA_FIELD_DEF(uint32_t, dilationW);
+  TILING_DATA_FIELD_DEF(uint32_t, groups);
+  TILING_DATA_FIELD_DEF(uint32_t, hasBias);
+  TILING_DATA_FIELD_DEF(uint32_t, totalOutputElements);
+  TILING_DATA_FIELD_DEF(uint32_t, blockDim);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTransposed3dAsymmetricInputSquareKernelCustom, ConvTransposed3dAsymmetricInputSquareKernelCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transposed_3d_asymmetric_input_square_kernel_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTransposed3dAsymmetricInputSquareKernelCustomTilingData tiling;
+
+    auto attrs = context->GetAttrs();
+    uint32_t strideD = *(attrs->GetInt(0));
+    uint32_t strideH = *(attrs->GetInt(1));
+    uint32_t strideW = *(attrs->GetInt(2));
+    uint32_t padD = *(attrs->GetInt(3));
+    uint32_t padH = *(attrs->GetInt(4));
+    uint32_t padW = *(attrs->GetInt(5));
+    uint32_t outpadD = *(attrs->GetInt(6));
+    uint32_t outpadH = *(attrs->GetInt(7));
+    uint32_t outpadW = *(attrs->GetInt(8));
+    uint32_t dilationD = *(attrs->GetInt(9));
+    uint32_t dilationH = *(attrs->GetInt(10));
+    uint32_t dilationW = *(attrs->GetInt(11));
+    uint32_t groups = *(attrs->GetInt(12));
+    uint32_t batchSize = *(attrs->GetInt(13));
+    uint32_t inChannels = *(attrs->GetInt(14));
+    uint32_t outChannels = *(attrs->GetInt(15));
+    uint32_t inDepth = *(attrs->GetInt(16));
+    uint32_t inHeight = *(attrs->GetInt(17));
+    uint32_t inWidth = *(attrs->GetInt(18));
+    uint32_t kernelD = *(attrs->GetInt(19));
+    uint32_t kernelH = *(attrs->GetInt(20));
+    uint32_t kernelW = *(attrs->GetInt(21));
+    uint32_t outDepth = *(attrs->GetInt(22));
+    uint32_t outHeight = *(attrs->GetInt(23));
+    uint32_t outWidth = *(attrs->GetInt(24));
+    uint32_t hasBias = *(attrs->GetInt(25));
+
+    uint32_t totalOutputElements = batchSize * outChannels * outDepth * outHeight * outWidth;
+
+    uint32_t blockDim = 32;
+    if (totalOutputElements < blockDim) {
+        blockDim = totalOutputElements;
+    }
+    uint32_t tileLength = (totalOutputElements + blockDim - 1) / blockDim;
+
+    context->SetBlockDim(blockDim);
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_inDepth(inDepth);
+    tiling.set_inHeight(inHeight);
+    tiling.set_inWidth(inWidth);
+    tiling.set_kernelD(kernelD);
+    tiling.set_kernelH(kernelH);
+    tiling.set_kernelW(kernelW);
+    tiling.set_outDepth(outDepth);
+    tiling.set_outHeight(outHeight);
+    tiling.set_outWidth(outWidth);
+    tiling.set_strideD(strideD);
+    tiling.set_strideH(strideH);
+    tiling.set_strideW(strideW);
+    tiling.set_padD(padD);
+    tiling.set_padH(padH);
+    tiling.set_padW(padW);
+    tiling.set_dilationD(dilationD);
+    tiling.set_dilationH(dilationH);
+    tiling.set_dilationW(dilationW);
+    tiling.set_groups(groups);
+    tiling.set_hasBias(hasBias);
+    tiling.set_totalOutputElements(totalOutputElements);
+    tiling.set_blockDim(blockDim);
+    tiling.set_tileLength(tileLength);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+
+    auto attrs = context->GetAttrs();
+    uint32_t outDepth = *(attrs->GetInt(22));
+    uint32_t outHeight = *(attrs->GetInt(23));
+    uint32_t outWidth = *(attrs->GetInt(24));
+    uint32_t batchSize = *(attrs->GetInt(13));
+    uint32_t outChannels = *(attrs->GetInt(15));
+
+    *y_shape = gert::Shape({(int64_t)batchSize, (int64_t)outChannels, (int64_t)outDepth, (int64_t)outHeight, (int64_t)outWidth});
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext* context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvTransposed3dAsymmetricInputSquareKernelCustom : public OpDef {
+public:
+    explicit ConvTransposed3dAsymmetricInputSquareKernelCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Attr("stride_d").Int();
+        this->Attr("stride_h").Int();
+        this->Attr("stride_w").Int();
+        this->Attr("pad_d").Int();
+        this->Attr("pad_h").Int();
+        this->Attr("pad_w").Int();
+        this->Attr("outpad_d").Int();
+        this->Attr("outpad_h").Int();
+        this->Attr("outpad_w").Int();
+        this->Attr("dilation_d").Int();
+        this->Attr("dilation_h").Int();
+        this->Attr("dilation_w").Int();
+        this->Attr("groups").Int();
+        this->Attr("batch_size").Int();
+        this->Attr("in_channels").Int();
+        this->Attr("out_channels").Int();
+        this->Attr("in_depth").Int();
+        this->Attr("in_height").Int();
+        this->Attr("in_width").Int();
+        this->Attr("kernel_d").Int();
+        this->Attr("kernel_h").Int();
+        this->Attr("kernel_w").Int();
+        this->Attr("out_depth").Int();
+        this->Attr("out_height").Int();
+        this->Attr("out_width").Int();
+        this->Attr("has_bias").Int();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTransposed3dAsymmetricInputSquareKernelCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+/*
+ * Transposed 3D Convolution Kernel
+ * 
+ * For transposed convolution, conceptually we scatter each input value
+ * multiplied by the kernel weights into the output. This is equivalent 
+ * to the gradient of a forward convolution w.r.t. its input.
+ *
+ * Each AI core block handles a portion of the output elements.
+ * For each output element (n, oc, od, oh, ow), we compute the sum over
+ * input channels and kernel positions that contribute to it.
+ *
+ * Transposed conv relationship:
+ *   For output position (od, oh, ow), input position (id, ih, iw) contributes
+ *   through kernel position (kd, kh, kw) if:
+ *     od = id * stride_d - pad_d + kd * dilation_d
+ *     oh = ih * stride_h - pad_h + kh * dilation_h
+ *     ow = iw * stride_w - pad_w + kw * dilation_w
+ *
+ *   Rearranging: id = (od + pad_d - kd * dilation_d) / stride_d  (must be integer and in range)
+ *
+ *   Weight layout for ConvTranspose3d: (in_channels, out_channels/groups, kD, kH, kW)
+ */
+
+extern "C" __global__ __aicore__ void conv_transposed_3d_asymmetric_input_square_kernel_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(t, tiling);
+
+    uint32_t batchSize = t.batchSize;
+    uint32_t inChannels = t.inChannels;
+    uint32_t outChannels = t.outChannels;
+    uint32_t inDepth = t.inDepth;
+    uint32_t inHeight = t.inHeight;
+    uint32_t inWidth = t.inWidth;
+    uint32_t kernelD = t.kernelD;
+    uint32_t kernelH = t.kernelH;
+    uint32_t kernelW = t.kernelW;
+    uint32_t outDepth = t.outDepth;
+    uint32_t outHeight = t.outHeight;
+    uint32_t outWidth = t.outWidth;
+    uint32_t strideD = t.strideD;
+    uint32_t strideH = t.strideH;
+    uint32_t strideW = t.strideW;
+    uint32_t padD = t.padD;
+    uint32_t padH = t.padH;
+    uint32_t padW = t.padW;
+    uint32_t dilationD = t.dilationD;
+    uint32_t dilationH = t.dilationH;
+    uint32_t dilationW = t.dilationW;
+    uint32_t groups = t.groups;
+    uint32_t hasBias = t.hasBias;
+    uint32_t totalOutputElements = t.totalOutputElements;
+    uint32_t blockDim = t.blockDim;
+    uint32_t tileLength = t.tileLength;
+
+    uint32_t blockIdx = AscendC::GetBlockIdx();
+
+    uint32_t startIdx = blockIdx * tileLength;
+    uint32_t endIdx = startIdx + tileLength;
+    if (endIdx > totalOutputElements) {
+        endIdx = totalOutputElements;
+    }
+
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> wGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> yGm;
+
+    xGm.SetGlobalBuffer((__gm__ float*)x, batchSize * inChannels * inDepth * inHeight * inWidth);
+    wGm.SetGlobalBuffer((__gm__ float*)weight, inChannels * (outChannels / groups) * kernelD * kernelH * kernelW);
+    yGm.SetGlobalBuffer((__gm__ float*)y, totalOutputElements);
+    if (hasBias) {
+        bGm.SetGlobalBuffer((__gm__ float*)bias, outChannels);
+    }
+
+    uint32_t ocPerGroup = outChannels / groups;
+    uint32_t icPerGroup = inChannels / groups;
+
+    uint32_t outSpatial = outDepth * outHeight * outWidth;
+    uint32_t outChannelSpatial = outChannels * outSpatial;
+
+    for (uint32_t idx = startIdx; idx < endIdx; idx++) {
+        // Decompose linear index into (n, oc, od, oh, ow)
+        uint32_t rem = idx;
+        uint32_t n = rem / outChannelSpatial;
+        rem = rem - n * outChannelSpatial;
+        uint32_t oc = rem / outSpatial;
+        rem = rem - oc * outSpatial;
+        uint32_t od = rem / (outHeight * outWidth);
+        rem = rem - od * (outHeight * outWidth);
+        uint32_t oh = rem / outWidth;
+        uint32_t ow = rem - oh * outWidth;
+
+        float val = 0.0f;
+
+        // Determine which group this output channel belongs to
+        uint32_t g = oc / ocPerGroup;
+        uint32_t oc_in_group = oc - g * ocPerGroup;
+
+        // Iterate over kernel positions
+        for (uint32_t kd = 0; kd < kernelD; kd++) {
+            int32_t id_num = (int32_t)(od + padD) - (int32_t)(kd * dilationD);
+            if (id_num < 0) continue;
+            if (id_num % (int32_t)strideD != 0) continue;
+            uint32_t id = (uint32_t)(id_num / (int32_t)strideD);
+            if (id >= inDepth) continue;
+
+            for (uint32_t kh = 0; kh < kernelH; kh++) {
+                int32_t ih_num = (int32_t)(oh + padH) - (int32_t)(kh * dilationH);
+                if (ih_num < 0) continue;
+                if (ih_num % (int32_t)strideH != 0) continue;
+                uint32_t ih = (uint32_t)(ih_num / (int32_t)strideH);
+                if (ih >= inHeight) continue;
+
+                for (uint32_t kw = 0; kw < kernelW; kw++) {
+                    int32_t iw_num = (int32_t)(ow + padW) - (int32_t)(kw * dilationW);
+                    if (iw_num < 0) continue;
+                    if (iw_num % (int32_t)strideW != 0) continue;
+                    uint32_t iw = (uint32_t)(iw_num / (int32_t)strideW);
+                    if (iw >= inWidth) continue;
+
+                    // Sum over input channels in this group
+                    for (uint32_t ic_local = 0; ic_local < icPerGroup; ic_local++) {
+                        uint32_t ic = g * icPerGroup + ic_local;
+
+                        // x index: (n, ic, id, ih, iw)
+                        uint32_t xIdx = ((n * inChannels + ic) * inDepth + id) * inHeight * inWidth + ih * inWidth + iw;
+                        float xVal = xGm.GetValue(xIdx);
+
+                        // Weight layout for ConvTranspose3d: (in_channels, out_channels/groups, kD, kH, kW)
+                        uint32_t wIdx = ((ic * ocPerGroup + oc_in_group) * kernelD + kd) * kernelH * kernelW + kh * kernelW + kw;
+                        float wVal = wGm.GetValue(wIdx);
+
+                        val += xVal * wVal;
+                    }
+                }
+            }
+        }
+
+        if (hasBias) {
+            val += bGm.GetValue(oc);
+        }
+
+        yGm.SetValue(idx, val);
+    }
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transposed_3d_asymmetric_input_square_kernel_custom_impl_npu(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    const c10::optional<at::Tensor>& bias_opt,
+    int64_t stride_d, int64_t stride_h, int64_t stride_w,
+    int64_t pad_d, int64_t pad_h, int64_t pad_w,
+    int64_t outpad_d, int64_t outpad_h, int64_t outpad_w,
+    int64_t dilation_d, int64_t dilation_h, int64_t dilation_w,
+    int64_t groups)
+{
+    int64_t batch_size = input.size(0);
+    int64_t in_channels = input.size(1);
+    int64_t in_depth = input.size(2);
+    int64_t in_height = input.size(3);
+    int64_t in_width = input.size(4);
+
+    int64_t out_channels = weight.size(1) * groups;
+    int64_t kernel_d = weight.size(2);
+    int64_t kernel_h = weight.size(3);
+    int64_t kernel_w = weight.size(4);
+
+    int64_t out_depth = (in_depth - 1) * stride_d - 2 * pad_d + dilation_d * (kernel_d - 1) + outpad_d + 1;
+    int64_t out_height = (in_height - 1) * stride_h - 2 * pad_h + dilation_h * (kernel_h - 1) + outpad_h + 1;
+    int64_t out_width = (in_width - 1) * stride_w - 2 * pad_w + dilation_w * (kernel_w - 1) + outpad_w + 1;
+
+    auto result = at::zeros({batch_size, out_channels, out_depth, out_height, out_width}, input.options());
+
+    int64_t has_bias = 0;
+    at::Tensor bias_tensor;
+    if (bias_opt.has_value() && bias_opt.value().defined()) {
+        has_bias = 1;
+        bias_tensor = bias_opt.value();
+    } else {
+        bias_tensor = at::empty({0}, input.options());
+    }
+
+    EXEC_NPU_CMD(aclnnConvTransposed3dAsymmetricInputSquareKernelCustom,
+                 input, weight, bias_tensor, result,
+                 stride_d, stride_h, stride_w,
+                 pad_d, pad_h, pad_w,
+                 outpad_d, outpad_h, outpad_w,
+                 dilation_d, dilation_h, dilation_w,
+                 groups,
+                 batch_size, in_channels, out_channels,
+                 in_depth, in_height, in_width,
+                 kernel_d, kernel_h, kernel_w,
+                 out_depth, out_height, out_width,
+                 has_bias);
+
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transposed_3d_asymmetric_input_square_kernel_custom",
+           &conv_transposed_3d_asymmetric_input_square_kernel_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transposed_3d_asymmetric_input_square_kernel_custom",
+          &conv_transposed_3d_asymmetric_input_square_kernel_custom_impl_npu,
+          "Transposed 3D convolution custom op");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    """
+    Optimized model using custom AscendC kernel for transposed 3D convolution.
+    """
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0,
+                 output_padding: int = 0, dilation: int = 1, groups: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.output_padding = output_padding
+        self.dilation = dilation
+        self.groups = groups
+        self.has_bias = bias
+
+        # Use nn.ConvTranspose3d to get properly initialized weight and optional bias
+        conv_tmp = torch.nn.ConvTranspose3d(
+            in_channels, out_channels,
+            (kernel_size, kernel_size, kernel_size),
+            stride=stride, padding=padding,
+            output_padding=output_padding,
+            dilation=dilation, groups=groups, bias=bias
+        )
+        self.weight = torch.nn.Parameter(conv_tmp.weight.data.clone())
+        if bias:
+            self.bias = torch.nn.Parameter(conv_tmp.bias.data.clone())
+        else:
+            self.bias = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        bias_opt = self.bias if self.bias is not None else None
+        return custom_ops_lib.conv_transposed_3d_asymmetric_input_square_kernel_custom(
+            x, self.weight, bias_opt,
+            self.stride, self.stride, self.stride,
+            self.padding, self.padding, self.padding,
+            self.output_padding, self.output_padding, self.output_padding,
+            self.dilation, self.dilation, self.dilation,
+            self.groups
+        )
+'''
+```
