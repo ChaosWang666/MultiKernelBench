@@ -1,0 +1,436 @@
+```python
+project_json_src = '''
+[
+    {
+        "op": "Convtranspose3dReluGroupnormCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "gamma",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "beta",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src = """
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Convtranspose3dReluGroupnormCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, numChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(uint32_t, numGroups);
+  TILING_DATA_FIELD_DEF(uint32_t, channelsPerGroup);
+  TILING_DATA_FIELD_DEF(uint32_t, totalGroups);
+  TILING_DATA_FIELD_DEF(uint32_t, groupsPerCore);
+  TILING_DATA_FIELD_DEF(uint32_t, alignedSpatial);
+  TILING_DATA_FIELD_DEF(uint32_t, alignedChannels);
+  TILING_DATA_FIELD_DEF(float, eps);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Convtranspose3dReluGroupnormCustom, Convtranspose3dReluGroupnormCustomTilingData)
+}
+"""
+
+host_operator_src = """
+#include "convtranspose3d_relu_groupnorm_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 20;
+const uint32_t NUM_GROUPS = 8;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Convtranspose3dReluGroupnormCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t numChannels = xShape.GetDim(1);
+    uint32_t spatialSize = 1;
+    for (size_t i = 2; i < xShape.GetDimNum(); i++) {
+        spatialSize *= xShape.GetDim(i);
+    }
+    uint32_t numGroups = NUM_GROUPS;
+    uint32_t channelsPerGroup = numChannels / numGroups;
+    uint32_t totalGroups = batchSize * numGroups;
+    uint32_t groupsPerCore = (totalGroups + BLOCK_DIM - 1) / BLOCK_DIM;
+    uint32_t alignedSpatial = ((spatialSize + 7) / 8) * 8;
+    uint32_t alignedChannels = ((numChannels + 7) / 8) * 8;
+    float eps = 1e-5f;
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_numChannels(numChannels);
+    tiling.set_spatialSize(spatialSize);
+    tiling.set_numGroups(numGroups);
+    tiling.set_channelsPerGroup(channelsPerGroup);
+    tiling.set_totalGroups(totalGroups);
+    tiling.set_groupsPerCore(groupsPerCore);
+    tiling.set_alignedSpatial(alignedSpatial);
+    tiling.set_alignedChannels(alignedChannels);
+    tiling.set_eps(eps);
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Convtranspose3dReluGroupnormCustom : public OpDef {
+public:
+    explicit Convtranspose3dReluGroupnormCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("gamma")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("beta")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Convtranspose3dReluGroupnormCustom);
+}
+"""
+
+kernel_src = """
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConvtr3dReluGn {
+public:
+    __aicore__ inline KernelConvtr3dReluGn() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR gamma, GM_ADDR beta, GM_ADDR y,
+        uint32_t batchSize, uint32_t numChannels, uint32_t spatialSize,
+        uint32_t numGroups, uint32_t channelsPerGroup, uint32_t totalGroups,
+        uint32_t groupsPerCore, uint32_t alignedSpatial, uint32_t alignedChannels, float eps)
+    {
+        this->batchSize = batchSize;
+        this->numChannels = numChannels;
+        this->spatialSize = spatialSize;
+        this->numGroups = numGroups;
+        this->channelsPerGroup = channelsPerGroup;
+        this->totalGroups = totalGroups;
+        this->alignedSpatial = alignedSpatial;
+        this->alignedChannels = alignedChannels;
+        this->eps = eps;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t startG = blockIdx * groupsPerCore;
+        uint32_t endG = startG + groupsPerCore;
+        if (endG > totalGroups) endG = totalGroups;
+        this->startGroup = startG;
+        this->endGroup = endG;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x);
+        yGm.SetGlobalBuffer((__gm__ float*)y);
+        gammaGm.SetGlobalBuffer((__gm__ float*)gamma);
+        betaGm.SetGlobalBuffer((__gm__ float*)beta);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, alignedSpatial * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, alignedSpatial * sizeof(float));
+        pipe.InitBuffer(tmpBuf, alignedSpatial * sizeof(float));
+        pipe.InitBuffer(zeroBuf, alignedSpatial * sizeof(float));
+        pipe.InitBuffer(scalarBuf, 32);
+        pipe.InitBuffer(reduceBuf, 8 * 1024);
+        pipe.InitBuffer(gammaBuf, alignedChannels * sizeof(float));
+        pipe.InitBuffer(betaBuf, alignedChannels * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        // Load gamma and beta to UB once
+        AscendC::LocalTensor<float> gammaLocal = gammaBuf.Get<float>();
+        AscendC::LocalTensor<float> betaLocal = betaBuf.Get<float>();
+
+        AscendC::DataCopyExtParams gCopy;
+        gCopy.blockCount = 1;
+        gCopy.blockLen = static_cast<uint32_t>(numChannels * sizeof(float));
+        gCopy.srcStride = 0;
+        gCopy.dstStride = 0;
+        gCopy.rsv = 0;
+        AscendC::DataCopyPadExtParams<float> gPad;
+        gPad.isPad = false;
+        gPad.leftPadding = 0;
+        gPad.rightPadding = 0;
+        gPad.paddingValue = 0.0f;
+
+        AscendC::DataCopyPad(gammaLocal, gammaGm, gCopy, gPad);
+        AscendC::DataCopyPad(betaLocal, betaGm, gCopy, gPad);
+
+        // Prepare zero tensor for ReLU via Max
+        AscendC::LocalTensor<float> zeroLocal = zeroBuf.Get<float>();
+        AscendC::Duplicate<float>(zeroLocal, 0.0f, alignedSpatial);
+
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        if (startGroup >= endGroup) return;
+        for (uint32_t g = startGroup; g < endGroup; g++) {
+            ProcessGroup(g, gammaLocal, betaLocal, zeroLocal);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessGroup(uint32_t groupIdx,
+        AscendC::LocalTensor<float>& gammaLocal,
+        AscendC::LocalTensor<float>& betaLocal,
+        AscendC::LocalTensor<float>& zeroLocal)
+    {
+        uint32_t batchIdx = groupIdx / numGroups;
+        uint32_t grpInBatch = groupIdx % numGroups;
+        uint32_t channelStart = grpInBatch * channelsPerGroup;
+
+        uint64_t elementsInGroup = (uint64_t)channelsPerGroup * spatialSize;
+        float invN = 1.0f / (float)elementsInGroup;
+
+        float sumVal = 0.0f;
+        float sumSqVal = 0.0f;
+
+        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+        AscendC::LocalTensor<float> scalarLocal = scalarBuf.Get<float>();
+        AscendC::LocalTensor<float> reduceTmp = reduceBuf.Get<float>();
+
+        // ========== Pass 1: Compute sum and sum_sq with ReLU ==========
+        for (uint32_t c = 0; c < channelsPerGroup; c++) {
+            uint32_t chIdx = channelStart + c;
+            uint64_t gmOffset = (uint64_t)batchIdx * numChannels * spatialSize
+                              + (uint64_t)chIdx * spatialSize;
+
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+            AscendC::DataCopyExtParams copyParams;
+            copyParams.blockCount = 1;
+            copyParams.blockLen = static_cast<uint32_t>(spatialSize * sizeof(float));
+            copyParams.srcStride = 0;
+            copyParams.dstStride = 0;
+            copyParams.rsv = 0;
+            AscendC::DataCopyPadExtParams<float> padParams;
+            padParams.isPad = false;
+            padParams.leftPadding = 0;
+            padParams.rightPadding = 0;
+            padParams.paddingValue = 0.0f;
+            AscendC::DataCopyPad(xLocal, xGm[gmOffset], copyParams, padParams);
+            inQueueX.EnQue(xLocal);
+
+            AscendC::LocalTensor<float> xIn = inQueueX.DeQue<float>();
+
+            // ReLU: tmp = max(xIn, 0)
+            AscendC::Max<float>(tmp, xIn, zeroLocal, spatialSize);
+
+            // Sum of ReLU values
+            AscendC::ReduceSum<float, true>(scalarLocal, tmp, reduceTmp, spatialSize);
+            sumVal += scalarLocal.GetValue(0);
+
+            // Sum of squares of ReLU values
+            AscendC::Mul<float>(tmp, tmp, tmp, spatialSize);
+            AscendC::ReduceSum<float, true>(scalarLocal, tmp, reduceTmp, spatialSize);
+            sumSqVal += scalarLocal.GetValue(0);
+
+            inQueueX.FreeTensor(xIn);
+        }
+
+        float meanVal = sumVal * invN;
+        float varVal = sumSqVal * invN - meanVal * meanVal;
+        if (varVal < 0.0f) varVal = 0.0f;
+
+        // Compute inv_std using Sqrt on vector
+        AscendC::Duplicate<float>(scalarLocal, varVal + eps, 8);
+        AscendC::PipeBarrier<PIPE_ALL>();
+        AscendC::Sqrt<float>(scalarLocal, scalarLocal, 8);
+        AscendC::PipeBarrier<PIPE_ALL>();
+        float stdVal = scalarLocal.GetValue(0);
+        float invStd = 1.0f / stdVal;
+
+        // ========== Pass 2: ReLU + Normalize + Affine ==========
+        for (uint32_t c = 0; c < channelsPerGroup; c++) {
+            uint32_t chIdx = channelStart + c;
+            uint64_t gmOffset = (uint64_t)batchIdx * numChannels * spatialSize
+                              + (uint64_t)chIdx * spatialSize;
+
+            float gammaVal = gammaLocal.GetValue(chIdx);
+            float betaVal = betaLocal.GetValue(chIdx);
+            float scale = invStd * gammaVal;
+            float shift = betaVal - meanVal * scale;
+
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+            AscendC::DataCopyExtParams copyParams;
+            copyParams.blockCount = 1;
+            copyParams.blockLen = static_cast<uint32_t>(spatialSize * sizeof(float));
+            copyParams.srcStride = 0;
+            copyParams.dstStride = 0;
+            copyParams.rsv = 0;
+            AscendC::DataCopyPadExtParams<float> padParams;
+            padParams.isPad = false;
+            padParams.leftPadding = 0;
+            padParams.rightPadding = 0;
+            padParams.paddingValue = 0.0f;
+            AscendC::DataCopyPad(xLocal, xGm[gmOffset], copyParams, padParams);
+            inQueueX.EnQue(xLocal);
+
+            AscendC::LocalTensor<float> xIn = inQueueX.DeQue<float>();
+            AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+
+            // ReLU: yLocal = max(xIn, 0)
+            AscendC::Max<float>(yLocal, xIn, zeroLocal, spatialSize);
+            // Scale and shift
+            AscendC::Muls<float>(yLocal, yLocal, scale, spatialSize);
+            AscendC::Adds<float>(yLocal, yLocal, shift, spatialSize);
+
+            outQueueY.EnQue(yLocal);
+            inQueueX.FreeTensor(xIn);
+
+            AscendC::LocalTensor<float> yOut = outQueueY.DeQue<float>();
+            AscendC::DataCopyExtParams copyOutParams;
+            copyOutParams.blockCount = 1;
+            copyOutParams.blockLen = static_cast<uint32_t>(spatialSize * sizeof(float));
+            copyOutParams.srcStride = 0;
+            copyOutParams.dstStride = 0;
+            copyOutParams.rsv = 0;
+            AscendC::DataCopyPad(yGm[gmOffset], yOut, copyOutParams);
+            outQueueY.FreeTensor(yOut);
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> zeroBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> scalarBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> gammaBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> betaBuf;
+    AscendC::GlobalTensor<float> xGm, yGm, gammaGm, betaGm;
+
+    uint32_t batchSize, numChannels, spatialSize, numGroups, channelsPerGroup;
+    uint32_t totalGroups, startGroup, endGroup, alignedSpatial, alignedChannels;
+    float eps;
+};
+
+extern "C" __global__ __aicore__ void convtranspose3d_relu_groupnorm_custom(
+    GM_ADDR x, GM_ADDR gamma, GM_ADDR beta, GM_ADDR z,
+    GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConvtr3dReluGn op;
+    op.Init(x, gamma, beta, z,
+        tiling_data.batchSize, tiling_data.numChannels, tiling_data.spatialSize,
+        tiling_data.numGroups, tiling_data.channelsPerGroup, tiling_data.totalGroups,
+        tiling_data.groupsPerCore, tiling_data.alignedSpatial, tiling_data.alignedChannels,
+        tiling_data.eps);
+    op.Process();
+}
+"""
+
+python_bind_src = """
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor convtranspose3d_relu_groupnorm_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& gamma, const at::Tensor& beta) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnConvtranspose3dReluGroupnormCustom, x, gamma, beta, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("convtranspose3d_relu_groupnorm_custom", &convtranspose3d_relu_groupnorm_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("convtranspose3d_relu_groupnorm_custom",
+          &convtranspose3d_relu_groupnorm_custom_impl_npu,
+          "Fused ReLU + GroupNorm after ConvTranspose3d");
+}
+"""
+
+model_src = '''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, groups, bias=False):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size, bias=bias)
+        self.group_norm = nn.GroupNorm(num_groups=groups, num_channels=out_channels)
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = custom_ops_lib.convtranspose3d_relu_groupnorm_custom(
+            x.contiguous(),
+            self.group_norm.weight.contiguous(),
+            self.group_norm.bias.contiguous()
+        )
+        return x
+'''
+```
