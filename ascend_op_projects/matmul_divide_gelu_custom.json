@@ -23,6 +23,16 @@
                 "type": [
                     "float"
                 ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             }
         ],
         "output_desc": [
@@ -35,6 +45,13 @@
                 "type": [
                     "float"
                 ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "divisor",
+                "param_type": "required",
+                "type": "float"
             }
         ]
     }

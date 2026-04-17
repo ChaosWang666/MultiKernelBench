@@ -8,37 +8,7 @@
                 "name": "x",
                 "param_type": "required",
                 "format": [
-                    "NCDHW"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "OIJKL"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bias",
-                "param_type": "optional",
-                "format": [
-                    "N"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "multiplier",
-                "param_type": "required",
-                "format": [
-                    "NCDHW"
+                    "ND"
                 ],
                 "type": [
                     "float"

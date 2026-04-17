@@ -7,44 +7,76 @@
             {
                 "name": "x",
                 "param_type": "required",
-                "format": [
-                    "NCHW"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
             },
             {
-                "name": "weight",
+                "name": "w",
                 "param_type": "required",
-                "format": [
-                    "OIHW"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
             },
             {
-                "name": "bias",
+                "name": "cb",
                 "param_type": "required",
-                "format": [
-                    "NCHW"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "b",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
             }
         ],
         "output_desc": [
             {
-                "name": "z",
+                "name": "y",
                 "param_type": "required",
-                "format": [
-                    "NCHW"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "attr": [
+            {
+                "name": "scaling_factor",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "pool_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "batch",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "height",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "width",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "ksize",
+                "param_type": "required",
+                "type": "int"
             }
         ]
     }

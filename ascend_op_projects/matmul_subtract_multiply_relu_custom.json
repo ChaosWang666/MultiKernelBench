@@ -7,44 +7,40 @@
             {
                 "name": "x",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
             },
             {
                 "name": "weight",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
             },
             {
                 "name": "bias",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
             }
         ],
         "output_desc": [
             {
-                "name": "z",
+                "name": "y",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "attr": [
+            {
+                "name": "subtract_value",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "multiply_value",
+                "param_type": "required",
+                "type": "float"
             }
         ]
     }

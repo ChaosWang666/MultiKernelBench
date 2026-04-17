@@ -1,3 +1,0 @@
-all: gemm_group_norm_swish_multiply_swish_custom0
-gemm_group_norm_swish_multiply_swish_custom0:
-	cd /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmGroupNormSwishMultiplySwishCustom/build_out/op_kernel/GemmGroupNormSwishMultiplySwishCustom_ascend910b/kernel_0 && bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmGroupNormSwishMultiplySwishCustom/build_out/op_kernel/GemmGroupNormSwishMultiplySwishCustom_ascend910b/bin_param/GemmGroupNormSwishMultiplySwishCustom-gemm_group_norm_swish_multiply_swish_custom-0.sh --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)

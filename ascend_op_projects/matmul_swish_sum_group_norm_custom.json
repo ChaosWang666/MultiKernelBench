@@ -7,64 +7,34 @@
             {
                 "name": "x",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
             },
             {
                 "name": "bias",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
             },
             {
-                "name": "groupNormWeight",
+                "name": "gn_weight",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
             },
             {
-                "name": "groupNormBias",
+                "name": "gn_bias",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
             }
         ],
         "output_desc": [
             {
-                "name": "output",
+                "name": "y",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
             }
         ]
     }

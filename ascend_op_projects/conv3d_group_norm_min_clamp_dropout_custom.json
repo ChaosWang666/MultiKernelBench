@@ -8,7 +8,7 @@
                 "name": "x",
                 "param_type": "required",
                 "format": [
-                    "NCDHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
@@ -17,51 +17,14 @@
         ],
         "output_desc": [
             {
-                "name": "y",
+                "name": "z",
                 "param_type": "required",
                 "format": [
-                    "NCDHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
                 ]
-            }
-        ],
-        "attr": [
-            {
-                "name": "in_channels",
-                "type": "int",
-                "default": "0"
-            },
-            {
-                "name": "out_channels",
-                "type": "int",
-                "default": "0"
-            },
-            {
-                "name": "kernel_size",
-                "type": "int",
-                "default": "0"
-            },
-            {
-                "name": "groups",
-                "type": "int",
-                "default": "0"
-            },
-            {
-                "name": "min_value",
-                "type": "float",
-                "default": "0.0"
-            },
-            {
-                "name": "max_value",
-                "type": "float",
-                "default": "1.0"
-            },
-            {
-                "name": "dropout_p",
-                "type": "float",
-                "default": "0.0"
             }
         ]
     }

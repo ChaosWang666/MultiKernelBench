@@ -8,7 +8,27 @@
                 "name": "x",
                 "param_type": "required",
                 "format": [
-                    "NCHW"
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
                 ],
                 "type": [
                     "float"
@@ -20,7 +40,7 @@
                 "name": "y",
                 "param_type": "required",
                 "format": [
-                    "NCHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
@@ -29,29 +49,44 @@
         ],
         "attr": [
             {
-                "name": "in_channels",
-                "type": "int",
-                "param_type": "required"
-            },
-            {
-                "name": "out_channels",
-                "type": "int",
-                "param_type": "required"
-            },
-            {
-                "name": "kernel_size",
-                "type": "int",
-                "param_type": "required"
-            },
-            {
                 "name": "subtract_value",
-                "type": "float",
-                "param_type": "required"
+                "param_type": "required",
+                "type": "float"
             },
             {
                 "name": "pool_kernel_size",
-                "type": "int",
-                "param_type": "required"
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "kernel_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "in_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "out_channels",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "batch_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "height",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "width",
+                "param_type": "required",
+                "type": "int"
             }
         ]
     }

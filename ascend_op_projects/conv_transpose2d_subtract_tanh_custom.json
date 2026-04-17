@@ -8,17 +8,7 @@
                 "name": "x",
                 "param_type": "required",
                 "format": [
-                    "NCHW"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "OIHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
@@ -40,7 +30,7 @@
                 "name": "y",
                 "param_type": "required",
                 "format": [
-                    "NCHW"
+                    "ND"
                 ],
                 "type": [
                     "float"

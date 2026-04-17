@@ -15,17 +15,7 @@
                 ]
             },
             {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bias",
+                "name": "w",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -37,7 +27,7 @@
         ],
         "output_desc": [
             {
-                "name": "output",
+                "name": "y",
                 "param_type": "required",
                 "format": [
                     "ND"

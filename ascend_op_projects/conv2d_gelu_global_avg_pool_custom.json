@@ -8,7 +8,7 @@
                 "name": "x",
                 "param_type": "required",
                 "format": [
-                    "NCHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
@@ -18,7 +18,7 @@
                 "name": "weight",
                 "param_type": "required",
                 "format": [
-                    "OIHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
@@ -26,9 +26,9 @@
             },
             {
                 "name": "bias",
-                "param_type": "optional",
+                "param_type": "required",
                 "format": [
-                    "N"
+                    "ND"
                 ],
                 "type": [
                     "float"
@@ -40,7 +40,7 @@
                 "name": "y",
                 "param_type": "required",
                 "format": [
-                    "NC"
+                    "ND"
                 ],
                 "type": [
                     "float"

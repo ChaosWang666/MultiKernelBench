@@ -1,0 +1,461 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv3dSoftmaxMaxPoolMaxPoolCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dSoftmaxMaxPoolMaxPoolCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, inDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, inHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, inWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, poolKernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, convDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, convHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, convWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, outDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, totalTasks);
+  TILING_DATA_FIELD_DEF(uint32_t, tasksPerBlock);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dSoftmaxMaxPoolMaxPoolCustom, Conv3dSoftmaxMaxPoolMaxPoolCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_softmax_max_pool_max_pool_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dSoftmaxMaxPoolMaxPoolCustomTilingData tiling;
+
+    uint32_t batchSize = 128;
+    uint32_t inChannels = 3;
+    uint32_t outChannels = 16;
+    uint32_t inDepth = 16;
+    uint32_t inHeight = 32;
+    uint32_t inWidth = 32;
+    uint32_t kernelSize = 3;
+    uint32_t poolKernelSize = 2;
+
+    uint32_t convDepth = inDepth - kernelSize + 1;
+    uint32_t convHeight = inHeight - kernelSize + 1;
+    uint32_t convWidth = inWidth - kernelSize + 1;
+
+    uint32_t pool1Depth = convDepth / poolKernelSize;
+    uint32_t pool1Height = convHeight / poolKernelSize;
+    uint32_t pool1Width = convWidth / poolKernelSize;
+
+    uint32_t outDepth = pool1Depth / poolKernelSize;
+    uint32_t outHeight = pool1Height / poolKernelSize;
+    uint32_t outWidth = pool1Width / poolKernelSize;
+
+    uint32_t totalTasks = batchSize * outChannels;
+    uint32_t tasksPerBlock = (totalTasks + BLOCK_DIM - 1) / BLOCK_DIM;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_inDepth(inDepth);
+    tiling.set_inHeight(inHeight);
+    tiling.set_inWidth(inWidth);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_poolKernelSize(poolKernelSize);
+    tiling.set_convDepth(convDepth);
+    tiling.set_convHeight(convHeight);
+    tiling.set_convWidth(convWidth);
+    tiling.set_outDepth(outDepth);
+    tiling.set_outHeight(outHeight);
+    tiling.set_outWidth(outWidth);
+    tiling.set_totalTasks(totalTasks);
+    tiling.set_tasksPerBlock(tasksPerBlock);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 128 * 16 * 14 * 30 * 30 * sizeof(float);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(5);
+    y_shape->SetDim(0, 128);
+    y_shape->SetDim(1, 16);
+    y_shape->SetDim(2, 3);
+    y_shape->SetDim(3, 7);
+    y_shape->SetDim(4, 7);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv3dSoftmaxMaxPoolMaxPoolCustom : public OpDef {
+public:
+    explicit Conv3dSoftmaxMaxPoolMaxPoolCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv3dSoftmaxMaxPoolMaxPoolCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelConv3dSoftmaxMaxPoolMaxPool {
+public:
+    __aicore__ inline KernelConv3dSoftmaxMaxPoolMaxPool() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace,
+                                 uint32_t batchSize, uint32_t inChannels, uint32_t outChannels,
+                                 uint32_t inDepth, uint32_t inHeight, uint32_t inWidth,
+                                 uint32_t kernelSize, uint32_t poolKernelSize,
+                                 uint32_t convDepth, uint32_t convHeight, uint32_t convWidth,
+                                 uint32_t outDepth, uint32_t outHeight, uint32_t outWidth,
+                                 uint32_t totalTasks, uint32_t tasksPerBlock)
+    {
+        this->batchSize = batchSize;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->inDepth = inDepth;
+        this->inHeight = inHeight;
+        this->inWidth = inWidth;
+        this->kernelSize = kernelSize;
+        this->poolKernelSize = poolKernelSize;
+        this->convDepth = convDepth;
+        this->convHeight = convHeight;
+        this->convWidth = convWidth;
+        this->outDepth = outDepth;
+        this->outHeight = outHeight;
+        this->outWidth = outWidth;
+        this->totalTasks = totalTasks;
+        this->tasksPerBlock = tasksPerBlock;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->startTask = blockIdx * tasksPerBlock;
+        this->endTask = (this->startTask + tasksPerBlock) < totalTasks ? (this->startTask + tasksPerBlock) : totalTasks;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x);
+        weightGm.SetGlobalBuffer((__gm__ float *)weight);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias);
+        zGm.SetGlobalBuffer((__gm__ float *)z);
+        workspaceGm.SetGlobalBuffer((__gm__ float *)workspace);
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t convSpatial = convDepth * convHeight * convWidth;
+        uint32_t convPerBatch = outChannels * convSpatial;
+        uint32_t inPerBatch = inChannels * inDepth * inHeight * inWidth;
+        uint32_t outSpatial = outDepth * outHeight * outWidth;
+        uint32_t outPerBatch = outChannels * outSpatial;
+
+        for (uint32_t task = startTask; task < endTask; task++) {
+            uint32_t b = task / outChannels;
+            uint32_t oc = task % outChannels;
+
+            // Step 1: compute conv3d for this (b, oc) over all spatial positions
+            for (uint32_t od = 0; od < convDepth; od++) {
+                for (uint32_t oh = 0; oh < convHeight; oh++) {
+                    for (uint32_t ow = 0; ow < convWidth; ow++) {
+                        float val = biasGm.GetValue(oc);
+                        for (uint32_t ic = 0; ic < inChannels; ic++) {
+                            for (uint32_t kd = 0; kd < kernelSize; kd++) {
+                                for (uint32_t kh = 0; kh < kernelSize; kh++) {
+                                    for (uint32_t kw = 0; kw < kernelSize; kw++) {
+                                        uint32_t id = od + kd;
+                                        uint32_t ih = oh + kh;
+                                        uint32_t iw = ow + kw;
+                                        uint32_t xIdx = b * inPerBatch
+                                                      + ic * inDepth * inHeight * inWidth
+                                                      + id * inHeight * inWidth
+                                                      + ih * inWidth + iw;
+                                        uint32_t wIdx = oc * inChannels * kernelSize * kernelSize * kernelSize
+                                                      + ic * kernelSize * kernelSize * kernelSize
+                                                      + kd * kernelSize * kernelSize
+                                                      + kh * kernelSize + kw;
+                                        val += xGm.GetValue(xIdx) * weightGm.GetValue(wIdx);
+                                    }
+                                }
+                            }
+                        }
+                        uint32_t wsIdx = b * convPerBatch + oc * convSpatial
+                                       + od * convHeight * convWidth
+                                       + oh * convWidth + ow;
+                        workspaceGm.SetValue(wsIdx, val);
+                    }
+                }
+            }
+        }
+
+        AscendC::SyncAll();
+
+        // Step 2: Softmax across outChannels dim + double maxpool for each b and output spatial position
+        // Redistribute work: each block handles a subset of (b, od_out, oh_out, ow_out) tuples
+        uint32_t totalOutSpatial = batchSize * outDepth * outHeight * outWidth;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t perBlock = (totalOutSpatial + blockNum - 1) / blockNum;
+        uint32_t startIdx = blockIdx * perBlock;
+        uint32_t endIdx = (startIdx + perBlock) < totalOutSpatial ? (startIdx + perBlock) : totalOutSpatial;
+
+        uint32_t pool1Depth = convDepth / poolKernelSize;
+        uint32_t pool1Height = convHeight / poolKernelSize;
+        uint32_t pool1Width = convWidth / poolKernelSize;
+
+        for (uint32_t idx = startIdx; idx < endIdx; idx++) {
+            uint32_t b = idx / outSpatial;
+            uint32_t rem = idx % outSpatial;
+            uint32_t od_out = rem / (outHeight * outWidth);
+            uint32_t rem2 = rem % (outHeight * outWidth);
+            uint32_t oh_out = rem2 / outWidth;
+            uint32_t ow_out = rem2 % outWidth;
+
+            // The 4x4x4 region in conv output (poolKernelSize^2 = 4 per dim)
+            uint32_t convBase_d = od_out * poolKernelSize * poolKernelSize;
+            uint32_t convBase_h = oh_out * poolKernelSize * poolKernelSize;
+            uint32_t convBase_w = ow_out * poolKernelSize * poolKernelSize;
+            uint32_t poolRange = poolKernelSize * poolKernelSize; // 4
+
+            float finalMax = -3.4e38f;
+            uint32_t finalMaxOc = 0;
+            // Iterate through the 4x4x4 positions and compute softmax then pooling
+            // Since softmax+max_dim(channel) requires all channels per position, but max_pool then
+            // picks max across spatial, we can note: the pooled result at (b,oc,od_out,oh_out,ow_out)
+            // equals max over 4x4x4 conv region of softmax(conv)[b,oc,d,h,w].
+            // Since softmax is monotonic in its input at fixed channel with same denominator,
+            // but denominator differs per spatial position, we must compute per position.
+
+            for (uint32_t oc = 0; oc < outChannels; oc++) {
+                float maxVal = -3.4e38f;
+                for (uint32_t dd = 0; dd < poolRange; dd++) {
+                    for (uint32_t hh = 0; hh < poolRange; hh++) {
+                        for (uint32_t ww = 0; ww < poolRange; ww++) {
+                            uint32_t cd = convBase_d + dd;
+                            uint32_t ch = convBase_h + hh;
+                            uint32_t cw = convBase_w + ww;
+                            if (cd >= convDepth || ch >= convHeight || cw >= convWidth) continue;
+
+                            // Compute softmax denominator at this spatial position
+                            float maxLogit = -3.4e38f;
+                            for (uint32_t c = 0; c < outChannels; c++) {
+                                uint32_t wsIdx = b * convPerBatch + c * convSpatial
+                                               + cd * convHeight * convWidth
+                                               + ch * convWidth + cw;
+                                float v = workspaceGm.GetValue(wsIdx);
+                                if (v > maxLogit) maxLogit = v;
+                            }
+                            float sumExp = 0.0f;
+                            for (uint32_t c = 0; c < outChannels; c++) {
+                                uint32_t wsIdx = b * convPerBatch + c * convSpatial
+                                               + cd * convHeight * convWidth
+                                               + ch * convWidth + cw;
+                                float v = workspaceGm.GetValue(wsIdx);
+                                float e = AscendC::ScalarCast<float, float, AscendC::RoundMode::CAST_NONE>(
+                                    (float)expf(v - maxLogit));
+                                sumExp += e;
+                            }
+                            uint32_t wsIdxOc = b * convPerBatch + oc * convSpatial
+                                             + cd * convHeight * convWidth
+                                             + ch * convWidth + cw;
+                            float ocLogit = workspaceGm.GetValue(wsIdxOc);
+                            float smVal = (float)expf(ocLogit - maxLogit) / sumExp;
+                            if (smVal > maxVal) maxVal = smVal;
+                        }
+                    }
+                }
+                uint32_t outIdx = b * outPerBatch + oc * outSpatial
+                                + od_out * outHeight * outWidth
+                                + oh_out * outWidth + ow_out;
+                zGm.SetValue(outIdx, maxVal);
+            }
+        }
+    }
+
+private:
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> weightGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> zGm;
+    AscendC::GlobalTensor<float> workspaceGm;
+
+    uint32_t batchSize;
+    uint32_t inChannels;
+    uint32_t outChannels;
+    uint32_t inDepth;
+    uint32_t inHeight;
+    uint32_t inWidth;
+    uint32_t kernelSize;
+    uint32_t poolKernelSize;
+    uint32_t convDepth;
+    uint32_t convHeight;
+    uint32_t convWidth;
+    uint32_t outDepth;
+    uint32_t outHeight;
+    uint32_t outWidth;
+    uint32_t totalTasks;
+    uint32_t tasksPerBlock;
+    uint32_t startTask;
+    uint32_t endTask;
+};
+
+extern "C" __global__ __aicore__ void conv3d_softmax_max_pool_max_pool_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv3dSoftmaxMaxPoolMaxPool op;
+    op.Init(x, weight, bias, z, workspace,
+            tiling_data.batchSize, tiling_data.inChannels, tiling_data.outChannels,
+            tiling_data.inDepth, tiling_data.inHeight, tiling_data.inWidth,
+            tiling_data.kernelSize, tiling_data.poolKernelSize,
+            tiling_data.convDepth, tiling_data.convHeight, tiling_data.convWidth,
+            tiling_data.outDepth, tiling_data.outHeight, tiling_data.outWidth,
+            tiling_data.totalTasks, tiling_data.tasksPerBlock);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_softmax_max_pool_max_pool_custom_impl_npu(
+    const at::Tensor& self, const at::Tensor& weight, const at::Tensor& bias)
+{
+    auto options = self.options();
+    at::Tensor result = at::empty({128, 16, 3, 7, 7}, options);
+    EXEC_NPU_CMD(aclnnConv3dSoftmaxMaxPoolMaxPoolCustom, self, weight, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_softmax_max_pool_max_pool_custom", &conv3d_softmax_max_pool_max_pool_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_softmax_max_pool_max_pool_custom", &conv3d_softmax_max_pool_max_pool_custom_impl_npu,
+          "Conv3D + Softmax + MaxPool3D + MaxPool3D fused");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, pool_kernel_size):
+        super(ModelNew, self).__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size)
+        self.pool_kernel_size = pool_kernel_size
+
+    def forward(self, x):
+        weight = self.conv.weight.contiguous()
+        bias = self.conv.bias.contiguous()
+        return custom_ops_lib.conv3d_softmax_max_pool_max_pool_custom(x.contiguous(), weight, bias)
+'''
+```

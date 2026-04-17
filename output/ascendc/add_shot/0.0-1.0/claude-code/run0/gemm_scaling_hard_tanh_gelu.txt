@@ -1,0 +1,408 @@
+```python
+project_json_src = '''
+[
+    {
+        "op": "GemmScalingHardTanhGeluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "attr": [
+            {
+                "name": "scaling_factor",
+                "type": "float",
+                "param_type": "required"
+            },
+            {
+                "name": "hardtanh_min",
+                "type": "float",
+                "param_type": "required"
+            },
+            {
+                "name": "hardtanh_max",
+                "type": "float",
+                "param_type": "required"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src = """
+#include "register/tilingdata_base.h"
+#include "tiling/tiling_api.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GemmScalingHardTanhGeluCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, M);
+  TILING_DATA_FIELD_DEF(uint32_t, N);
+  TILING_DATA_FIELD_DEF(uint32_t, K);
+  TILING_DATA_FIELD_DEF(float, scalingFactor);
+  TILING_DATA_FIELD_DEF(float, hardtanhMin);
+  TILING_DATA_FIELD_DEF(float, hardtanhMax);
+  TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, cubeTilingData);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GemmScalingHardTanhGeluCustom, GemmScalingHardTanhGeluCustomTilingData)
+}
+"""
+
+host_operator_src = """
+#include "gemm_scaling_hard_tanh_gelu_custom_tiling.h"
+#include "register/op_def_registry.h"
+#include "tiling/platform/platform_ascendc.h"
+#include "tiling/tiling_api.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 20;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    GemmScalingHardTanhGeluCustomTilingData tiling;
+
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto wShape = context->GetInputShape(1)->GetOriginShape();
+    uint32_t M = xShape.GetDim(0);
+    uint32_t K = xShape.GetDim(1);
+    uint32_t N = wShape.GetDim(0);
+
+    tiling.set_M(M);
+    tiling.set_N(N);
+    tiling.set_K(K);
+
+    auto attrs = context->GetAttrs();
+    const float* scaling = attrs->GetAttrPointer<float>(0);
+    const float* htMin = attrs->GetAttrPointer<float>(1);
+    const float* htMax = attrs->GetAttrPointer<float>(2);
+    tiling.set_scalingFactor(*scaling);
+    tiling.set_hardtanhMin(*htMin);
+    tiling.set_hardtanhMax(*htMax);
+
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    matmul_tiling::MultiCoreMatmulTiling cubeTiling(ascendcPlatform);
+    cubeTiling.SetDim(BLOCK_DIM);
+    cubeTiling.SetAType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT, false);
+    cubeTiling.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT, true);
+    cubeTiling.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT);
+    cubeTiling.SetBiasType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT);
+    cubeTiling.SetOrgShape(M, N, K);
+    cubeTiling.SetShape(M, N, K);
+    cubeTiling.SetBias(true);
+    cubeTiling.SetBufferSpace(-1, -1, -1);
+    if (cubeTiling.GetTiling(tiling.cubeTilingData) == -1) {
+        return ge::GRAPH_FAILED;
+    }
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+
+    size_t userWorkspaceSize = (size_t)M * N * sizeof(float);
+    size_t sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = userWorkspaceSize + sysWorkspaceSize;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* xShape = context->GetInputShape(0);
+    const gert::Shape* wShape = context->GetInputShape(1);
+    gert::Shape* yShape = context->GetOutputShape(0);
+    yShape->SetDimNum(2);
+    yShape->SetDim(0, xShape->GetDim(0));
+    yShape->SetDim(1, wShape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class GemmScalingHardTanhGeluCustom : public OpDef {
+public:
+    explicit GemmScalingHardTanhGeluCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Attr("scaling_factor").AttrType(REQUIRED).Float();
+        this->Attr("hardtanh_min").AttrType(REQUIRED).Float();
+        this->Attr("hardtanh_max").AttrType(REQUIRED).Float();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(GemmScalingHardTanhGeluCustom);
+}
+"""
+
+kernel_src = """
+#include "kernel_operator.h"
+#include "lib/matmul_intf.h"
+
+using namespace AscendC;
+using namespace matmul;
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelGemmScalingHardTanhGelu {
+public:
+    __aicore__ inline KernelGemmScalingHardTanhGelu() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+                                 GM_ADDR workspace,
+                                 const GemmScalingHardTanhGeluCustomTilingData* tilingData,
+                                 TPipe* pipe)
+    {
+        this->M = tilingData->M;
+        this->N = tilingData->N;
+        this->K = tilingData->K;
+        this->scalingFactor = tilingData->scalingFactor;
+        this->hardtanhMin = tilingData->hardtanhMin;
+        this->hardtanhMax = tilingData->hardtanhMax;
+        this->pipe_ = pipe;
+        this->workspace_ = workspace;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x);
+        wGm.SetGlobalBuffer((__gm__ float*)weight);
+        bGm.SetGlobalBuffer((__gm__ float*)bias);
+        yGm.SetGlobalBuffer((__gm__ float*)y);
+        mmOutGm.SetGlobalBuffer((__gm__ float*)workspace, (uint64_t)this->M * this->N);
+
+        matmulObj.SetSubBlockIdx(0);
+        matmulObj.Init(&tilingData->cubeTilingData, pipe);
+        matmulObj.SetTensorA(xGm, false);
+        matmulObj.SetTensorB(wGm, true);
+        matmulObj.SetBias(bGm);
+    }
+
+    __aicore__ inline void Process()
+    {
+        matmulObj.IterateAll(mmOutGm);
+        matmulObj.End();
+
+        SyncAll();
+
+        PostProcess();
+    }
+
+private:
+    __aicore__ inline void PostProcess()
+    {
+        uint64_t total = (uint64_t)this->M * this->N;
+        uint32_t blockNum = GetBlockNum();
+        uint32_t blockIdx = GetBlockIdx();
+
+        uint64_t perCore = (total + blockNum - 1) / blockNum;
+        uint64_t startOffset = (uint64_t)blockIdx * perCore;
+        uint64_t endOffset = startOffset + perCore;
+        if (endOffset > total) endOffset = total;
+        if (startOffset >= total) return;
+
+        uint64_t coreLen = endOffset - startOffset;
+
+        constexpr uint32_t TILE = 8192;
+        TQue<TPosition::VECIN, BUFFER_NUM> inQ;
+        TQue<TPosition::VECOUT, BUFFER_NUM> outQ;
+        TBuf<TPosition::VECCALC> tmpBuf1, tmpBuf2, tmpBuf3;
+
+        pipe_->InitBuffer(inQ, BUFFER_NUM, TILE * sizeof(float));
+        pipe_->InitBuffer(outQ, BUFFER_NUM, TILE * sizeof(float));
+        pipe_->InitBuffer(tmpBuf1, TILE * sizeof(float));
+        pipe_->InitBuffer(tmpBuf2, TILE * sizeof(float));
+        pipe_->InitBuffer(tmpBuf3, TILE * sizeof(float));
+
+        const float kSqrt2OverPi = 0.7978845608028654f;
+        const float kGeluCoef = 0.044715f;
+
+        uint64_t processed = 0;
+        while (processed < coreLen) {
+            uint32_t curLen = (coreLen - processed) > TILE ? TILE : (uint32_t)(coreLen - processed);
+
+            LocalTensor<float> inLocal = inQ.AllocTensor<float>();
+            DataCopy(inLocal, mmOutGm[startOffset + processed], curLen);
+            inQ.EnQue(inLocal);
+
+            LocalTensor<float> xLocal = inQ.DeQue<float>();
+            LocalTensor<float> outLocal = outQ.AllocTensor<float>();
+            LocalTensor<float> t1 = tmpBuf1.Get<float>();
+            LocalTensor<float> t2 = tmpBuf2.Get<float>();
+            LocalTensor<float> t3 = tmpBuf3.Get<float>();
+
+            // scaling
+            Muls(xLocal, xLocal, this->scalingFactor, curLen);
+
+            // hardtanh: clamp to [min, max]
+            Mins(xLocal, xLocal, this->hardtanhMax, curLen);
+            Maxs(xLocal, xLocal, this->hardtanhMin, curLen);
+
+            // GELU (tanh approximation):
+            // 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+            Mul(t1, xLocal, xLocal, curLen);          // x^2
+            Mul(t1, t1, xLocal, curLen);              // x^3
+            Muls(t1, t1, kGeluCoef, curLen);          // 0.044715 * x^3
+            Add(t1, t1, xLocal, curLen);              // x + 0.044715 * x^3
+            Muls(t1, t1, kSqrt2OverPi, curLen);       // sqrt(2/pi) * (...)
+
+            // tanh(t1) = (exp(2*t1) - 1) / (exp(2*t1) + 1)
+            Muls(t2, t1, 2.0f, curLen);
+            Exp(t2, t2, curLen);
+            Adds(t3, t2, -1.0f, curLen);
+            Adds(t2, t2, 1.0f, curLen);
+            Div(t1, t3, t2, curLen);                  // tanh(...)
+
+            Adds(t1, t1, 1.0f, curLen);               // 1 + tanh(...)
+            Mul(t1, t1, xLocal, curLen);              // x * (1 + tanh(...))
+            Muls(outLocal, t1, 0.5f, curLen);         // 0.5 * x * (1 + tanh(...))
+
+            outQ.EnQue<float>(outLocal);
+            inQ.FreeTensor(xLocal);
+
+            LocalTensor<float> zLocal = outQ.DeQue<float>();
+            DataCopy(yGm[startOffset + processed], zLocal, curLen);
+            outQ.FreeTensor(zLocal);
+
+            processed += curLen;
+        }
+    }
+
+    Matmul<MatmulType<TPosition::GM, CubeFormat::ND, float>,
+           MatmulType<TPosition::GM, CubeFormat::ND, float>,
+           MatmulType<TPosition::GM, CubeFormat::ND, float>,
+           MatmulType<TPosition::GM, CubeFormat::ND, float>> matmulObj;
+
+    GlobalTensor<float> xGm;
+    GlobalTensor<float> wGm;
+    GlobalTensor<float> bGm;
+    GlobalTensor<float> yGm;
+    GlobalTensor<float> mmOutGm;
+
+    uint32_t M;
+    uint32_t N;
+    uint32_t K;
+    float scalingFactor;
+    float hardtanhMin;
+    float hardtanhMax;
+
+    TPipe* pipe_;
+    GM_ADDR workspace_;
+};
+
+extern "C" __global__ __aicore__ void gemm_scaling_hard_tanh_gelu_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tilingData, tiling);
+    TPipe pipe;
+    KernelGemmScalingHardTanhGelu op;
+    GM_ADDR userWS = GetUserWorkspace(workspace);
+    op.Init(x, weight, bias, y, userWS, &tilingData, &pipe);
+    op.Process();
+}
+"""
+
+python_bind_src = """
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gemm_scaling_hard_tanh_gelu_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias,
+    double scaling_factor, double hardtanh_min, double hardtanh_max)
+{
+    auto M = x.size(0);
+    auto N = weight.size(0);
+    at::Tensor result = at::empty({M, N}, x.options());
+    EXEC_NPU_CMD(aclnnGemmScalingHardTanhGeluCustom, x, weight, bias,
+                 (float)scaling_factor, (float)hardtanh_min, (float)hardtanh_max, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gemm_scaling_hard_tanh_gelu_custom", &gemm_scaling_hard_tanh_gelu_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_scaling_hard_tanh_gelu_custom", &gemm_scaling_hard_tanh_gelu_custom_impl_npu,
+          "Fused GEMM + scaling + hardtanh + GELU");
+}
+"""
+
+model_src = '''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_features, out_features, scaling_factor, hardtanh_min, hardtanh_max):
+        super(ModelNew, self).__init__()
+        self.gemm = nn.Linear(in_features, out_features)
+        self.scaling_factor = float(scaling_factor)
+        self.hardtanh_min = float(hardtanh_min)
+        self.hardtanh_max = float(hardtanh_max)
+
+    def forward(self, x):
+        return custom_ops_lib.gemm_scaling_hard_tanh_gelu_custom(
+            x, self.gemm.weight, self.gemm.bias,
+            self.scaling_factor, self.hardtanh_min, self.hardtanh_max
+        )
+'''
+```

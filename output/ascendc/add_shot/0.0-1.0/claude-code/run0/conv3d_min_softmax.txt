@@ -1,0 +1,280 @@
+Looking at this task, I need to create a custom AscendC kernel that fuses the min (along D dimension) and softmax (along C dimension) operations applied after conv3d. I'll keep conv3d as a PyTorch op and fuse the min+softmax in the custom kernel.
+
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv3dMinSoftmaxCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dMinSoftmaxCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, N);
+  TILING_DATA_FIELD_DEF(uint32_t, C);
+  TILING_DATA_FIELD_DEF(uint32_t, D);
+  TILING_DATA_FIELD_DEF(uint32_t, HW);
+  TILING_DATA_FIELD_DEF(uint32_t, nPerBlock);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dMinSoftmaxCustom, Conv3dMinSoftmaxCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_min_softmax_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 8;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dMinSoftmaxCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t D = xShape.GetDim(2);
+    uint32_t H = xShape.GetDim(3);
+    uint32_t W = xShape.GetDim(4);
+    uint32_t HW = H * W;
+    uint32_t nPerBlock = (N + BLOCK_DIM - 1) / BLOCK_DIM;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_N(N);
+    tiling.set_C(C);
+    tiling.set_D(D);
+    tiling.set_HW(HW);
+    tiling.set_nPerBlock(nPerBlock);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, x_shape->GetDim(1));
+    y_shape->SetDim(2, x_shape->GetDim(3));
+    y_shape->SetDim(3, x_shape->GetDim(4));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv3dMinSoftmaxCustom : public OpDef {
+public:
+    explicit Conv3dMinSoftmaxCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv3dMinSoftmaxCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelConv3dMinSoftmax {
+public:
+    __aicore__ inline KernelConv3dMinSoftmax() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t N, uint32_t C, uint32_t D, uint32_t HW, uint32_t nPerBlock)
+    {
+        this->N = N;
+        this->C = C;
+        this->D = D;
+        this->HW = HW;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t nStart = blockIdx * nPerBlock;
+        uint32_t nEnd = (nStart + nPerBlock < N) ? (nStart + nPerBlock) : N;
+        this->nStart = nStart;
+        this->nCount = (nEnd > nStart) ? (nEnd - nStart) : 0;
+
+        uint32_t inPerBatch = C * D * HW;
+        uint32_t outPerBatch = C * HW;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + nStart * inPerBatch, nCount * inPerBatch);
+        yGm.SetGlobalBuffer((__gm__ float *)y + nStart * outPerBatch, nCount * outPerBatch);
+
+        pipe.InitBuffer(inQueueX, 1, D * HW * sizeof(float));
+        pipe.InitBuffer(outQueueY, 1, C * HW * sizeof(float));
+        pipe.InitBuffer(maxBuf, HW * sizeof(float));
+        pipe.InitBuffer(sumBuf, HW * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t n = 0; n < nCount; n++) {
+            ProcessOneBatch(n);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOneBatch(uint32_t n)
+    {
+        AscendC::LocalTensor<float> minTensor = outQueueY.AllocTensor<float>();
+        AscendC::LocalTensor<float> maxTensor = maxBuf.Get<float>();
+        AscendC::LocalTensor<float> sumTensor = sumBuf.Get<float>();
+
+        const float POS_INF = 3.4e38f;
+        const float NEG_INF = -3.4e38f;
+
+        AscendC::Duplicate<float>(minTensor, POS_INF, C * HW);
+
+        for (uint32_t c = 0; c < C; c++) {
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+            uint32_t inOffset = n * C * D * HW + c * D * HW;
+            AscendC::DataCopy(xLocal, xGm[inOffset], D * HW);
+            inQueueX.EnQue(xLocal);
+
+            AscendC::LocalTensor<float> xDq = inQueueX.DeQue<float>();
+            for (uint32_t d = 0; d < D; d++) {
+                AscendC::Min(minTensor[c * HW], minTensor[c * HW], xDq[d * HW], HW);
+            }
+            inQueueX.FreeTensor(xDq);
+        }
+
+        AscendC::Duplicate<float>(maxTensor, NEG_INF, HW);
+        for (uint32_t c = 0; c < C; c++) {
+            AscendC::Max(maxTensor, maxTensor, minTensor[c * HW], HW);
+        }
+        for (uint32_t c = 0; c < C; c++) {
+            AscendC::Sub(minTensor[c * HW], minTensor[c * HW], maxTensor, HW);
+        }
+        AscendC::Exp(minTensor, minTensor, C * HW);
+        AscendC::Duplicate<float>(sumTensor, 0.0f, HW);
+        for (uint32_t c = 0; c < C; c++) {
+            AscendC::Add(sumTensor, sumTensor, minTensor[c * HW], HW);
+        }
+        for (uint32_t c = 0; c < C; c++) {
+            AscendC::Div(minTensor[c * HW], minTensor[c * HW], sumTensor, HW);
+        }
+
+        outQueueY.EnQue(minTensor);
+        AscendC::LocalTensor<float> outDq = outQueueY.DeQue<float>();
+        uint32_t outOffset = n * C * HW;
+        AscendC::DataCopy(yGm[outOffset], outDq, C * HW);
+        outQueueY.FreeTensor(outDq);
+    }
+
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> maxBuf, sumBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t N, C, D, HW;
+    uint32_t nStart, nCount;
+};
+
+extern "C" __global__ __aicore__ void conv3d_min_softmax_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv3dMinSoftmax op;
+    op.Init(x, y, tiling_data.N, tiling_data.C, tiling_data.D, tiling_data.HW, tiling_data.nPerBlock);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_min_softmax_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes();
+    std::vector<int64_t> out_sizes = {sizes[0], sizes[1], sizes[3], sizes[4]};
+    at::Tensor result = at::empty(out_sizes, self.options());
+    EXEC_NPU_CMD(aclnnConv3dMinSoftmaxCustom, self, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_min_softmax_custom", &conv3d_min_softmax_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_min_softmax_custom", &conv3d_min_softmax_custom_impl_npu, "fused conv3d min softmax");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, dim):
+        super().__init__()
+        self.conv = torch.nn.Conv3d(in_channels, out_channels, kernel_size)
+        self.dim = dim
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = custom_ops_lib.conv3d_min_softmax_custom(x)
+        return x
+'''
+```

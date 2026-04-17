@@ -8,26 +8,6 @@
                 "name": "x",
                 "param_type": "required",
                 "format": [
-                    "NCHW"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "OIHW"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bias",
-                "param_type": "required",
-                "format": [
                     "ND"
                 ],
                 "type": [
@@ -40,11 +20,18 @@
                 "name": "y",
                 "param_type": "required",
                 "format": [
-                    "NCHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
                 ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "scaling_factor",
+                "param_type": "required",
+                "type": "float"
             }
         ]
     }

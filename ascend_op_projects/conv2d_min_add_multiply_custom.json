@@ -8,17 +8,7 @@
                 "name": "x",
                 "param_type": "required",
                 "format": [
-                    "NCHW"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "NCHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
@@ -28,7 +18,7 @@
                 "name": "bias",
                 "param_type": "required",
                 "format": [
-                    "NC1HWC0"
+                    "ND"
                 ],
                 "type": [
                     "float"
@@ -40,11 +30,23 @@
                 "name": "y",
                 "param_type": "required",
                 "format": [
-                    "NCHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
                 ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "constant_value",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "scaling_factor",
+                "param_type": "required",
+                "type": "float"
             }
         ]
     }

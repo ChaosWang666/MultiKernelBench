@@ -1,0 +1,345 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "MatmulSubtractMultiplyReluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "attr": [
+            {
+                "name": "subtract_value",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "multiply_value",
+                "param_type": "required",
+                "type": "float"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+#include "tiling/tiling_api.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulSubtractMultiplyReluCustomTilingData)
+  TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmTiling);
+  TILING_DATA_FIELD_DEF(uint32_t, totalOutSize);
+  TILING_DATA_FIELD_DEF(float, subVal);
+  TILING_DATA_FIELD_DEF(float, mulVal);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulSubtractMultiplyReluCustom, MatmulSubtractMultiplyReluCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_subtract_multiply_relu_custom_tiling.h"
+#include "register/op_def_registry.h"
+#include "tiling/tiling_api.h"
+#include "tiling/platform/platform_ascendc.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulSubtractMultiplyReluCustomTilingData tiling;
+
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    const gert::StorageShape* wShape = context->GetInputShape(1);
+    uint32_t M = xShape->GetStorageShape().GetDim(0);
+    uint32_t K = xShape->GetStorageShape().GetDim(1);
+    uint32_t N = wShape->GetStorageShape().GetDim(0);
+
+    auto attrs = context->GetAttrs();
+    float subVal = *(attrs->GetAttrPointer<float>(0));
+    float mulVal = *(attrs->GetAttrPointer<float>(1));
+
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    uint32_t aicNum = ascendcPlatform.GetCoreNumAic();
+
+    matmul_tiling::MultiCoreMatmulTiling mm(ascendcPlatform);
+    mm.SetDim(aicNum);
+    mm.SetAType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                matmul_tiling::DataType::DT_FLOAT, false);
+    mm.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                matmul_tiling::DataType::DT_FLOAT, true);
+    mm.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                matmul_tiling::DataType::DT_FLOAT);
+    mm.SetBiasType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                   matmul_tiling::DataType::DT_FLOAT);
+    mm.SetShape(M, N, K);
+    mm.SetOrgShape(M, N, K);
+    mm.SetBias(true);
+    mm.SetBufferSpace(-1, -1, -1);
+    if (mm.GetTiling(tiling.mmTiling) == -1) {
+        return ge::GRAPH_FAILED;
+    }
+
+    tiling.set_totalOutSize(M * N);
+    tiling.set_subVal(subVal);
+    tiling.set_mulVal(mulVal);
+
+    context->SetBlockDim(aicNum);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
+                        context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t userWs = 16 * 1024 * 1024;
+    size_t sysWs = ascendcPlatform.GetLibApiWorkSpaceSize();
+    size_t* workspaces = context->GetWorkspaceSizes(1);
+    workspaces[0] = userWs + sysWs;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* xShape = context->GetInputShape(0);
+    const gert::Shape* wShape = context->GetInputShape(1);
+    gert::Shape* yShape = context->GetOutputShape(0);
+    yShape->SetDimNum(2);
+    yShape->SetDim(0, xShape->GetDim(0));
+    yShape->SetDim(1, wShape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MatmulSubtractMultiplyReluCustom : public OpDef {
+public:
+    explicit MatmulSubtractMultiplyReluCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Attr("subtract_value").AttrType(REQUIRED).Float();
+        this->Attr("multiply_value").AttrType(REQUIRED).Float();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MatmulSubtractMultiplyReluCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+#include "lib/matmul_intf.h"
+
+using AscendC::GlobalTensor;
+using AscendC::LocalTensor;
+using AscendC::TPipe;
+using AscendC::TQue;
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelMmFused {
+public:
+    __aicore__ inline KernelMmFused() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+                                GM_ADDR workspace, const TCubeTiling &mmTiling,
+                                uint32_t totalOutSize, float subVal, float mulVal) {
+        this->totalOutSize = totalOutSize;
+        this->subVal = subVal;
+        this->mulVal = mulVal;
+        this->mmTiling = mmTiling;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x);
+        wGm.SetGlobalBuffer((__gm__ float*)weight);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias);
+        yGm.SetGlobalBuffer((__gm__ float*)y);
+    }
+
+    using AType = matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float>;
+    using BType = matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float, true>;
+    using CType = matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float>;
+    using BiasType = matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float>;
+    matmul::Matmul<AType, BType, CType, BiasType> mmObj;
+
+    __aicore__ inline void ProcessMatmul(TPipe *pipe) {
+        REGIST_MATMUL_OBJ(pipe, GetSysWorkSpacePtr(), mmObj, &mmTiling);
+        mmObj.SetTensorA(xGm);
+        mmObj.SetTensorB(wGm);
+        mmObj.SetBias(biasGm);
+        mmObj.IterateAll(yGm);
+        mmObj.End();
+    }
+
+    __aicore__ inline void ProcessPost(TPipe *pipe) {
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t perBlock = totalOutSize / blockNum;
+        uint32_t offset = blockIdx * perBlock;
+
+        constexpr uint32_t TILE = 4096;
+        uint32_t numTiles = perBlock / TILE;
+        uint32_t tailLen = perBlock - numTiles * TILE;
+
+        TQue<AscendC::QuePosition::VECIN, BUFFER_NUM> inQ;
+        TQue<AscendC::QuePosition::VECOUT, BUFFER_NUM> outQ;
+        pipe->InitBuffer(inQ, BUFFER_NUM, TILE * sizeof(float));
+        pipe->InitBuffer(outQ, BUFFER_NUM, TILE * sizeof(float));
+
+        for (uint32_t i = 0; i < numTiles; i++) {
+            uint32_t tileOffset = offset + i * TILE;
+            LocalTensor<float> inL = inQ.AllocTensor<float>();
+            AscendC::DataCopy(inL, yGm[tileOffset], TILE);
+            inQ.EnQue(inL);
+
+            LocalTensor<float> inL2 = inQ.DeQue<float>();
+            LocalTensor<float> outL = outQ.AllocTensor<float>();
+            AscendC::Adds(outL, inL2, -subVal, TILE);
+            AscendC::Muls(outL, outL, mulVal, TILE);
+            AscendC::Relu(outL, outL, TILE);
+            outQ.EnQue(outL);
+            inQ.FreeTensor(inL2);
+
+            LocalTensor<float> outL2 = outQ.DeQue<float>();
+            AscendC::DataCopy(yGm[tileOffset], outL2, TILE);
+            outQ.FreeTensor(outL2);
+        }
+    }
+
+private:
+    TCubeTiling mmTiling;
+    uint32_t totalOutSize;
+    float subVal;
+    float mulVal;
+    GlobalTensor<float> xGm;
+    GlobalTensor<float> wGm;
+    GlobalTensor<float> biasGm;
+    GlobalTensor<float> yGm;
+};
+
+extern "C" __global__ __aicore__ void matmul_subtract_multiply_relu_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+    GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    TPipe pipe;
+    KernelMmFused op;
+    op.Init(x, weight, bias, y, workspace,
+            tiling_data.mmTiling, tiling_data.totalOutSize,
+            tiling_data.subVal, tiling_data.mulVal);
+
+    if ASCEND_IS_AIC {
+        op.ProcessMatmul(&pipe);
+    }
+    AscendC::SyncAll();
+    if ASCEND_IS_AIV {
+        op.ProcessPost(&pipe);
+    }
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_subtract_multiply_relu_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias,
+    double subtract_value, double multiply_value) {
+    int64_t M = x.size(0);
+    int64_t N = weight.size(0);
+    at::Tensor result = at::empty({M, N}, x.options());
+    float subVal = static_cast<float>(subtract_value);
+    float mulVal = static_cast<float>(multiply_value);
+    EXEC_NPU_CMD(aclnnMatmulSubtractMultiplyReluCustom,
+                 x, weight, bias, subVal, mulVal, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_subtract_multiply_relu_custom", &matmul_subtract_multiply_relu_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_subtract_multiply_relu_custom",
+          &matmul_subtract_multiply_relu_custom_impl_npu,
+          "relu((x @ weight.T + bias - sub) * mul)");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_features, out_features, subtract_value, multiply_value):
+        super().__init__()
+        self.linear = torch.nn.Linear(in_features, out_features)
+        self.subtract_value = float(subtract_value)
+        self.multiply_value = float(multiply_value)
+
+    def forward(self, x):
+        return custom_ops_lib.matmul_subtract_multiply_relu_custom(
+            x.contiguous(),
+            self.linear.weight.contiguous(),
+            self.linear.bias.contiguous(),
+            self.subtract_value,
+            self.multiply_value,
+        )
+'''
+```

@@ -15,47 +15,7 @@
                 ]
             },
             {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bias",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "group_norm_weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "group_norm_bias",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "multiply_weight",
+                "name": "mul_w",
                 "param_type": "required",
                 "format": [
                     "ND"
