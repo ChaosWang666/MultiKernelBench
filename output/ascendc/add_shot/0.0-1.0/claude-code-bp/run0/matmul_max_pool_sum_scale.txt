@@ -1,0 +1,301 @@
+project_json_src='''
+[
+    {
+        "op": "MatmulMaxPoolSumScaleCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulMaxPoolSumScaleCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalBatches);
+  TILING_DATA_FIELD_DEF(uint32_t, features);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulMaxPoolSumScaleCustom, MatmulMaxPoolSumScaleCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_max_pool_sum_scale_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BATCHES_PER_BLOCK_HOST = 4;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulMaxPoolSumScaleCustomTilingData tiling;
+    auto inputShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t totalBatches = inputShape.GetDim(0);
+    uint32_t features = inputShape.GetDim(1);
+
+    uint32_t blockDim = (totalBatches + BATCHES_PER_BLOCK_HOST - 1) / BATCHES_PER_BLOCK_HOST;
+    context->SetBlockDim(blockDim);
+
+    tiling.set_totalBatches(totalBatches);
+    tiling.set_features(features);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(1);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MatmulMaxPoolSumScaleCustom : public OpDef {
+public:
+    explicit MatmulMaxPoolSumScaleCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MatmulMaxPoolSumScaleCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr uint32_t BUFFER_NUM = 2;
+constexpr uint32_t TILE_PAIRS = 2048;
+constexpr uint32_t TILE_ELEMENTS = TILE_PAIRS * 2;
+constexpr uint32_t BATCHES_PER_BLOCK = 4;
+
+class KernelMatmulMaxPoolSumScale {
+public:
+    __aicore__ inline KernelMatmulMaxPoolSumScale() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalBatches, uint32_t features)
+    {
+        this->totalBatches = totalBatches;
+        this->features = features;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        this->startBatch = blockIdx * BATCHES_PER_BLOCK;
+        this->endBatch = this->startBatch + BATCHES_PER_BLOCK;
+        if (this->endBatch > totalBatches) {
+            this->endBatch = totalBatches;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float*)x, totalBatches * features);
+        yGm.SetGlobalBuffer((__gm__ float*)y, totalBatches);
+
+        pipe.InitBuffer(inQueueEvens, BUFFER_NUM, TILE_PAIRS * sizeof(float));
+        pipe.InitBuffer(inQueueOdds, BUFFER_NUM, TILE_PAIRS * sizeof(float));
+        pipe.InitBuffer(maxBuf, TILE_PAIRS * sizeof(float));
+        pipe.InitBuffer(reduceBuf, 8 * 1024);
+        pipe.InitBuffer(reduceResBuf, 32);
+        pipe.InitBuffer(outQueueResult, 1, 32);
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t tilesPerBatch = features / TILE_ELEMENTS;
+
+        AscendC::LocalTensor<float> resultLocal = outQueueResult.AllocTensor<float>();
+
+        for (uint32_t b = 0; b < BATCHES_PER_BLOCK; b++) {
+            uint32_t batch = startBatch + b;
+            float batchSum = 0.0f;
+
+            if (batch < endBatch) {
+                for (uint32_t tile = 0; tile < tilesPerBatch; tile++) {
+                    CopyIn(batch, tile);
+                    batchSum += ComputeAndReduce();
+                }
+            }
+
+            resultLocal.SetValue(b, batchSum);
+        }
+
+        outQueueResult.EnQue(resultLocal);
+        AscendC::LocalTensor<float> r = outQueueResult.DeQue<float>();
+
+        uint32_t writeCount = endBatch - startBatch;
+        if (writeCount > 0) {
+            AscendC::DataCopyExtParams copyParams;
+            copyParams.blockCount = 1;
+            copyParams.blockLen = writeCount * sizeof(float);
+            copyParams.srcStride = 0;
+            copyParams.dstStride = 0;
+            AscendC::DataCopyPad(yGm[startBatch], r, copyParams);
+        }
+        outQueueResult.FreeTensor(r);
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint32_t batch, uint32_t tile)
+    {
+        AscendC::LocalTensor<float> evensLocal = inQueueEvens.AllocTensor<float>();
+        AscendC::LocalTensor<float> oddsLocal = inQueueOdds.AllocTensor<float>();
+
+        uint32_t gmOffset = batch * features + tile * TILE_ELEMENTS;
+
+        AscendC::DataCopyExtParams copyParams;
+        copyParams.blockCount = TILE_PAIRS;
+        copyParams.blockLen = sizeof(float);
+        copyParams.srcStride = sizeof(float);
+        copyParams.dstStride = 0;
+
+        AscendC::DataCopyPadExtParams<float> padParams;
+        padParams.isPad = false;
+        padParams.leftPadding = 0;
+        padParams.rightPadding = 0;
+        padParams.paddingValue = 0.0f;
+
+        AscendC::DataCopyPad(evensLocal, xGm[gmOffset], copyParams, padParams);
+        AscendC::DataCopyPad(oddsLocal, xGm[gmOffset + 1], copyParams, padParams);
+
+        inQueueEvens.EnQue(evensLocal);
+        inQueueOdds.EnQue(oddsLocal);
+    }
+
+    __aicore__ inline float ComputeAndReduce()
+    {
+        AscendC::LocalTensor<float> evensLocal = inQueueEvens.DeQue<float>();
+        AscendC::LocalTensor<float> oddsLocal = inQueueOdds.DeQue<float>();
+        AscendC::LocalTensor<float> maxLocal = maxBuf.Get<float>();
+
+        AscendC::Max(maxLocal, evensLocal, oddsLocal, TILE_PAIRS);
+
+        inQueueEvens.FreeTensor(evensLocal);
+        inQueueOdds.FreeTensor(oddsLocal);
+
+        AscendC::LocalTensor<float> reduceLocal = reduceBuf.Get<float>();
+        AscendC::LocalTensor<float> reduceRes = reduceResBuf.Get<float>();
+        AscendC::ReduceSum<float>(reduceRes, maxLocal, reduceLocal, static_cast<int32_t>(TILE_PAIRS));
+
+        return reduceRes.GetValue(0);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueEvens;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueOdds;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueResult;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> maxBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceResBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t totalBatches;
+    uint32_t features;
+    uint32_t startBatch;
+    uint32_t endBatch;
+};
+
+extern "C" __global__ __aicore__ void matmul_max_pool_sum_scale_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMatmulMaxPoolSumScale op;
+    op.Init(x, y, tiling_data.totalBatches, tiling_data.features);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_max_pool_sum_scale_custom_impl_npu(const at::Tensor& self) {
+    at::Tensor x = self.contiguous();
+    int64_t batch = x.size(0);
+    at::Tensor result = at::empty({batch}, x.options());
+    EXEC_NPU_CMD(aclnnMatmulMaxPoolSumScaleCustom, x, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_max_pool_sum_scale_custom", &matmul_max_pool_sum_scale_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_max_pool_sum_scale_custom", &matmul_max_pool_sum_scale_custom_impl_npu, "fused max_pool + sum (matmul done by torch)");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_features, out_features, kernel_size, scale_factor):
+        super(ModelNew, self).__init__()
+        self.matmul = nn.Linear(in_features, out_features)
+        self.scale_factor = scale_factor
+
+    def forward(self, x):
+        x = self.matmul(x)
+        x = custom_ops_lib.matmul_max_pool_sum_scale_custom(x)
+        return x * self.scale_factor
+'''

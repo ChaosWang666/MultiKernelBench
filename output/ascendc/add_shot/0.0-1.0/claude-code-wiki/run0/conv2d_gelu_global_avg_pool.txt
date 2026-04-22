@@ -1,0 +1,386 @@
+project_json_src='''
+[
+    {
+        "op": "Conv2dGeluGlobalAvgPoolCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv2dGeluGlobalAvgPoolCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batch);
+  TILING_DATA_FIELD_DEF(uint32_t, inCh);
+  TILING_DATA_FIELD_DEF(uint32_t, outCh);
+  TILING_DATA_FIELD_DEF(uint32_t, height);
+  TILING_DATA_FIELD_DEF(uint32_t, width);
+  TILING_DATA_FIELD_DEF(uint32_t, kSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv2dGeluGlobalAvgPoolCustom, Conv2dGeluGlobalAvgPoolCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv2d_gelu_global_avg_pool_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 20;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv2dGeluGlobalAvgPoolCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto wShape = context->GetInputShape(1)->GetOriginShape();
+
+    uint32_t batch = xShape.GetDim(0);
+    uint32_t inCh = xShape.GetDim(1);
+    uint32_t height = xShape.GetDim(2);
+    uint32_t width = xShape.GetDim(3);
+    uint32_t outCh = wShape.GetDim(0);
+    uint32_t kSize = wShape.GetDim(2);
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batch(batch);
+    tiling.set_inCh(inCh);
+    tiling.set_outCh(outCh);
+    tiling.set_height(height);
+    tiling.set_width(width);
+    tiling.set_kSize(kSize);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* w_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, w_shape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv2dGeluGlobalAvgPoolCustom : public OpDef {
+public:
+    explicit Conv2dGeluGlobalAvgPoolCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv2dGeluGlobalAvgPoolCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelConv2dGeluGAP {
+public:
+    __aicore__ inline KernelConv2dGeluGAP() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR w, GM_ADDR b, GM_ADDR y,
+        uint32_t batch, uint32_t inCh, uint32_t outCh,
+        uint32_t height, uint32_t width, uint32_t kSize)
+    {
+        this->batch = batch;
+        this->inCh = inCh;
+        this->outCh = outCh;
+        this->height = height;
+        this->width = width;
+        this->kSize = kSize;
+        this->outH = height - kSize + 1;
+        this->outW = width - kSize + 1;
+
+        uint32_t totalTasks = batch * outCh;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t tpb = (totalTasks + blockNum - 1) / blockNum;
+        this->tasksPerBlock = tpb;
+        uint32_t st = blockIdx * tpb;
+        uint32_t et = st + tpb;
+        if (st > totalTasks) st = totalTasks;
+        if (et > totalTasks) et = totalTasks;
+        this->startTask = st;
+        this->endTask = et;
+        this->myTaskCount = et - st;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x);
+        wGm.SetGlobalBuffer((__gm__ float*)w);
+        bGm.SetGlobalBuffer((__gm__ float*)b);
+        yGm.SetGlobalBuffer((__gm__ float*)y);
+
+        uint32_t weightCount = inCh * kSize * kSize;
+        uint32_t weightBytes = ((weightCount * sizeof(float) + 31) / 32) * 32;
+        uint32_t inputBytes = kSize * inCh * width * sizeof(float);
+        uint32_t outWAligned = (outW + 7) / 8 * 8;
+        uint32_t convBytes = outWAligned * sizeof(float);
+        uint32_t outBufBytes = ((tpb * sizeof(float) + 31) / 32) * 32;
+        if (outBufBytes < 32) outBufBytes = 32;
+
+        pipe.InitBuffer(weightBuf, weightBytes);
+        pipe.InitBuffer(inputBuf, inputBytes);
+        pipe.InitBuffer(convOutBuf, convBytes);
+        pipe.InitBuffer(geluTmpBuf, convBytes);
+        pipe.InitBuffer(reduceBuf, 1024);
+        pipe.InitBuffer(accBuf, 32);
+        pipe.InitBuffer(biasBuf, 32);
+        pipe.InitBuffer(outBuf, outBufBytes);
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (myTaskCount == 0) return;
+
+        AscendC::LocalTensor<float> outLocal = outBuf.Get<float>();
+
+        for (uint32_t taskIdx = startTask; taskIdx < endTask; taskIdx++) {
+            uint32_t n = taskIdx / outCh;
+            uint32_t oc = taskIdx % outCh;
+            float result = ProcessTask(n, oc);
+            outLocal.SetValue(taskIdx - startTask, result);
+        }
+
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        AscendC::DataCopyExtParams yParams;
+        yParams.blockCount = 1;
+        yParams.blockLen = myTaskCount * sizeof(float);
+        yParams.srcStride = 0;
+        yParams.dstStride = 0;
+        AscendC::DataCopyPad(yGm[startTask], outLocal, yParams);
+    }
+
+private:
+    __aicore__ inline float ProcessTask(uint32_t n, uint32_t oc)
+    {
+        AscendC::DataCopyExtParams copyParams;
+        AscendC::DataCopyPadExtParams<float> padParams;
+        padParams.isPad = false;
+        padParams.leftPadding = 0;
+        padParams.rightPadding = 0;
+        padParams.paddingValue = 0;
+
+        AscendC::LocalTensor<float> wLocal = weightBuf.Get<float>();
+        uint32_t weightCount = inCh * kSize * kSize;
+        copyParams.blockCount = 1;
+        copyParams.blockLen = weightCount * sizeof(float);
+        copyParams.srcStride = 0;
+        copyParams.dstStride = 0;
+        AscendC::DataCopyPad(wLocal, wGm[oc * weightCount], copyParams, padParams);
+
+        AscendC::LocalTensor<float> biasLocal = biasBuf.Get<float>();
+        copyParams.blockCount = 1;
+        copyParams.blockLen = sizeof(float);
+        copyParams.srcStride = 0;
+        copyParams.dstStride = 0;
+        AscendC::DataCopyPad(biasLocal, bGm[oc], copyParams, padParams);
+
+        AscendC::PipeBarrier<PIPE_ALL>();
+        float biasVal = biasLocal.GetValue(0);
+
+        float totalSum = 0.0f;
+
+        for (uint32_t h = 0; h < outH; h++) {
+            AscendC::LocalTensor<float> inLocal = inputBuf.Get<float>();
+            copyParams.blockCount = (uint16_t)inCh;
+            copyParams.blockLen = kSize * width * sizeof(float);
+            copyParams.srcStride = (height - kSize) * width * sizeof(float);
+            copyParams.dstStride = 0;
+
+            uint32_t srcOffset = n * inCh * height * width + h * width;
+            AscendC::DataCopyPad(inLocal, xGm[srcOffset], copyParams, padParams);
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            AscendC::LocalTensor<float> convOut = convOutBuf.Get<float>();
+            AscendC::Duplicate<float>(convOut, biasVal, outW);
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            for (uint32_t ic = 0; ic < inCh; ic++) {
+                for (uint32_t kh = 0; kh < kSize; kh++) {
+                    for (uint32_t kw = 0; kw < kSize; kw++) {
+                        float wVal = wLocal.GetValue(ic * kSize * kSize + kh * kSize + kw);
+                        uint32_t inOffset = ic * kSize * width + kh * width + kw;
+                        AscendC::Axpy<float, float>(convOut, inLocal[inOffset], wVal, outW);
+                    }
+                }
+            }
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            AscendC::LocalTensor<float> tmpLocal = geluTmpBuf.Get<float>();
+            AscendC::Muls<float>(tmpLocal, convOut, (float)0.7071067811865475f, outW);
+            AscendC::PipeBarrier<PIPE_ALL>();
+            AscendC::Erf<float>(tmpLocal, tmpLocal, outW);
+            AscendC::PipeBarrier<PIPE_ALL>();
+            AscendC::Adds<float>(tmpLocal, tmpLocal, (float)1.0f, outW);
+            AscendC::PipeBarrier<PIPE_ALL>();
+            AscendC::Muls<float>(tmpLocal, tmpLocal, (float)0.5f, outW);
+            AscendC::PipeBarrier<PIPE_ALL>();
+            AscendC::Mul<float>(convOut, convOut, tmpLocal, outW);
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            AscendC::LocalTensor<float> reduceTmp = reduceBuf.Get<float>();
+            AscendC::LocalTensor<float> accLocal = accBuf.Get<float>();
+            AscendC::ReduceSum<float, true>(accLocal, convOut, reduceTmp, (int32_t)outW);
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            totalSum += accLocal.GetValue(0);
+        }
+
+        return totalSum / (float)(outH * outW);
+    }
+
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> weightBuf, inputBuf, convOutBuf, geluTmpBuf, reduceBuf, accBuf, biasBuf, outBuf;
+    AscendC::GlobalTensor<float> xGm, wGm, bGm, yGm;
+    uint32_t batch, inCh, outCh, height, width, kSize, outH, outW;
+    uint32_t startTask, endTask, myTaskCount, tasksPerBlock;
+};
+
+extern "C" __global__ __aicore__ void conv2d_gelu_global_avg_pool_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv2dGeluGAP op;
+    op.Init(x, weight, bias, y,
+        tiling_data.batch, tiling_data.inCh, tiling_data.outCh,
+        tiling_data.height, tiling_data.width, tiling_data.kSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv2d_gelu_global_avg_pool_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias)
+{
+    int64_t batch = x.size(0);
+    int64_t outCh = weight.size(0);
+    at::Tensor result = at::empty({batch, outCh}, x.options());
+    EXEC_NPU_CMD(aclnnConv2dGeluGlobalAvgPoolCustom, x, weight, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv2d_gelu_global_avg_pool_custom", &conv2d_gelu_global_avg_pool_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv2d_gelu_global_avg_pool_custom", &conv2d_gelu_global_avg_pool_custom_impl_npu,
+          "conv2d + gelu + global avg pool fused");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super(ModelNew, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+
+    def forward(self, x):
+        x = x.contiguous()
+        weight = self.conv.weight.contiguous()
+        bias = self.conv.bias.contiguous()
+        return custom_ops_lib.conv2d_gelu_global_avg_pool_custom(x, weight, bias)
+'''

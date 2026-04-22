@@ -1,0 +1,300 @@
+project_json_src='''
+[
+    {
+        "op": "Conv3dMaxLogSumExpReluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dMaxLogSumExpReluCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, dhwSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+  TILING_DATA_FIELD_DEF(uint32_t, coresPerBatch);
+  TILING_DATA_FIELD_DEF(uint32_t, outputPerCore);
+  TILING_DATA_FIELD_DEF(uint32_t, tileCount);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dMaxLogSumExpReluCustom, Conv3dMaxLogSumExpReluCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_max_log_sum_exp_relu_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dMaxLogSumExpReluCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t B = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t D = xShape.GetDim(2);
+    uint32_t H = xShape.GetDim(3);
+    uint32_t W = xShape.GetDim(4);
+    uint32_t dhwSize = D * H * W;
+
+    uint32_t coresPerBatch = 8;
+    uint32_t blockDim = B * coresPerBatch;
+    uint32_t outputPerCore = dhwSize / coresPerBatch;
+    uint32_t tileLength = 256;
+    if (outputPerCore % tileLength != 0) {
+        tileLength = 128;
+    }
+    if (outputPerCore % tileLength != 0) {
+        tileLength = 64;
+    }
+    uint32_t tileCount = outputPerCore / tileLength;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_batchSize(B);
+    tiling.set_channels(C);
+    tiling.set_dhwSize(dhwSize);
+    tiling.set_tileLength(tileLength);
+    tiling.set_coresPerBatch(coresPerBatch);
+    tiling.set_outputPerCore(outputPerCore);
+    tiling.set_tileCount(tileCount);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    y_shape->SetDim(1, 1);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv3dMaxLogSumExpReluCustom : public OpDef {
+public:
+    explicit Conv3dMaxLogSumExpReluCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv3dMaxLogSumExpReluCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConv3dMaxLogSumExpReluCustom {
+public:
+    __aicore__ inline KernelConv3dMaxLogSumExpReluCustom() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t channels,
+                                 uint32_t dhwSize, uint32_t tileLength,
+                                 uint32_t coresPerBatch, uint32_t outputPerCore,
+                                 uint32_t tileCount)
+    {
+        this->batchSize = batchSize;
+        this->channels = channels;
+        this->dhwSize = dhwSize;
+        this->tileLength = tileLength;
+        this->coresPerBatch = coresPerBatch;
+        this->outputPerCore = outputPerCore;
+        this->tileCount = tileCount;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t batchIdx = blockIdx / coresPerBatch;
+        uint32_t withinBatchIdx = blockIdx % coresPerBatch;
+
+        uint64_t xOffset = (uint64_t)batchIdx * channels * dhwSize + (uint64_t)withinBatchIdx * outputPerCore;
+        uint64_t yOffset = (uint64_t)batchIdx * dhwSize + (uint64_t)withinBatchIdx * outputPerCore;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x + xOffset, (uint64_t)channels * dhwSize);
+        yGm.SetGlobalBuffer((__gm__ float*)y + yOffset, outputPerCore);
+
+        pipe.InitBuffer(inQueue, BUFFER_NUM, tileLength * sizeof(float));
+        pipe.InitBuffer(outQueue, BUFFER_NUM, tileLength * sizeof(float));
+        pipe.InitBuffer(mBuf, tileLength * sizeof(float));
+        pipe.InitBuffer(sBuf, tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf, tileLength * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t t = 0; t < tileCount; t++) {
+            uint32_t tileOffset = t * tileLength;
+            ComputeTile(tileOffset);
+        }
+    }
+
+private:
+    __aicore__ inline void ComputeTile(uint32_t tileOffset)
+    {
+        AscendC::LocalTensor<float> m = mBuf.Get<float>();
+        AscendC::LocalTensor<float> s = sBuf.Get<float>();
+        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+
+        AscendC::Duplicate<float>(m, -1.0e30f, tileLength);
+
+        for (uint32_t c = 0; c < channels; c++) {
+            AscendC::LocalTensor<float> in = inQueue.AllocTensor<float>();
+            AscendC::DataCopy(in, xGm[(uint64_t)c * dhwSize + tileOffset], tileLength);
+            inQueue.EnQue(in);
+            AscendC::LocalTensor<float> inDq = inQueue.DeQue<float>();
+            AscendC::Max(m, m, inDq, tileLength);
+            inQueue.FreeTensor(inDq);
+        }
+
+        AscendC::Duplicate<float>(s, 0.0f, tileLength);
+
+        for (uint32_t c = 0; c < channels; c++) {
+            AscendC::LocalTensor<float> in = inQueue.AllocTensor<float>();
+            AscendC::DataCopy(in, xGm[(uint64_t)c * dhwSize + tileOffset], tileLength);
+            inQueue.EnQue(in);
+            AscendC::LocalTensor<float> inDq = inQueue.DeQue<float>();
+            AscendC::Sub(tmp, inDq, m, tileLength);
+            AscendC::Exp(tmp, tmp, tileLength);
+            AscendC::Add(s, s, tmp, tileLength);
+            inQueue.FreeTensor(inDq);
+        }
+
+        AscendC::LocalTensor<float> out = outQueue.AllocTensor<float>();
+        AscendC::Ln(tmp, s, tileLength);
+        AscendC::Add(out, tmp, m, tileLength);
+        AscendC::Maxs(out, out, 0.0f, tileLength);
+
+        outQueue.EnQue<float>(out);
+        AscendC::LocalTensor<float> outDq = outQueue.DeQue<float>();
+        AscendC::DataCopy(yGm[tileOffset], outDq, tileLength);
+        outQueue.FreeTensor(outDq);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> mBuf, sBuf, tmpBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t channels;
+    uint32_t dhwSize;
+    uint32_t tileLength;
+    uint32_t coresPerBatch;
+    uint32_t outputPerCore;
+    uint32_t tileCount;
+};
+
+extern "C" __global__ __aicore__ void conv3d_max_log_sum_exp_relu_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv3dMaxLogSumExpReluCustom op;
+    op.Init(x, y, tiling_data.batchSize, tiling_data.channels, tiling_data.dhwSize,
+            tiling_data.tileLength, tiling_data.coresPerBatch, tiling_data.outputPerCore,
+            tiling_data.tileCount);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_max_log_sum_exp_relu_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes().vec();
+    sizes[1] = 1;
+    at::Tensor result = at::empty(sizes, self.options());
+    EXEC_NPU_CMD(aclnnConv3dMaxLogSumExpReluCustom, self, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_max_log_sum_exp_relu_custom", &conv3d_max_log_sum_exp_relu_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_max_log_sum_exp_relu_custom", &conv3d_max_log_sum_exp_relu_custom_impl_npu, "logsumexp over channel + relu");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
+        super(ModelNew, self).__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
+        self.max_pool = nn.MaxPool3d(kernel_size=2, stride=2)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.max_pool(x)
+        x = x.contiguous()
+        x = custom_ops_lib.conv3d_max_log_sum_exp_relu_custom(x)
+        return x
+'''

@@ -1,0 +1,266 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv2dReluHardSwishCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv2dReluHardSwishCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv2dReluHardSwishCustom, Conv2dReluHardSwishCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv2d_relu_hard_swish_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t BUFFER_NUM = 2;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv2dReluHardSwishCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    context->SetBlockDim(BLOCK_DIM);
+
+    uint32_t blockLength = totalLength / BLOCK_DIM;
+
+    // Pick tileLength: aim around 4032 elements (16KB per tile for float)
+    // Must satisfy: tileLength * tileNum * BUFFER_NUM == blockLength, tileLength % 8 == 0
+    uint32_t tileLength = 4032;
+    if (blockLength % (tileLength * BUFFER_NUM) != 0) {
+        // Fallback: find the largest tileLength <= 4032, multiple of 8, dividing blockLength/BUFFER_NUM
+        uint32_t half = blockLength / BUFFER_NUM;
+        tileLength = 8;
+        for (uint32_t t = 8; t <= 4032; t += 8) {
+            if (half % t == 0) {
+                tileLength = t;
+            }
+        }
+    }
+    uint32_t tileNum = blockLength / (tileLength * BUFFER_NUM);
+
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(tileNum);
+    tiling.set_tileLength(tileLength);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Conv2dReluHardSwishCustom : public OpDef {
+public:
+    explicit Conv2dReluHardSwishCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv2dReluHardSwishCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConv2dReluHardSwish {
+public:
+    __aicore__ inline KernelConv2dReluHardSwish() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum, uint32_t tileLength)
+    {
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = tileLength;
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+
+        pipe.InitBuffer(inQueueX,  BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<float>   tmpLocal = tmpBuf.Get<float>();
+
+        // Step 1: ReLU on x: xLocal = max(xLocal, 0)
+        AscendC::Maxs(xLocal, xLocal, (DTYPE_X)0.0f, this->tileLength);
+
+        // Step 2: tmp = xLocal + 3
+        AscendC::Adds(tmpLocal, xLocal, (float)3.0f, this->tileLength);
+
+        // Step 3: tmp = tmp * (1/6)
+        AscendC::Muls(tmpLocal, tmpLocal, (float)(1.0f / 6.0f), this->tileLength);
+
+        // Step 4: clamp tmp to [0, 1]
+        AscendC::Mins(tmpLocal, tmpLocal, (float)1.0f, this->tileLength);
+        AscendC::Maxs(tmpLocal, tmpLocal, (float)0.0f, this->tileLength);
+
+        // Step 5: y = xLocal * tmp
+        AscendC::Mul(yLocal, xLocal, tmpLocal, this->tileLength);
+
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        outQueueY.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM>  inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void conv2d_relu_hard_swish_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv2dReluHardSwish op;
+    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum, tiling_data.tileLength);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv2d_relu_hard_swish_custom_impl_npu(const at::Tensor& x) {
+    at::Tensor x_contig = x.contiguous();
+    at::Tensor result = at::empty_like(x_contig);
+    EXEC_NPU_CMD(aclnnConv2dReluHardSwishCustom, x_contig, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv2d_relu_hard_swish_custom", &conv2d_relu_hard_swish_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv2d_relu_hard_swish_custom", &conv2d_relu_hard_swish_custom_impl_npu, "conv2d output -> ReLU -> HardSwish fused");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super(ModelNew, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = custom_ops_lib.conv2d_relu_hard_swish_custom(x)
+        return x
+'''
+```

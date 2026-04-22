@@ -4,16 +4,16 @@
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor add_bias_broadcast_custom_impl_npu(const at::Tensor& self, const at::Tensor& bias) {
-    at::Tensor result = at::empty_like(self);
-    EXEC_NPU_CMD(aclnnAddBiasBroadcastCustom, self, bias, result);
+at::Tensor conv2d_min_add_multiply_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnConv2dMinAddMultiplyCustom, x, bias, result);
     return result;
 }
 
 TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
-    m.impl("add_bias_broadcast_custom", &add_bias_broadcast_custom_impl_npu);
+    m.impl("conv2d_min_add_multiply_custom", &conv2d_min_add_multiply_custom_impl_npu);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("add_bias_broadcast_custom", &add_bias_broadcast_custom_impl_npu, "x + bias");
+    m.def("conv2d_min_add_multiply_custom", &conv2d_min_add_multiply_custom_impl_npu, "fused min + add_bias + multiply");
 }

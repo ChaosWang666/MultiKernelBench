@@ -1,0 +1,250 @@
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose3dSwishGroupNormHardSwishCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose3dSwishGroupNormHardSwishCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose3dSwishGroupNormHardSwishCustom, ConvTranspose3dSwishGroupNormHardSwishCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose3d_swish_group_norm_hard_swish_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose3dSwishGroupNormHardSwishCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    uint32_t blockDim = BLOCK_DIM;
+    while (blockDim > 1 && (totalLength % (blockDim * 8) != 0)) {
+        blockDim--;
+    }
+    if (blockDim < 1) blockDim = 1;
+    context->SetBlockDim(blockDim);
+    tiling.set_totalLength(totalLength);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class ConvTranspose3dSwishGroupNormHardSwishCustom : public OpDef {
+public:
+    explicit ConvTranspose3dSwishGroupNormHardSwishCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose3dSwishGroupNormHardSwishCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+constexpr uint32_t TILE_SIZE = 2048;
+
+class KernelHardSwish {
+public:
+    __aicore__ inline KernelHardSwish() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength)
+    {
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        uint32_t perBlock = totalLength / blockNum;
+        this->myLength = perBlock;
+        uint32_t startOffset = blockIdx * perBlock;
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + startOffset, this->myLength);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + startOffset, this->myLength);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, TILE_SIZE * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, TILE_SIZE * sizeof(DTYPE_Z));
+        pipe.InitBuffer(tmpBuf, TILE_SIZE * sizeof(DTYPE_X));
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t offset = 0;
+        while (offset < this->myLength) {
+            uint32_t remaining = this->myLength - offset;
+            uint32_t curLen = (TILE_SIZE < remaining) ? TILE_SIZE : remaining;
+            CopyIn(offset, curLen);
+            Compute(curLen);
+            CopyOut(offset, curLen);
+            offset += curLen;
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint32_t offset, uint32_t len)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocal, xGm[offset], len);
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Compute(uint32_t len)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        AscendC::LocalTensor<DTYPE_X> tmp = tmpBuf.Get<DTYPE_X>();
+
+        AscendC::Adds(tmp, xLocal, (DTYPE_X)3.0f, len);
+        AscendC::Maxs(tmp, tmp, (DTYPE_X)0.0f, len);
+        AscendC::Mins(tmp, tmp, (DTYPE_X)6.0f, len);
+        AscendC::Muls(tmp, tmp, (DTYPE_X)(1.0f / 6.0f), len);
+        AscendC::Mul(zLocal, xLocal, tmp, len);
+
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(uint32_t offset, uint32_t len)
+    {
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
+        AscendC::DataCopy(zGm[offset], zLocal, len);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
+    uint32_t myLength;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose3d_swish_group_norm_hard_swish_custom(
+    GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelHardSwish op;
+    op.Init(x, z, tiling_data.totalLength);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose3d_swish_group_norm_hard_swish_custom_impl_npu(const at::Tensor& self) {
+    at::Tensor contiguous_self = self.contiguous();
+    at::Tensor result = at::empty_like(contiguous_self);
+    EXEC_NPU_CMD(aclnnConvTranspose3dSwishGroupNormHardSwishCustom, contiguous_self, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose3d_swish_group_norm_hard_swish_custom", &conv_transpose3d_swish_group_norm_hard_swish_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose3d_swish_group_norm_hard_swish_custom", &conv_transpose3d_swish_group_norm_hard_swish_custom_impl_npu, "fused hardswish activation");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, groups, eps, bias=True):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias)
+        self.group_norm = nn.GroupNorm(num_groups=groups, num_channels=out_channels, eps=eps)
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = torch.sigmoid(x) * x
+        x = self.group_norm(x)
+        x = x.contiguous()
+        x = custom_ops_lib.conv_transpose3d_swish_group_norm_hard_swish_custom(x)
+        return x
+'''

@@ -4,7 +4,7 @@ set -euo pipefail
 
 STRATEGY="${STRATEGY:-add_shot}"
 RUNS="${RUNS:-1}"
-TIMEOUT="${TIMEOUT:-600}"
+TIMEOUT="${TIMEOUT:-1200}"
 
 cd "$(dirname "$0")/.."
 

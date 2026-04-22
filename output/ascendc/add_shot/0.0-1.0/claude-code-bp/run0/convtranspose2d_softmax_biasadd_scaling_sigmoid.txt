@@ -1,0 +1,357 @@
+project_json_src='''
+[
+    {
+        "op": "Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "scaling_factor",
+                "type": "float",
+                "default_value": "1.0"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Convtranspose2dSoftmaxBiasaddScalingSigmoidCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalNC);
+  TILING_DATA_FIELD_DEF(uint32_t, C);
+  TILING_DATA_FIELD_DEF(uint32_t, HW);
+  TILING_DATA_FIELD_DEF(uint32_t, tileSize);
+  TILING_DATA_FIELD_DEF(float, scalingFactor);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom, Convtranspose2dSoftmaxBiasaddScalingSigmoidCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "convtranspose2d_softmax_biasadd_scaling_sigmoid_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 20;
+const uint32_t TILE_SIZE = 4096;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Convtranspose2dSoftmaxBiasaddScalingSigmoidCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t H = xShape.GetDim(2);
+    uint32_t W = xShape.GetDim(3);
+    uint32_t totalNC = N * C;
+    uint32_t HW = H * W;
+
+    auto attrs = context->GetAttrs();
+    const float* scalingFactorPtr = attrs->GetAttrPointer<float>(0);
+    float scalingFactor = (scalingFactorPtr != nullptr) ? *scalingFactorPtr : 1.0f;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalNC(totalNC);
+    tiling.set_C(C);
+    tiling.set_HW(HW);
+    tiling.set_tileSize(TILE_SIZE);
+    tiling.set_scalingFactor(scalingFactor);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom : public OpDef {
+public:
+    explicit Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("scaling_factor").AttrType(OPTIONAL).Float(1.0f);
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelBiasScaleSigmoid {
+public:
+    __aicore__ inline KernelBiasScaleSigmoid() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t totalNC, uint32_t C, uint32_t HW,
+                                 uint32_t tileSize, float scalingFactor)
+    {
+        this->C = C;
+        this->HW = HW;
+        this->tileSize = tileSize;
+        this->scalingFactor = scalingFactor;
+
+        uint32_t coreNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t workPerCore = (totalNC + coreNum - 1) / coreNum;
+        uint32_t sU = blockIdx * workPerCore;
+        uint32_t eU = sU + workPerCore;
+        if (eU > totalNC) eU = totalNC;
+        if (sU > totalNC) sU = totalNC;
+        this->startUnit = sU;
+        this->endUnit = eU;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias);
+        yGm.SetGlobalBuffer((__gm__ float*)y);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileSize * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, tileSize * sizeof(float));
+
+        uint32_t biasAlignBytes = ((C * sizeof(float) + 31) / 32) * 32;
+        pipe.InitBuffer(biasBuf, biasAlignBytes);
+        pipe.InitBuffer(onesBuf, tileSize * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (startUnit >= endUnit) return;
+
+        AscendC::LocalTensor<float> biasLocal = biasBuf.Get<float>();
+        AscendC::LocalTensor<float> onesLocal = onesBuf.Get<float>();
+
+        AscendC::DataCopyExtParams biasParams;
+        biasParams.blockCount = 1;
+        biasParams.blockLen = static_cast<uint32_t>(C * sizeof(float));
+        biasParams.srcStride = 0;
+        biasParams.dstStride = 0;
+        AscendC::DataCopyPadExtParams<float> biasPadParams;
+        biasPadParams.isPad = false;
+        biasPadParams.leftPadding = 0;
+        biasPadParams.rightPadding = 0;
+        biasPadParams.paddingValue = 0.0f;
+        AscendC::DataCopyPad(biasLocal, biasGm, biasParams, biasPadParams);
+
+        AscendC::Duplicate<float>(onesLocal, 1.0f, tileSize);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        for (uint32_t unit = startUnit; unit < endUnit; unit++) {
+            uint32_t c = unit % C;
+            uint64_t baseOffset = (uint64_t)unit * HW;
+            float biasVal = biasLocal.GetValue(c);
+
+            uint32_t remaining = HW;
+            uint32_t processed = 0;
+            while (remaining > 0) {
+                uint32_t thisTile = (remaining > tileSize) ? tileSize : remaining;
+                CopyIn(baseOffset + processed, thisTile);
+                Compute(thisTile, biasVal, onesLocal);
+                CopyOut(baseOffset + processed, thisTile);
+                processed += thisTile;
+                remaining -= thisTile;
+            }
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint64_t offset, uint32_t size)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopyExtParams params;
+        params.blockCount = 1;
+        params.blockLen = static_cast<uint32_t>(size * sizeof(float));
+        params.srcStride = 0;
+        params.dstStride = 0;
+        AscendC::DataCopyPadExtParams<float> padParams;
+        padParams.isPad = false;
+        padParams.leftPadding = 0;
+        padParams.rightPadding = 0;
+        padParams.paddingValue = 0.0f;
+        AscendC::DataCopyPad(xLocal, xGm[offset], params, padParams);
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Compute(uint32_t size, float biasVal, AscendC::LocalTensor<float>& onesLocal)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+
+        AscendC::Adds<float>(yLocal, xLocal, biasVal, size);
+        AscendC::Muls<float>(yLocal, yLocal, scalingFactor, size);
+
+        AscendC::Muls<float>(yLocal, yLocal, -1.0f, size);
+        AscendC::Exp<float>(yLocal, yLocal, size);
+        AscendC::Adds<float>(yLocal, yLocal, 1.0f, size);
+        AscendC::Div<float>(yLocal, onesLocal, yLocal, size);
+
+        outQueueY.EnQue<float>(yLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(uint64_t offset, uint32_t size)
+    {
+        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+        AscendC::DataCopyExtParams params;
+        params.blockCount = 1;
+        params.blockLen = static_cast<uint32_t>(size * sizeof(float));
+        params.srcStride = 0;
+        params.dstStride = 0;
+        AscendC::DataCopyPad(yGm[offset], yLocal, params);
+        outQueueY.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> biasBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> onesBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t C;
+    uint32_t HW;
+    uint32_t startUnit;
+    uint32_t endUnit;
+    uint32_t tileSize;
+    float scalingFactor;
+};
+
+extern "C" __global__ __aicore__ void convtranspose2d_softmax_biasadd_scaling_sigmoid_custom(
+    GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelBiasScaleSigmoid op;
+    op.Init(x, bias, y, tiling_data.totalNC, tiling_data.C, tiling_data.HW,
+            tiling_data.tileSize, tiling_data.scalingFactor);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor convtranspose2d_softmax_biasadd_scaling_sigmoid_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& bias, double scaling_factor)
+{
+    at::Tensor result = at::empty_like(x);
+    float sf = static_cast<float>(scaling_factor);
+    EXEC_NPU_CMD(aclnnConvtranspose2dSoftmaxBiasaddScalingSigmoidCustom, x, bias, sf, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("convtranspose2d_softmax_biasadd_scaling_sigmoid_custom", &convtranspose2d_softmax_biasadd_scaling_sigmoid_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("convtranspose2d_softmax_biasadd_scaling_sigmoid_custom",
+          &convtranspose2d_softmax_biasadd_scaling_sigmoid_custom_impl_npu,
+          "fused softmax+bias+scale+sigmoid post-processing on NPU");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, output_padding, bias_shape, scaling_factor):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, output_padding=output_padding)
+        self.bias = nn.Parameter(torch.randn(bias_shape))
+        self.scaling_factor = float(scaling_factor)
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = torch.softmax(x, dim=1)
+        x = x.contiguous()
+        bias_flat = self.bias.view(-1).contiguous()
+        x = custom_ops_lib.convtranspose2d_softmax_biasadd_scaling_sigmoid_custom(x, bias_flat, self.scaling_factor)
+        return x
+'''

@@ -1,0 +1,324 @@
+Looking at this problem, I need to fuse the post-convolution operations:
+- `result = (2*original_x + bias) * original_x + original_x = original_x * (2*original_x + bias + 1)`
+
+I'll keep `ConvTranspose3d` in PyTorch and fuse the element-wise operations. The bias has shape `(C,1,1,1)` broadcasted across the (N,D,H,W) dimensions. I'll parallelize by distributing feature maps (N*C) across blocks, with tile-based processing within each feature map.
+
+```python
+project_json_src = '''
+[
+    {
+        "op": "ConvTranspose3dSumResidualAddMultiplyResidualAddCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src = """
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose3dSumResidualAddMultiplyResidualAddCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalFeatureMaps);
+  TILING_DATA_FIELD_DEF(uint32_t, featureMapSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose3dSumResidualAddMultiplyResidualAddCustom, ConvTranspose3dSumResidualAddMultiplyResidualAddCustomTilingData)
+}
+"""
+
+host_operator_src = """
+#include "conv_transpose3d_sum_residual_add_multiply_residual_add_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose3dSumResidualAddMultiplyResidualAddCustomTilingData tiling;
+
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = static_cast<uint32_t>(shape.GetDim(0));
+    uint32_t C = static_cast<uint32_t>(shape.GetDim(1));
+    uint32_t D = static_cast<uint32_t>(shape.GetDim(2));
+    uint32_t H = static_cast<uint32_t>(shape.GetDim(3));
+    uint32_t W = static_cast<uint32_t>(shape.GetDim(4));
+
+    uint32_t totalFeatureMaps = N * C;
+    uint32_t featureMapSize = D * H * W;
+    uint32_t channels = C;
+    uint32_t tileLength = 8192;
+    if (tileLength > featureMapSize) {
+        tileLength = featureMapSize;
+    }
+
+    uint32_t blockDim = 40;
+    if (totalFeatureMaps < blockDim) {
+        blockDim = totalFeatureMaps;
+    }
+    if (blockDim == 0) blockDim = 1;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_totalFeatureMaps(totalFeatureMaps);
+    tiling.set_featureMapSize(featureMapSize);
+    tiling.set_channels(channels);
+    tiling.set_tileLength(tileLength);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvTranspose3dSumResidualAddMultiplyResidualAddCustom : public OpDef {
+public:
+    explicit ConvTranspose3dSumResidualAddMultiplyResidualAddCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose3dSumResidualAddMultiplyResidualAddCustom);
+}
+"""
+
+kernel_src = """
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelFused {
+public:
+    __aicore__ inline KernelFused() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+                                  uint32_t totalFeatureMaps, uint32_t featureMapSize,
+                                  uint32_t channels, uint32_t tileLength)
+    {
+        this->totalFeatureMaps = totalFeatureMaps;
+        this->featureMapSize = featureMapSize;
+        this->channels = channels;
+        this->tileLength = tileLength;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+
+        uint32_t fmPerBlock = totalFeatureMaps / blockNum;
+        uint32_t fmRemainder = totalFeatureMaps % blockNum;
+
+        if (blockIdx < fmRemainder) {
+            this->startFm = blockIdx * (fmPerBlock + 1);
+            this->numFm = fmPerBlock + 1;
+        } else {
+            this->startFm = blockIdx * fmPerBlock + fmRemainder;
+            this->numFm = fmPerBlock;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float*)x, (uint64_t)totalFeatureMaps * featureMapSize);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias, channels);
+        yGm.SetGlobalBuffer((__gm__ float*)y, (uint64_t)totalFeatureMaps * featureMapSize);
+
+        uint32_t channelsAlign = ((channels + 7) / 8) * 8;
+        this->channelsAlign = channelsAlign;
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(biasQueue, 1, channelsAlign * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (this->numFm == 0) return;
+
+        auto biasAlloc = biasQueue.AllocTensor<float>();
+        AscendC::DataCopyExtParams biasCopyParams{1, (uint32_t)(this->channels * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<float> biasPadParams{false, 0, 0, 0.0f};
+        AscendC::DataCopyPad(biasAlloc, biasGm, biasCopyParams, biasPadParams);
+        biasQueue.EnQue(biasAlloc);
+        auto biasIn = biasQueue.DeQue<float>();
+
+        for (uint32_t fm = 0; fm < this->numFm; fm++) {
+            uint32_t globalFm = this->startFm + fm;
+            uint32_t channel = globalFm % this->channels;
+            float biasVal = biasIn.GetValue(channel);
+            float biasPlus1 = biasVal + 1.0f;
+
+            uint64_t fmOffset = (uint64_t)globalFm * this->featureMapSize;
+            uint32_t processed = 0;
+            while (processed < this->featureMapSize) {
+                uint32_t remaining = this->featureMapSize - processed;
+                uint32_t thisTile = (remaining < this->tileLength) ? remaining : this->tileLength;
+
+                CopyIn(fmOffset + processed, thisTile);
+                Compute(thisTile, biasPlus1);
+                CopyOut(fmOffset + processed, thisTile);
+
+                processed += thisTile;
+            }
+        }
+
+        biasQueue.FreeTensor(biasIn);
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint64_t offset, uint32_t length)
+    {
+        auto xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopyExtParams copyParams{1, (uint32_t)(length * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<float> padParams{false, 0, 0, 0.0f};
+        AscendC::DataCopyPad(xLocal, xGm[offset], copyParams, padParams);
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Compute(uint32_t length, float biasPlus1)
+    {
+        auto xLocal = inQueueX.DeQue<float>();
+        auto yLocal = outQueueY.AllocTensor<float>();
+
+        AscendC::Muls<float>(yLocal, xLocal, 2.0f, length);
+        AscendC::Adds<float>(yLocal, yLocal, biasPlus1, length);
+        AscendC::Mul<float>(yLocal, xLocal, yLocal, length);
+
+        outQueueY.EnQue<float>(yLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(uint64_t offset, uint32_t length)
+    {
+        auto yLocal = outQueueY.DeQue<float>();
+        AscendC::DataCopyExtParams copyParams{1, (uint32_t)(length * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPad(yGm[offset], yLocal, copyParams);
+        outQueueY.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> biasQueue;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t totalFeatureMaps;
+    uint32_t featureMapSize;
+    uint32_t channels;
+    uint32_t channelsAlign;
+    uint32_t tileLength;
+    uint32_t startFm;
+    uint32_t numFm;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose3d_sum_residual_add_multiply_residual_add_custom(
+    GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelFused op;
+    op.Init(x, bias, y, tiling_data.totalFeatureMaps, tiling_data.featureMapSize,
+            tiling_data.channels, tiling_data.tileLength);
+    op.Process();
+}
+"""
+
+python_bind_src = """
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose3d_sum_residual_add_multiply_residual_add_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& bias) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnConvTranspose3dSumResidualAddMultiplyResidualAddCustom, x, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose3d_sum_residual_add_multiply_residual_add_custom", &conv_transpose3d_sum_residual_add_multiply_residual_add_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose3d_sum_residual_add_multiply_residual_add_custom",
+          &conv_transpose3d_sum_residual_add_multiply_residual_add_custom_impl_npu,
+          "Fused conv_transpose3d post-processing: x * (2*x + bias + 1)");
+}
+"""
+
+model_src = '''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, output_padding, bias_shape):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, output_padding=output_padding)
+        self.bias = nn.Parameter(torch.randn(bias_shape))
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = x.contiguous()
+        bias_flat = self.bias.view(-1).contiguous()
+        return custom_ops_lib.conv_transpose3d_sum_residual_add_multiply_residual_add_custom(x, bias_flat)
+'''
+```

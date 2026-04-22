@@ -1,0 +1,403 @@
+project_json_src='''
+[
+    {
+        "op": "Conv3dMultiplyInstanceNormClampMultiplyMaxCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "mult",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "attr": [
+            {
+                "name": "clamp_min",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "clamp_max",
+                "param_type": "required",
+                "type": "float"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dMultiplyInstanceNormClampMultiplyMaxCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, N);
+  TILING_DATA_FIELD_DEF(uint32_t, C);
+  TILING_DATA_FIELD_DEF(uint32_t, spatial);
+  TILING_DATA_FIELD_DEF(uint32_t, nsPerBlock);
+  TILING_DATA_FIELD_DEF(uint32_t, remainderNs);
+  TILING_DATA_FIELD_DEF(uint32_t, usedBlocks);
+  TILING_DATA_FIELD_DEF(float, clampMin);
+  TILING_DATA_FIELD_DEF(float, clampMax);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dMultiplyInstanceNormClampMultiplyMaxCustom, Conv3dMultiplyInstanceNormClampMultiplyMaxCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_multiply_instance_norm_clamp_multiply_max_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t MAX_BLOCKS = 20;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dMultiplyInstanceNormClampMultiplyMaxCustomTilingData tiling;
+
+    const auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t D = xShape.GetDim(2);
+    uint32_t H = xShape.GetDim(3);
+    uint32_t W = xShape.GetDim(4);
+    uint32_t spatial = D * H * W;
+
+    uint32_t usedBlocks = (N < MAX_BLOCKS) ? N : MAX_BLOCKS;
+    if (usedBlocks == 0) {
+        usedBlocks = 1;
+    }
+    uint32_t nsPerBlock = N / usedBlocks;
+    uint32_t remainderNs = N % usedBlocks;
+
+    auto attrs = context->GetAttrs();
+    const float* clampMinPtr = attrs->GetAttrPointer<float>(0);
+    const float* clampMaxPtr = attrs->GetAttrPointer<float>(1);
+    float clampMin = (clampMinPtr != nullptr) ? *clampMinPtr : -1.0f;
+    float clampMax = (clampMaxPtr != nullptr) ? *clampMaxPtr : 1.0f;
+
+    context->SetBlockDim(usedBlocks);
+    tiling.set_N(N);
+    tiling.set_C(C);
+    tiling.set_spatial(spatial);
+    tiling.set_nsPerBlock(nsPerBlock);
+    tiling.set_remainderNs(remainderNs);
+    tiling.set_usedBlocks(usedBlocks);
+    tiling.set_clampMin(clampMin);
+    tiling.set_clampMax(clampMax);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, x_shape->GetDim(2));
+    y_shape->SetDim(2, x_shape->GetDim(3));
+    y_shape->SetDim(3, x_shape->GetDim(4));
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Conv3dMultiplyInstanceNormClampMultiplyMaxCustom : public OpDef {
+public:
+    explicit Conv3dMultiplyInstanceNormClampMultiplyMaxCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("mult")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("clamp_min").AttrType(REQUIRED).Float();
+        this->Attr("clamp_max").AttrType(REQUIRED).Float();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+OP_ADD(Conv3dMultiplyInstanceNormClampMultiplyMaxCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 1;
+constexpr float NEG_INF_F = -3.4e38f;
+constexpr float EPS = 1e-5f;
+
+class KernelConv3dMimcmm {
+public:
+    __aicore__ inline KernelConv3dMimcmm() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR mult, GM_ADDR z,
+                                uint32_t N, uint32_t C, uint32_t spatial,
+                                uint32_t nsPerBlock, uint32_t remainderNs,
+                                uint32_t usedBlocks, float clampMin, float clampMax)
+    {
+        this->N_ = N;
+        this->C_ = C;
+        this->spatial_ = spatial;
+        this->clampMin_ = clampMin;
+        this->clampMax_ = clampMax;
+        this->invSpatial_ = 1.0f / (float)spatial;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        if (blockIdx >= usedBlocks) {
+            this->blockNumNs_ = 0;
+            this->blockStartN_ = 0;
+            return;
+        }
+
+        if (blockIdx < remainderNs) {
+            this->blockNumNs_ = nsPerBlock + 1;
+            this->blockStartN_ = blockIdx * (nsPerBlock + 1);
+        } else {
+            this->blockNumNs_ = nsPerBlock;
+            this->blockStartN_ = remainderNs * (nsPerBlock + 1) + (blockIdx - remainderNs) * nsPerBlock;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float*)x, (uint64_t)N * C * spatial);
+        multGm.SetGlobalBuffer((__gm__ float*)mult, C);
+        zGm.SetGlobalBuffer((__gm__ float*)z, (uint64_t)N * spatial);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, spatial * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, spatial * sizeof(float));
+        pipe.InitBuffer(tempBuf, spatial * sizeof(float));
+        pipe.InitBuffer(multBuf, 512);
+        pipe.InitBuffer(reduceBuf, 8 * 1024);
+        pipe.InitBuffer(scalarBuf, 64);
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (blockNumNs_ == 0) return;
+
+        auto multLocal = multBuf.Get<float>();
+        AscendC::DataCopyExtParams mParams;
+        mParams.blockCount = 1;
+        mParams.blockLen = (uint32_t)(C_ * sizeof(float));
+        mParams.srcStride = 0;
+        mParams.dstStride = 0;
+        AscendC::DataCopyPadExtParams<float> mPadParams;
+        mPadParams.isPad = false;
+        mPadParams.leftPadding = 0;
+        mPadParams.rightPadding = 0;
+        mPadParams.paddingValue = 0.0f;
+        AscendC::DataCopyPad(multLocal, multGm, mParams, mPadParams);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        for (uint32_t localN = 0; localN < blockNumNs_; localN++) {
+            uint32_t n = blockStartN_ + localN;
+            ProcessOneN(n, multLocal);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOneN(uint32_t n, AscendC::LocalTensor<float>& multLocal)
+    {
+        auto resLocal = outQueueZ.AllocTensor<float>();
+        AscendC::Duplicate<float>(resLocal, NEG_INF_F, spatial_);
+
+        auto tempLocal = tempBuf.Get<float>();
+        auto reduceTmp = reduceBuf.Get<float>();
+        auto scalarLocal = scalarBuf.Get<float>();
+
+        for (uint32_t c = 0; c < C_; c++) {
+            auto xLocal = inQueueX.AllocTensor<float>();
+            uint64_t xOffset = (uint64_t)n * C_ * spatial_ + (uint64_t)c * spatial_;
+
+            AscendC::DataCopyExtParams params;
+            params.blockCount = 1;
+            params.blockLen = (uint32_t)(spatial_ * sizeof(float));
+            params.srcStride = 0;
+            params.dstStride = 0;
+            AscendC::DataCopyPadExtParams<float> padParams;
+            padParams.isPad = false;
+            padParams.leftPadding = 0;
+            padParams.rightPadding = 0;
+            padParams.paddingValue = 0.0f;
+
+            AscendC::DataCopyPad(xLocal, xGm[xOffset], params, padParams);
+            inQueueX.EnQue(xLocal);
+
+            auto xIn = inQueueX.DeQue<float>();
+            float multVal = multLocal.GetValue(c);
+
+            AscendC::Muls<float>(xIn, xIn, multVal, spatial_);
+
+            AscendC::ReduceSum<float, true>(scalarLocal, xIn, reduceTmp, (int32_t)spatial_);
+            float sumVal = scalarLocal.GetValue(0);
+            float meanVal = sumVal * invSpatial_;
+
+            AscendC::Adds<float>(xIn, xIn, -meanVal, spatial_);
+
+            AscendC::Mul<float>(tempLocal, xIn, xIn, spatial_);
+
+            AscendC::ReduceSum<float, true>(scalarLocal, tempLocal, reduceTmp, (int32_t)spatial_);
+            float varVal = scalarLocal.GetValue(0) * invSpatial_;
+
+            AscendC::Duplicate<float>(scalarLocal, varVal + EPS, 8);
+            AscendC::Sqrt<float>(scalarLocal, scalarLocal, 8);
+            float stdVal = scalarLocal.GetValue(0);
+            float invstd = 1.0f / stdVal;
+
+            AscendC::Muls<float>(xIn, xIn, invstd, spatial_);
+
+            AscendC::Duplicate<float>(tempLocal, clampMax_, spatial_);
+            AscendC::Min<float>(xIn, xIn, tempLocal, spatial_);
+            AscendC::Duplicate<float>(tempLocal, clampMin_, spatial_);
+            AscendC::Max<float>(xIn, xIn, tempLocal, spatial_);
+
+            AscendC::Muls<float>(xIn, xIn, multVal, spatial_);
+
+            AscendC::Max<float>(resLocal, resLocal, xIn, spatial_);
+
+            inQueueX.FreeTensor(xIn);
+        }
+
+        outQueueZ.EnQue(resLocal);
+        auto resOut = outQueueZ.DeQue<float>();
+
+        uint64_t zOffset = (uint64_t)n * spatial_;
+        AscendC::DataCopyExtParams outParams;
+        outParams.blockCount = 1;
+        outParams.blockLen = (uint32_t)(spatial_ * sizeof(float));
+        outParams.srcStride = 0;
+        outParams.dstStride = 0;
+        AscendC::DataCopyPad(zGm[zOffset], resOut, outParams);
+        outQueueZ.FreeTensor(resOut);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tempBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> multBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> scalarBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> multGm;
+    AscendC::GlobalTensor<float> zGm;
+
+    uint32_t N_;
+    uint32_t C_;
+    uint32_t spatial_;
+    uint32_t blockStartN_;
+    uint32_t blockNumNs_;
+    float clampMin_;
+    float clampMax_;
+    float invSpatial_;
+};
+
+extern "C" __global__ __aicore__ void conv3d_multiply_instance_norm_clamp_multiply_max_custom(
+    GM_ADDR x, GM_ADDR mult, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv3dMimcmm op;
+    op.Init(x, mult, z, tiling_data.N, tiling_data.C, tiling_data.spatial,
+            tiling_data.nsPerBlock, tiling_data.remainderNs, tiling_data.usedBlocks,
+            tiling_data.clampMin, tiling_data.clampMax);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_multiply_instance_norm_clamp_multiply_max_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& mult, double clamp_min, double clamp_max)
+{
+    auto sizes = x.sizes();
+    int64_t N = sizes[0];
+    int64_t D = sizes[2];
+    int64_t H = sizes[3];
+    int64_t W = sizes[4];
+    at::Tensor result = at::empty({N, D, H, W}, x.options());
+    float clampMinF = (float)clamp_min;
+    float clampMaxF = (float)clamp_max;
+    EXEC_NPU_CMD(aclnnConv3dMultiplyInstanceNormClampMultiplyMaxCustom,
+                 x, mult, clampMinF, clampMaxF, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_multiply_instance_norm_clamp_multiply_max_custom",
+           &conv3d_multiply_instance_norm_clamp_multiply_max_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_multiply_instance_norm_clamp_multiply_max_custom",
+          &conv3d_multiply_instance_norm_clamp_multiply_max_custom_impl_npu,
+          "Fused multiply + instance_norm + clamp + multiply + max");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, multiplier_shape, clamp_min, clamp_max):
+        super().__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size)
+        self.multiplier = nn.Parameter(torch.randn(multiplier_shape))
+        self.clamp_min = clamp_min
+        self.clamp_max = clamp_max
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = x.contiguous()
+        mult = self.multiplier.view(-1).contiguous()
+        return custom_ops_lib.conv3d_multiply_instance_norm_clamp_multiply_max_custom(
+            x, mult, float(self.clamp_min), float(self.clamp_max))
+'''
