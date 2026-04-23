@@ -26,7 +26,7 @@
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "dtype": "float32",
           "format": "ND",
@@ -42,7 +42,7 @@
       "deterministic": "ignore",
       "optionalOutputMode": "gen_placeholder",
       "binInfo": {
-        "jsonFilePath": "ascend910b/gemm_batch_norm_gelu_group_norm_mean_relu_custom/GemmBatchNormGeluGroupNormMeanReluCustom_c4b219949841730762f3f80beeaea075.json"
+        "jsonFilePath": "ascend910b/gemm_batch_norm_gelu_group_norm_mean_relu_custom/GemmBatchNormGeluGroupNormMeanReluCustom_5f8f12f9b680eed535eb974af1a8fd29.json"
       }
     }
   ]

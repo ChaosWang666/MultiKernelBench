@@ -3,7 +3,7 @@
 
 framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_subtract_mish_custom_plugin.cc.o: ../framework/tf_plugin/tensorflow_conv2d_subtract_subtract_mish_custom_plugin.cc \
   /usr/include/stdc-predef.h \
-  /home/developer/Ascend/cann-9.0.0/include/register/register.h \
+  /home/developer/Ascend/cann-8.5.0/include/register/register.h \
   /usr/include/c++/9/functional \
   /usr/include/aarch64-linux-gnu/c++/9/bits/c++config.h \
   /usr/include/aarch64-linux-gnu/c++/9/bits/os_defines.h \
@@ -197,38 +197,38 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
   /usr/include/c++/9/bits/stl_vector.h \
   /usr/include/c++/9/bits/stl_bvector.h \
   /usr/include/c++/9/bits/vector.tcc \
-  /home/developer/Ascend/cann-9.0.0/include/graph/operator.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/ge_error_codes.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/inference_context.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/tensor.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/operator.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/ge_error_codes.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/inference_context.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/tensor.h \
   /usr/include/c++/9/atomic \
-  /home/developer/Ascend/cann-9.0.0/include/graph/ge_error_codes.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/types.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/c_types.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/ascend_string.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/types.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/types.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/resource_context.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/ge_error_codes.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/tensor.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/types.h \
-  /home/developer/Ascend/cann-9.0.0/include/register/register_error_codes.h \
-  /home/developer/Ascend/cann-9.0.0/include/register/register_fmk_types.h \
-  /home/developer/Ascend/cann-9.0.0/include/register/register_types.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/ascend_string.h
+  /home/developer/Ascend/cann-8.5.0/include/graph/ge_error_codes.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/types.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/c_types.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/ascend_string.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/types.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/types.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/resource_context.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/ge_error_codes.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/tensor.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/types.h \
+  /home/developer/Ascend/cann-8.5.0/include/register/register_error_codes.h \
+  /home/developer/Ascend/cann-8.5.0/include/register/register_fmk_types.h \
+  /home/developer/Ascend/cann-8.5.0/include/register/register_types.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/ascend_string.h
 
 
-/home/developer/Ascend/cann-9.0.0/include/register/register_types.h:
+/home/developer/Ascend/cann-8.5.0/include/register/register_types.h:
 
-/home/developer/Ascend/cann-9.0.0/include/register/register_error_codes.h:
+/home/developer/Ascend/cann-8.5.0/include/register/register_fmk_types.h:
 
-/home/developer/Ascend/cann-9.0.0/include/graph/ascend_string.h:
+/home/developer/Ascend/cann-8.5.0/include/register/register_error_codes.h:
 
-/home/developer/Ascend/cann-9.0.0/include/graph/tensor.h:
+/home/developer/Ascend/cann-8.5.0/include/graph/c_types.h:
 
-/home/developer/Ascend/cann-9.0.0/include/graph/inference_context.h:
+/home/developer/Ascend/cann-8.5.0/include/graph/types.h:
 
-/home/developer/Ascend/cann-9.0.0/include/graph/operator.h:
+/home/developer/Ascend/cann-8.5.0/include/graph/tensor.h:
 
 /usr/include/c++/9/bits/vector.tcc:
 
@@ -244,7 +244,7 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 
 /usr/include/c++/9/bits/stl_set.h:
 
-/home/developer/Ascend/cann-9.0.0/include/graph/ge_error_codes.h:
+/home/developer/Ascend/cann-8.5.0/include/graph/operator.h:
 
 /usr/include/c++/9/set:
 
@@ -296,6 +296,8 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 
 /usr/include/c++/9/bits/functexcept.h:
 
+/usr/include/aarch64-linux-gnu/bits/types/__mbstate_t.h:
+
 /usr/include/aarch64-linux-gnu/bits/types/wint_t.h:
 
 /usr/include/c++/9/bits/stl_map.h:
@@ -316,6 +318,8 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 
 /usr/include/aarch64-linux-gnu/bits/types/FILE.h:
 
+/home/developer/Ascend/cann-8.5.0/include/register/register.h:
+
 /usr/include/c++/9/bits/stl_iterator_base_types.h:
 
 /usr/include/aarch64-linux-gnu/bits/types/timer_t.h:
@@ -329,8 +333,6 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 /usr/include/c++/9/bits/unordered_map.h:
 
 /usr/include/c++/9/bits/memoryfwd.h:
-
-/usr/include/c++/9/cwchar:
 
 /usr/include/c++/9/bits/atomic_lockfree_defines.h:
 
@@ -347,6 +349,8 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 /usr/include/aarch64-linux-gnu/bits/floatn-common.h:
 
 /usr/include/aarch64-linux-gnu/bits/select2.h:
+
+/home/developer/Ascend/cann-8.5.0/include/graph/resource_context.h:
 
 /usr/include/c++/9/bits/concept_check.h:
 
@@ -388,9 +392,7 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 
 /usr/include/c++/9/typeinfo:
 
-/usr/include/aarch64-linux-gnu/bits/types/__mbstate_t.h:
-
-/usr/include/aarch64-linux-gnu/bits/struct_rwlock.h:
+/usr/include/c++/9/cwchar:
 
 /usr/include/c++/9/functional:
 
@@ -428,11 +430,11 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 
 /usr/include/c++/9/bits/move.h:
 
+/home/developer/Ascend/cann-8.5.0/include/graph/ascend_string.h:
+
 /usr/include/errno.h:
 
 /usr/include/c++/9/type_traits:
-
-/home/developer/Ascend/cann-9.0.0/include/graph/types.h:
 
 /usr/include/aarch64-linux-gnu/bits/types.h:
 
@@ -443,12 +445,6 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 /usr/include/c++/9/cstdlib:
 
 /usr/include/c++/9/bits/char_traits.h:
-
-/usr/include/c++/9/bits/stl_algobase.h:
-
-/usr/include/locale.h:
-
-/usr/include/aarch64-linux-gnu/c++/9/bits/c++config.h:
 
 /usr/include/aarch64-linux-gnu/c++/9/bits/c++locale.h:
 
@@ -468,11 +464,21 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 
 /usr/include/aarch64-linux-gnu/bits/uintn-identity.h:
 
+/usr/include/c++/9/bits/stl_algobase.h:
+
+/usr/include/aarch64-linux-gnu/c++/9/bits/c++config.h:
+
+/usr/include/locale.h:
+
+/usr/include/aarch64-linux-gnu/bits/struct_rwlock.h:
+
 /usr/include/aarch64-linux-gnu/bits/locale.h:
 
 /usr/include/aarch64-linux-gnu/bits/types/clockid_t.h:
 
 /usr/include/aarch64-linux-gnu/bits/endian.h:
+
+/home/developer/Ascend/cann-8.5.0/include/graph/inference_context.h:
 
 /usr/include/aarch64-linux-gnu/bits/types/__FILE.h:
 
@@ -481,6 +487,8 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 /usr/include/pthread.h:
 
 /usr/include/c++/9/bits/ostream_insert.h:
+
+/home/developer/Ascend/cann-8.5.0/include/graph/ge_error_codes.h:
 
 /usr/include/aarch64-linux-gnu/gnu/stubs.h:
 
@@ -501,8 +509,6 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 /usr/include/aarch64-linux-gnu/bits/libc-header-start.h:
 
 /usr/include/aarch64-linux-gnu/bits/waitstatus.h:
-
-/home/developer/Ascend/cann-9.0.0/include/register/register_fmk_types.h:
 
 /usr/include/aarch64-linux-gnu/c++/9/bits/gthr.h:
 
@@ -552,8 +558,6 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 
 /usr/include/c++/9/ext/alloc_traits.h:
 
-/home/developer/Ascend/cann-9.0.0/include/graph/resource_context.h:
-
 /usr/include/aarch64-linux-gnu/c++/9/bits/atomic_word.h:
 
 /usr/include/aarch64-linux-gnu/bits/errno.h:
@@ -573,8 +577,6 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 /usr/include/asm-generic/errno-base.h:
 
 /usr/include/aarch64-linux-gnu/bits/byteswap.h:
-
-/home/developer/Ascend/cann-9.0.0/include/graph/c_types.h:
 
 /usr/include/aarch64-linux-gnu/bits/stdio2.h:
 
@@ -613,8 +615,6 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_conv2d_subtract_su
 /usr/include/aarch64-linux-gnu/bits/stdio_lim.h:
 
 /usr/include/c++/9/backward/binders.h:
-
-/home/developer/Ascend/cann-9.0.0/include/register/register.h:
 
 /usr/include/aarch64-linux-gnu/bits/stdio.h:
 

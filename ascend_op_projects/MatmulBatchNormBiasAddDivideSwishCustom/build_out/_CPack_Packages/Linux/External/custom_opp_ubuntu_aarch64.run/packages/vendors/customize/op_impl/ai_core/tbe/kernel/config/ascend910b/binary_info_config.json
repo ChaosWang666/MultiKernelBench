@@ -17,20 +17,19 @@
           "index": 1,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
-        },
-        {
-          "name": "divide_val",
-          "index": 2,
-          "paramType": "required",
-          "formatMode": "static_nd_agnostic"
         }
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "divide_value"
         }
       ]
     },
@@ -38,13 +37,13 @@
       {
         "coreType": 2,
         "simplifiedKey": [
-          "MatmulBatchNormBiasAddDivideSwishCustom/d=0,p=1/0,2/0,2/0,2/0,2",
-          "MatmulBatchNormBiasAddDivideSwishCustom/d=0,p=0/0,2/0,2/0,2/0,2",
-          "MatmulBatchNormBiasAddDivideSwishCustom/d=1,p=1/0,2/0,2/0,2/0,2",
-          "MatmulBatchNormBiasAddDivideSwishCustom/d=1,p=0/0,2/0,2/0,2/0,2"
+          "MatmulBatchNormBiasAddDivideSwishCustom/d=0,p=1/0,2/0,2/0,2",
+          "MatmulBatchNormBiasAddDivideSwishCustom/d=0,p=0/0,2/0,2/0,2",
+          "MatmulBatchNormBiasAddDivideSwishCustom/d=1,p=1/0,2/0,2/0,2",
+          "MatmulBatchNormBiasAddDivideSwishCustom/d=1,p=0/0,2/0,2/0,2"
         ],
-        "binPath": "ascend910b/matmul_batch_norm_bias_add_divide_swish_custom/MatmulBatchNormBiasAddDivideSwishCustom_496c6591cef73b27b82fdce57c6a8938.o",
-        "jsonPath": "ascend910b/matmul_batch_norm_bias_add_divide_swish_custom/MatmulBatchNormBiasAddDivideSwishCustom_496c6591cef73b27b82fdce57c6a8938.json"
+        "binPath": "ascend910b/matmul_batch_norm_bias_add_divide_swish_custom/MatmulBatchNormBiasAddDivideSwishCustom_06ca350b38cfd071f5f1a15a5214805f.o",
+        "jsonPath": "ascend910b/matmul_batch_norm_bias_add_divide_swish_custom/MatmulBatchNormBiasAddDivideSwishCustom_06ca350b38cfd071f5f1a15a5214805f.json"
       }
     ]
   }

@@ -1,118 +1,136 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
- 
-class KernelBmmInstanceNormSumResidualAddMultiply {
-public:
-    __aicore__ inline KernelBmmInstanceNormSumResidualAddMultiply() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR weight, GM_ADDR bias, GM_ADDR z, 
-                                uint32_t batchSize, uint32_t inFeatures, uint32_t outFeatures, uint32_t totalLength, uint32_t tileNum)
-    {
-        this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->tileNum = tileNum;
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
-        this->batchSize = batchSize;
-        this->inFeatures = inFeatures;
-        this->outFeatures = outFeatures;
+constexpr int32_t BUFFER_NUM = 1;
 
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        weightGm.SetGlobalBuffer((__gm__ DTYPE_WEIGHT *)weight, inFeatures * outFeatures);
-        biasGm.SetGlobalBuffer((__gm__ DTYPE_BIAS *)bias, outFeatures);
-        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(inQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
-        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->tileLength * inFeatures * sizeof(DTYPE_WEIGHT));
-        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(DTYPE_BIAS));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
+class KernelInstanceNormResidualAddMul {
+public:
+    __aicore__ inline KernelInstanceNormResidualAddMul() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z,
+                                 uint32_t totalRows, uint32_t rowLen)
+    {
+        this->rowLen = rowLen;
+        this->eps = 1e-5f;
+        this->invRowLen = 1.0f / (float)rowLen;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t numBlocks = AscendC::GetBlockNum();
+
+        uint32_t rowsPerBlock = (totalRows + numBlocks - 1) / numBlocks;
+        uint32_t startRow = blockIdx * rowsPerBlock;
+        uint32_t endRow = startRow + rowsPerBlock;
+        if (endRow > totalRows) endRow = totalRows;
+        if (startRow > totalRows) startRow = totalRows;
+
+        this->startRow = startRow;
+        this->endRow = endRow;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x, totalRows * rowLen);
+        yGm.SetGlobalBuffer((__gm__ float*)y, totalRows * rowLen);
+        zGm.SetGlobalBuffer((__gm__ float*)z, totalRows * rowLen);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, rowLen * sizeof(float));
+        pipe.InitBuffer(inQueueY, BUFFER_NUM, rowLen * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, rowLen * sizeof(float));
+        pipe.InitBuffer(tmpBuf, rowLen * sizeof(float));
+        pipe.InitBuffer(reduceBuf, 32 * 1024);
+        pipe.InitBuffer(sumBuf, 64);
     }
+
     __aicore__ inline void Process()
     {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
+        for (uint32_t row = this->startRow; row < this->endRow; row++) {
+            CopyIn(row);
+            Compute(row);
+            CopyOut(row);
         }
     }
 
 private:
-    __aicore__ inline void CopyIn(int32_t progress)
+    __aicore__ inline void CopyIn(uint32_t row)
     {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = inQueueY.AllocTensor<DTYPE_Y>();
-        AscendC::LocalTensor<DTYPE_WEIGHT> weightLocal = inQueueWeight.AllocTensor<DTYPE_WEIGHT>();
-        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.AllocTensor<DTYPE_BIAS>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(yLocal, yGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(weightLocal, weightGm[0], this->tileLength * this->inFeatures);
-        AscendC::DataCopy(biasLocal, biasGm[0], this->tileLength);
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> yLocal = inQueueY.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[row * this->rowLen], this->rowLen);
+        AscendC::DataCopy(yLocal, yGm[row * this->rowLen], this->rowLen);
         inQueueX.EnQue(xLocal);
         inQueueY.EnQue(yLocal);
-        inQueueWeight.EnQue(weightLocal);
-        inQueueBias.EnQue(biasLocal);
     }
-    __aicore__ inline void Compute(int32_t progress)
+
+    __aicore__ inline void Compute(uint32_t row)
     {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = inQueueY.DeQue<DTYPE_Y>();
-        AscendC::LocalTensor<DTYPE_WEIGHT> weightLocal = inQueueWeight.DeQue<DTYPE_WEIGHT>();
-        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.DeQue<DTYPE_BIAS>();
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        
-        // BMM operation
-        AscendC::LocalTensor<DTYPE_Z> tempLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::MatMul(tempLocal, xLocal, weightLocal, this->tileLength, this->inFeatures, this->outFeatures);
-        
-        // Instance Norm
-        AscendC::LocalTensor<DTYPE_Z> normLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::InstanceNorm(normLocal, tempLocal, biasLocal, this->tileLength, this->outFeatures);
-        
-        // Sum
-        AscendC::LocalTensor<DTYPE_Z> sumLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::Add(sumLocal, normLocal, yLocal, this->tileLength);
-        
-        // Residual Add
-        AscendC::LocalTensor<DTYPE_Z> residualLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::Add(residualLocal, sumLocal, yLocal, this->tileLength);
-        
-        // Multiply
-        AscendC::Mul(zLocal, residualLocal, yLocal, this->tileLength);
-        
-        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = inQueueY.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+        AscendC::LocalTensor<float> reduceTmp = reduceBuf.Get<float>();
+        AscendC::LocalTensor<float> sumLocal = sumBuf.Get<float>();
+
+        // 1. sum = ReduceSum(x), mean = sum / rowLen
+        AscendC::ReduceSum<float, true>(sumLocal, xLocal, reduceTmp, this->rowLen);
+        float sumVal = sumLocal.GetValue(0);
+        float mean = sumVal * this->invRowLen;
+
+        // 2. tmpLocal = x - mean
+        AscendC::Adds<float>(tmpLocal, xLocal, -mean, this->rowLen);
+
+        // 3. zLocal = tmpLocal * tmpLocal (for variance)
+        AscendC::Mul<float>(zLocal, tmpLocal, tmpLocal, this->rowLen);
+
+        // 4. sumSq = ReduceSum(zLocal), var = sumSq / rowLen
+        AscendC::ReduceSum<float, true>(sumLocal, zLocal, reduceTmp, this->rowLen);
+        float sumSq = sumLocal.GetValue(0);
+        float var = sumSq * this->invRowLen;
+
+        // 5. invStd = 1 / sqrt(var + eps) via tensor sqrt
+        AscendC::Duplicate<float>(sumLocal, var + this->eps, 8);
+        AscendC::Sqrt<float>(sumLocal, sumLocal, 8);
+        float stdVal = sumLocal.GetValue(0);
+        float invStd = 1.0f / stdVal;
+
+        // 6. tmpLocal = (x - mean) * invStd
+        AscendC::Muls<float>(tmpLocal, tmpLocal, invStd, this->rowLen);
+
+        // 7. zLocal = x_norm + y
+        AscendC::Add<float>(zLocal, tmpLocal, yLocal, this->rowLen);
+
+        // 8. zLocal = zLocal * y
+        AscendC::Mul<float>(zLocal, zLocal, yLocal, this->rowLen);
+
+        outQueueZ.EnQue<float>(zLocal);
         inQueueX.FreeTensor(xLocal);
         inQueueY.FreeTensor(yLocal);
-        inQueueWeight.FreeTensor(weightLocal);
-        inQueueBias.FreeTensor(biasLocal);
     }
-    __aicore__ inline void CopyOut(int32_t progress)
+
+    __aicore__ inline void CopyOut(uint32_t row)
     {
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
-        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[row * this->rowLen], zLocal, this->rowLen);
         outQueueZ.FreeTensor(zLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY, inQueueWeight, inQueueBias;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::GlobalTensor<DTYPE_X> xGm;
-    AscendC::GlobalTensor<DTYPE_Y> yGm;
-    AscendC::GlobalTensor<DTYPE_WEIGHT> weightGm;
-    AscendC::GlobalTensor<DTYPE_BIAS> biasGm;
-    AscendC::GlobalTensor<DTYPE_Z> zGm;
-    uint32_t blockLength;
-    uint32_t tileNum;
-    uint32_t tileLength;
-    uint32_t batchSize;
-    uint32_t inFeatures;
-    uint32_t outFeatures;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> sumBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t rowLen;
+    uint32_t startRow;
+    uint32_t endRow;
+    float eps;
+    float invRowLen;
 };
 
-extern "C" __global__ __aicore__ void bmm_instance_norm_sum_residual_add_multiply_custom(GM_ADDR x, GM_ADDR y, GM_ADDR weight, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void bmm_instance_norm_sum_residual_add_multiply_custom(
+    GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelBmmInstanceNormSumResidualAddMultiply op;
-    op.Init(x, y, weight, bias, z, tiling_data.batchSize, tiling_data.inFeatures, tiling_data.outFeatures, tiling_data.totalLength, tiling_data.tileNum);
+    KernelInstanceNormResidualAddMul op;
+    op.Init(x, y, z, tiling_data.totalRows, tiling_data.rowLen);
     op.Process();
 }

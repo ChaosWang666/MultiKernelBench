@@ -3,177 +3,128 @@
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelScaleBnAvgPool {
+class KernelGAP {
 public:
-    __aicore__ inline KernelScaleBnAvgPool() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias,
-                                GM_ADDR running_mean, GM_ADDR running_var,
-                                GM_ADDR z,
-                                uint32_t batchSize, uint32_t channels,
-                                uint32_t spatialSize, float scaleFactor,
-                                float eps, uint32_t tileNum)
+    __aicore__ inline KernelGAP() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                 uint32_t numGroups, uint32_t groupSize,
+                                 uint32_t tileLength, uint32_t groupsPerBlock)
     {
-        this->batchSize = batchSize;
-        this->channels = channels;
-        this->spatialSize = spatialSize;
-        this->scaleFactor = scaleFactor;
-        this->eps = eps;
-        this->tileNum = tileNum;
+        this->numGroups = numGroups;
+        this->groupSize = groupSize;
+        this->tileLength = tileLength;
+        this->groupsPerBlock = groupsPerBlock;
 
-        // Total work items = batchSize * channels
-        // Each block handles a subset of (batch, channel) pairs
-        uint32_t totalBC = batchSize * channels;
-        uint32_t blockNum = AscendC::GetBlockNum();
         uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->groupStart = blockIdx * groupsPerBlock;
+        uint32_t tmpEnd = this->groupStart + groupsPerBlock;
+        if (this->groupStart > numGroups) this->groupStart = numGroups;
+        this->groupEnd = (tmpEnd < numGroups) ? tmpEnd : numGroups;
 
-        this->bcStart = (totalBC / blockNum) * blockIdx + (blockIdx < (totalBC % blockNum) ? blockIdx : (totalBC % blockNum));
-        uint32_t bcCount = totalBC / blockNum + (blockIdx < (totalBC % blockNum) ? 1 : 0);
-        this->bcEnd = this->bcStart + bcCount;
+        xGm.SetGlobalBuffer((__gm__ float*)x, numGroups * groupSize);
+        yGm.SetGlobalBuffer((__gm__ float*)y, numGroups);
 
-        // Global memory setup
-        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * channels * spatialSize);
-        weightGm.SetGlobalBuffer((__gm__ float *)weight, channels);
-        biasGm.SetGlobalBuffer((__gm__ float *)bias, channels);
-        meanGm.SetGlobalBuffer((__gm__ float *)running_mean, channels);
-        varGm.SetGlobalBuffer((__gm__ float *)running_var, channels);
-        zGm.SetGlobalBuffer((__gm__ float *)z, batchSize * channels);
+        uint32_t outBufSize = groupsPerBlock * sizeof(float);
+        if (outBufSize < 32) outBufSize = 32;
+        outBufSize = ((outBufSize + 31) / 32) * 32;
 
-        // Determine tile length for spatial dimension processing
-        // We process spatialSize elements per (batch, channel) pair
-        uint32_t alignedSpatial = ((spatialSize + 7) / 8) * 8;
-        if (alignedSpatial < 8) alignedSpatial = 8;
-
-        // Determine number of tiles for spatial dimension
-        this->spatialTiles = tileNum;
-        if (this->spatialTiles > spatialSize) this->spatialTiles = 1;
-
-        this->tileLength = spatialSize / this->spatialTiles;
-        this->lastTileLength = spatialSize - this->tileLength * (this->spatialTiles - 1);
-
-        // Align tile lengths to 8 elements (32 bytes for float)
-        uint32_t alignedTileLen = ((this->tileLength + 7) / 8) * 8;
-        uint32_t alignedLastTileLen = ((this->lastTileLength + 7) / 8) * 8;
-        uint32_t maxAlignedLen = alignedTileLen > alignedLastTileLen ? alignedTileLen : alignedLastTileLen;
-
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, maxAlignedLen * sizeof(float));
-        pipe.InitBuffer(outQueueZ, 1, 8 * sizeof(float)); // just for one output value
-        // Workspace for intermediate results
-        pipe.InitBuffer(tmpBuf, 1, maxAlignedLen * sizeof(float));
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueY, 1, outBufSize);
+        pipe.InitBuffer(sumBuf, 32);
+        pipe.InitBuffer(workBuf, tileLength * sizeof(float));
     }
 
     __aicore__ inline void Process()
     {
-        for (uint32_t bc = this->bcStart; bc < this->bcEnd; bc++) {
-            uint32_t b = bc / this->channels;
-            uint32_t c = bc % this->channels;
-            ProcessOneBC(b, c);
+        if (groupStart >= groupEnd) return;
+        uint32_t numGroupsInBlock = groupEnd - groupStart;
+
+        AscendC::LocalTensor<float> outLocal = outQueueY.AllocTensor<float>();
+
+        for (uint32_t g = groupStart; g < groupEnd; g++) {
+            float mean = ComputeGroupMean(g);
+            outLocal.SetValue(g - groupStart, mean);
         }
+
+        outQueueY.EnQue(outLocal);
+        AscendC::LocalTensor<float> outOut = outQueueY.DeQue<float>();
+
+        AscendC::DataCopyExtParams copyOutParams;
+        copyOutParams.blockCount = 1;
+        copyOutParams.blockLen = static_cast<uint32_t>(numGroupsInBlock * sizeof(float));
+        copyOutParams.srcStride = 0;
+        copyOutParams.dstStride = 0;
+
+        AscendC::DataCopyPad(yGm[groupStart], outOut, copyOutParams);
+        outQueueY.FreeTensor(outOut);
     }
 
 private:
-    __aicore__ inline void ProcessOneBC(uint32_t b, uint32_t c)
+    __aicore__ inline float ComputeGroupMean(uint32_t groupIdx)
     {
-        // Load BN parameters for this channel
-        float gamma = weightGm.GetValue(c);
-        float beta = biasGm.GetValue(c);
-        float mean = meanGm.GetValue(c);
-        float var = varGm.GetValue(c);
+        uint64_t offset = (uint64_t)groupIdx * (uint64_t)groupSize;
+        uint32_t numTiles = (groupSize + tileLength - 1) / tileLength;
 
-        // Precompute: combined_scale = scale_factor * gamma / sqrt(var + eps)
-        // combined_bias = beta - mean * scale_factor * gamma / sqrt(var + eps)
-        float invStd = 1.0f / sqrt(var + this->eps);
-        float combinedScale = this->scaleFactor * gamma * invStd;
-        float combinedBias = beta - mean * this->scaleFactor * gamma * invStd;
+        float totalSum = 0.0f;
 
-        uint32_t offset = (b * this->channels + c) * this->spatialSize;
-        float sum = 0.0f;
+        for (uint32_t t = 0; t < numTiles; t++) {
+            uint32_t start = t * tileLength;
+            uint32_t curLen = (start + tileLength <= groupSize) ? tileLength : (groupSize - start);
 
-        for (uint32_t t = 0; t < this->spatialTiles; t++) {
-            uint32_t curTileLen = (t == this->spatialTiles - 1) ? this->lastTileLength : this->tileLength;
-            uint32_t alignedLen = ((curTileLen + 7) / 8) * 8;
-            uint32_t tileOffset = offset + t * this->tileLength;
-
-            // CopyIn
             AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-            // Zero out padding
-            if (alignedLen > curTileLen) {
-                for (uint32_t i = curTileLen; i < alignedLen; i++) {
-                    xLocal.SetValue(i, 0.0f);
-                }
-            }
-            AscendC::DataCopy(xLocal, xGm[tileOffset], alignedLen);
+
+            AscendC::DataCopyExtParams copyParams;
+            copyParams.blockCount = 1;
+            copyParams.blockLen = static_cast<uint32_t>(curLen * sizeof(float));
+            copyParams.srcStride = 0;
+            copyParams.dstStride = 0;
+
+            AscendC::DataCopyPadExtParams<float> padParams;
+            padParams.isPad = true;
+            padParams.leftPadding = 0;
+            padParams.rightPadding = 0;
+            padParams.paddingValue = 0.0f;
+
+            AscendC::DataCopyPad(xLocal, xGm[offset + start], copyParams, padParams);
             inQueueX.EnQue(xLocal);
 
-            // Compute: apply scale + BN: y = x * combinedScale + combinedBias
             AscendC::LocalTensor<float> xIn = inQueueX.DeQue<float>();
-            AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+            AscendC::LocalTensor<float> sumLocal = sumBuf.Get<float>();
+            AscendC::LocalTensor<float> workLocal = workBuf.Get<float>();
 
-            AscendC::Muls(tmpLocal, xIn, combinedScale, alignedLen);
-            AscendC::Adds(tmpLocal, tmpLocal, combinedBias, alignedLen);
-
-            // Sum for average pooling
-            // Zero out padding values before summing
-            if (alignedLen > curTileLen) {
-                for (uint32_t i = curTileLen; i < alignedLen; i++) {
-                    tmpLocal.SetValue(i, 0.0f);
-                }
-            }
-
-            // Reduce sum
-            float tileSum = 0.0f;
-            // Use vector reduction if possible
-            AscendC::LocalTensor<float> workLocal = xIn; // reuse buffer
-            AscendC::ReduceSum(workLocal, tmpLocal, tmpLocal, alignedLen);
-            tileSum = workLocal.GetValue(0);
-
-            sum += tileSum;
+            AscendC::ReduceSum<float, true>(sumLocal, xIn, workLocal, static_cast<int32_t>(curLen));
+            float partial = sumLocal.GetValue(0);
+            totalSum += partial;
 
             inQueueX.FreeTensor(xIn);
         }
 
-        // Global average pool: divide by spatialSize
-        float avgVal = sum / (float)this->spatialSize;
-
-        // Write output
-        uint32_t outIdx = b * this->channels + c;
-        // Need to write a single value but DataCopy requires aligned access
-        // Use scalar write
-        zGm.SetValue(outIdx, avgVal);
+        return totalSum / static_cast<float>(groupSize);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueZ;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> sumBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> workBuf;
     AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> weightGm;
-    AscendC::GlobalTensor<float> biasGm;
-    AscendC::GlobalTensor<float> meanGm;
-    AscendC::GlobalTensor<float> varGm;
-    AscendC::GlobalTensor<float> zGm;
-    uint32_t batchSize;
-    uint32_t channels;
-    uint32_t spatialSize;
-    float scaleFactor;
-    float eps;
-    uint32_t tileNum;
-    uint32_t spatialTiles;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t numGroups;
+    uint32_t groupSize;
     uint32_t tileLength;
-    uint32_t lastTileLength;
-    uint32_t bcStart;
-    uint32_t bcEnd;
+    uint32_t groupsPerBlock;
+    uint32_t groupStart;
+    uint32_t groupEnd;
 };
 
 extern "C" __global__ __aicore__ void conv_transpose3d_scale_batch_norm_global_avg_pool_custom(
-    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR running_mean, GM_ADDR running_var,
-    GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
 {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelScaleBnAvgPool op;
-    op.Init(x, weight, bias, running_mean, running_var, z,
-            tiling_data.batchSize, tiling_data.channels,
-            tiling_data.spatialSize, tiling_data.scaleFactor,
-            tiling_data.eps, tiling_data.tileNum);
+    KernelGAP op;
+    op.Init(x, y, tiling_data.numGroups, tiling_data.groupSize,
+            tiling_data.tileLength, tiling_data.groupsPerBlock);
     op.Process();
 }

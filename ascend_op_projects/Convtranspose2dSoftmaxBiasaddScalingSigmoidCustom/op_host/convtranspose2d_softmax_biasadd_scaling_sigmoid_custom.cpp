@@ -3,28 +3,31 @@
 #include "register/op_def_registry.h"
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 8;
+const uint32_t BLOCK_DIM = 20;
+const uint32_t TILE_SIZE = 4096;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Convtranspose2dSoftmaxBiasaddScalingSigmoidCustomTilingData tiling;
-    
-    const gert::StorageShape* xShape = context->GetInputShape(0);
-    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
-    uint32_t channels = xShape->GetStorageShape().GetDim(1);
-    uint32_t height = xShape->GetStorageShape().GetDim(2);
-    uint32_t width = xShape->GetStorageShape().GetDim(3);
-    uint32_t totalLength = batchSize * channels * height * width;
-    
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t H = xShape.GetDim(2);
+    uint32_t W = xShape.GetDim(3);
+    uint32_t totalNC = N * C;
+    uint32_t HW = H * W;
+
+    auto attrs = context->GetAttrs();
+    const float* scalingFactorPtr = attrs->GetAttrPointer<float>(0);
+    float scalingFactor = (scalingFactorPtr != nullptr) ? *scalingFactorPtr : 1.0f;
+
     context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_channels(channels);
-    tiling.set_height(height);
-    tiling.set_width(width);
-    tiling.set_scalingFactor(2.0f);
-    tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(TILE_NUM);
-    
+    tiling.set_totalNC(totalNC);
+    tiling.set_C(C);
+    tiling.set_HW(HW);
+    tiling.set_tileSize(TILE_SIZE);
+    tiling.set_scalingFactor(scalingFactor);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -36,9 +39,9 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x1_shape = context->GetInputShape(0);
+    const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x1_shape;
+    *y_shape = *x_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -64,11 +67,12 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("scaling_factor").AttrType(OPTIONAL).Float(1.0f);
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 

@@ -67,8 +67,8 @@ def add_dtype_fmt_option_single(x, x_n, is_ref: bool = False):
 
 def get_dtype_fmt_options(__inputs__, __outputs__):
     options = []
-    input_names = ['x', 'weight', 'bias']
-    output_names = ['z']
+    input_names = ['x']
+    output_names = ['y']
     unique_param_name_set = set()
     for idx, x in enumerate(__inputs__):
         if x is None:
@@ -129,9 +129,9 @@ def get_kernel_source(src_file, dir_snake, dir_ex):
         return src
     return src_ex
 
-def _build_args(x_in__, weight_in__, bias_in__, z_out_, multiplier, negativeSlope):
+def _build_args(x_in__, y_out_, multiplier, negative_slope):
     __inputs__ = []
-    for arg in [x_in__, weight_in__, bias_in__]:
+    for arg in [x_in__]:
         if arg != None:
             if isinstance(arg, (list, tuple)):
                 if len(arg) == 0:
@@ -142,7 +142,7 @@ def _build_args(x_in__, weight_in__, bias_in__, z_out_, multiplier, negativeSlop
         else:
             __inputs__.append(arg)
     __outputs__ = []
-    for arg in [z_out_]:
+    for arg in [y_out_]:
         if arg != None:
             if isinstance(arg, (list, tuple)):
                 if len(arg) == 0:
@@ -159,21 +159,21 @@ def _build_args(x_in__, weight_in__, bias_in__, z_out_, multiplier, negativeSlop
         attr["dtype"] = "float"
         attr["value"] = multiplier
         __attrs__.append(attr)
-    if negativeSlope != None:
+    if negative_slope != None:
         attr = {}
-        attr["name"] = "negativeSlope"
+        attr["name"] = "negative_slope"
         attr["dtype"] = "float"
-        attr["value"] = negativeSlope
+        attr["value"] = negative_slope
         __attrs__.append(attr)
     return __inputs__, __outputs__, __attrs__
 
 @tbe_register.register_operator("GemmMultiplyLeakyreluCustom", trans_bool_to_s8=False)
-@para_check.check_op_params(para_check.REQUIRED_INPUT, para_check.REQUIRED_INPUT, para_check.REQUIRED_INPUT, para_check.REQUIRED_OUTPUT, para_check.OPTION_ATTR_FLOAT, para_check.OPTION_ATTR_FLOAT, para_check.KERNEL_NAME)
-def gemm_multiply_leakyrelu_custom(x_in__, weight_in__, bias_in__, z_out_, multiplier, negativeSlope, kernel_name="gemm_multiply_leakyrelu_custom", impl_mode = ""):
+@para_check.check_op_params(para_check.REQUIRED_INPUT, para_check.REQUIRED_OUTPUT, para_check.OPTION_ATTR_FLOAT, para_check.OPTION_ATTR_FLOAT, para_check.KERNEL_NAME)
+def gemm_multiply_leakyrelu_custom(x_in__, y_out_, multiplier, negative_slope, kernel_name="gemm_multiply_leakyrelu_custom", impl_mode = ""):
     # do ascendc build step
     if get_current_build_config("enable_op_prebuild"):
         return
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, weight_in__, bias_in__, z_out_, multiplier, negativeSlope)
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, y_out_, multiplier, negative_slope)
     options = get_dtype_fmt_options(__inputs__, __outputs__)
     options += ["-x", "cce"]
     bisheng = os.environ.get('BISHENG_REAL_PATH')
@@ -229,17 +229,17 @@ def gemm_multiply_leakyrelu_custom(x_in__, weight_in__, bias_in__, z_out_, multi
     op_type = "GemmMultiplyLeakyreluCustom"
     code_channel = get_code_channel(src, kernel_name, op_type, options)
     op_info = OpInfo(kernel_name = kernel_name, op_type = op_type, inputs = __inputs__, outputs = __outputs__,\
-        attrs = __attrs__ , impl_mode = impl_mode, origin_inputs=[x_in__, weight_in__, bias_in__], origin_outputs = [z_out_],\
-                param_type_dynamic = False, mc2_ctx = [], param_type_list = ['required', 'required', 'required', 'required'], init_value_list = [None],\
+        attrs = __attrs__ , impl_mode = impl_mode, origin_inputs=[x_in__], origin_outputs = [y_out_],\
+                param_type_dynamic = False, mc2_ctx = [], param_type_list = ['required', 'required'], init_value_list = [None],\
                 output_shape_depend_on_compute = [])
     compile_op(src, origin_func_name, op_info, options, code_channel, '{}', {'valueDepend': {}})
 
-def op_select_format(x_in__, weight_in__, bias_in__, z_out_, multiplier, negativeSlope, impl_mode = ""):
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, weight_in__, bias_in__, z_out_, multiplier, negativeSlope)
+def op_select_format(x_in__, y_out_, multiplier, negative_slope, impl_mode = ""):
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, y_out_, multiplier, negative_slope)
     result = check_op_cap("op_select_format", "GemmMultiplyLeakyreluCustom", __inputs__, __outputs__, __attrs__)
     return result.decode("utf-8")
 
-def get_op_specific_info(x_in__, weight_in__, bias_in__, z_out_, multiplier, negativeSlope, impl_mode = ""):
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, weight_in__, bias_in__, z_out_, multiplier, negativeSlope)
+def get_op_specific_info(x_in__, y_out_, multiplier, negative_slope, impl_mode = ""):
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, y_out_, multiplier, negative_slope)
     result = check_op_cap("get_op_specific_info", "GemmMultiplyLeakyreluCustom", __inputs__, __outputs__, __attrs__)
     return result.decode("utf-8")

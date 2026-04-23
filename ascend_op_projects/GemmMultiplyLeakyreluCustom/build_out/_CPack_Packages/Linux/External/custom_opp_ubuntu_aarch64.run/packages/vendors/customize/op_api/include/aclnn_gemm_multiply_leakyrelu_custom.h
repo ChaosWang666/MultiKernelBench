@@ -15,8 +15,6 @@ extern "C" {
 /* funtion: aclnnGemmMultiplyLeakyreluCustomGetWorkspaceSize
  * parameters :
  * x : required
- * weight : required
- * bias : required
  * multiplier : required
  * negativeSlope : required
  * out : required
@@ -26,8 +24,6 @@ extern "C" {
 __attribute__((visibility("default")))
 aclnnStatus aclnnGemmMultiplyLeakyreluCustomGetWorkspaceSize(
     const aclTensor *x,
-    const aclTensor *weight,
-    const aclTensor *bias,
     double multiplier,
     double negativeSlope,
     const aclTensor *out,

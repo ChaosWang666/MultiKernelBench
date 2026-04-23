@@ -13,16 +13,6 @@
                 "type": [
                     "float"
                 ]
-            },
-            {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
             }
         ],
         "output_desc": [
@@ -35,6 +25,13 @@
                 "type": [
                     "float"
                 ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "scaling_factor",
+                "param_type": "required",
+                "type": "float"
             }
         ]
     }

@@ -1,5 +1,5 @@
 # Hashes of file build rules.
-70150158d7c89f909704c2ae17153a6c CMakeFiles/gen_version_info
+7abbe6fe62a36e4d5b20484f5c828d5e CMakeFiles/gen_version_info
 21ce3a222fd09648aceb587fe09d9fc3 CMakeFiles/modify_vendor
 a6ec6863da0b72a1bab46b9135176105 op_host/CMakeFiles/optiling_compat
 4cf65eac0ecd369fbf2125d35d912a26 op_kernel/CMakeFiles/MatmulAddSwishTanhGeluHardtanhCustom_ascend910b

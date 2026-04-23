@@ -3,146 +3,174 @@
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConv3dLeakyReluSumClampGelu {
+class KernelFusedOp {
 public:
-    __aicore__ inline KernelConv3dLeakyReluSumClampGelu() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR sumTensor, GM_ADDR z,
-                                 uint32_t totalLength, uint32_t tileNum,
-                                 uint32_t outChannels, uint32_t spatialSize)
+    __aicore__ inline KernelFusedOp() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR sumTensor, GM_ADDR y,
+                                uint32_t totalRows, uint32_t channelSize,
+                                uint32_t spatialSize, uint32_t rowTileSize)
     {
-        this->outChannels = outChannels;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+
+        uint32_t rowsPerCore = totalRows / blockNum;
+        uint32_t tailRows = totalRows % blockNum;
+
+        if (blockIdx < tailRows) {
+            this->rowsThisCore = rowsPerCore + 1;
+            this->startRow = blockIdx * (rowsPerCore + 1);
+        } else {
+            this->rowsThisCore = rowsPerCore;
+            this->startRow = tailRows * (rowsPerCore + 1) + (blockIdx - tailRows) * rowsPerCore;
+        }
+
+        this->channelSize = channelSize;
         this->spatialSize = spatialSize;
-        this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->tileNum = tileNum;
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->rowTileSize = rowTileSize;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        sumGm.SetGlobalBuffer((__gm__ float *)sumTensor, outChannels);
-        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        uint64_t totalElems = (uint64_t)totalRows * (uint64_t)spatialSize;
+        xGm.SetGlobalBuffer((__gm__ float*)x, totalElems);
+        yGm.SetGlobalBuffer((__gm__ float*)y, totalElems);
+        sumGm.SetGlobalBuffer((__gm__ float*)sumTensor, channelSize);
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueue, BUFFER_NUM, rowTileSize * sizeof(float));
+        pipe.InitBuffer(outQueue, BUFFER_NUM, rowTileSize * sizeof(float));
+        pipe.InitBuffer(tmpBuf, rowTileSize * sizeof(float));
+
+        uint32_t sumBufBytes = ((channelSize * (uint32_t)sizeof(float) + 31U) / 32U) * 32U;
+        pipe.InitBuffer(sumBuf, sumBufBytes);
     }
+
     __aicore__ inline void Process()
     {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
+        if (rowsThisCore == 0) return;
+
+        // Load sum_tensor into UB once
+        AscendC::LocalTensor<float> sumLocal = sumBuf.Get<float>();
+        AscendC::DataCopyExtParams sumCopyParams;
+        sumCopyParams.blockCount = 1;
+        sumCopyParams.blockLen = channelSize * (uint32_t)sizeof(float);
+        sumCopyParams.srcStride = 0;
+        sumCopyParams.dstStride = 0;
+        sumCopyParams.rsv = 0;
+        AscendC::DataCopyPadExtParams<float> sumPadParams;
+        sumPadParams.isPad = false;
+        sumPadParams.leftPadding = 0;
+        sumPadParams.rightPadding = 0;
+        sumPadParams.paddingValue = 0.0f;
+        AscendC::DataCopyPad(sumLocal, sumGm, sumCopyParams, sumPadParams);
+
+        // MTE2 -> Scalar sync for GetValue
+        auto eventIdMTE2ToS = AscendC::GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_S);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(eventIdMTE2ToS);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(eventIdMTE2ToS);
+
+        for (uint32_t r = 0; r < rowsThisCore; r++) {
+            uint32_t globalRow = startRow + r;
+            uint32_t channel = globalRow % channelSize;
+            float scalar = sumLocal.GetValue(channel);
+
+            uint32_t processedInRow = 0;
+            while (processedInRow < spatialSize) {
+                uint32_t remaining = spatialSize - processedInRow;
+                uint32_t curTileSize = (remaining < rowTileSize) ? remaining : rowTileSize;
+                uint64_t gmOffset = (uint64_t)globalRow * (uint64_t)spatialSize + (uint64_t)processedInRow;
+                ProcessTile(gmOffset, curTileSize, scalar);
+                processedInRow += curTileSize;
+            }
         }
     }
 
 private:
-    __aicore__ inline void CopyIn(int32_t progress)
+    __aicore__ inline void ProcessTile(uint64_t offset, uint32_t tileSize, float scalar)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
-        inQueueX.EnQue(xLocal);
-    }
-    __aicore__ inline void Compute(int32_t progress)
-    {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
-        AscendC::LocalTensor<float> tmp1 = tmpBuf1.Get<float>();
-        AscendC::LocalTensor<float> tmp2 = tmpBuf2.Get<float>();
+        // CopyIn
+        AscendC::LocalTensor<float> xLocal = inQueue.AllocTensor<float>();
+        AscendC::DataCopyExtParams copyInParams;
+        copyInParams.blockCount = 1;
+        copyInParams.blockLen = tileSize * (uint32_t)sizeof(float);
+        copyInParams.srcStride = 0;
+        copyInParams.dstStride = 0;
+        copyInParams.rsv = 0;
+        AscendC::DataCopyPadExtParams<float> padParams;
+        padParams.isPad = false;
+        padParams.leftPadding = 0;
+        padParams.rightPadding = 0;
+        padParams.paddingValue = 0.0f;
+        AscendC::DataCopyPad(xLocal, xGm[offset], copyInParams, padParams);
+        inQueue.EnQue(xLocal);
 
-        // LeakyReLU: y = x > 0 ? x : 0.2 * x
-        // Compute 0.2 * x
-        AscendC::Muls(tmp1, xLocal, 0.2f, this->tileLength);
-        // Max(0.2*x, x) gives LeakyReLU for negative_slope=0.2
-        AscendC::Max(zLocal, xLocal, tmp1, this->tileLength);
+        // Compute
+        AscendC::LocalTensor<float> xIn = inQueue.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueue.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
 
-        // Add sum_tensor with broadcasting: sum_tensor shape is [C,1,1,1]
-        // x shape after conv is [N, C, D, H, W], flattened
-        // Global offset for this block
-        uint32_t globalOffset = this->blockLength * AscendC::GetBlockIdx() + progress * this->tileLength;
-        for (uint32_t i = 0; i < this->tileLength; i++) {
-            uint32_t globalIdx = globalOffset + i;
-            // channel index: (globalIdx / spatialSize) % outChannels
-            uint32_t channelIdx = (globalIdx / this->spatialSize) % this->outChannels;
-            tmp1.SetValue(i, zLocal.GetValue(i) + sumGm.GetValue(channelIdx));
-        }
+        // 1. LeakyReLU: y = 0.8 * max(x, 0) + 0.2 * x
+        AscendC::Maxs(tmp, xIn, 0.0f, (int32_t)tileSize);
+        AscendC::Muls(tmp, tmp, 0.8f, (int32_t)tileSize);
+        AscendC::Muls(yLocal, xIn, 0.2f, (int32_t)tileSize);
+        AscendC::Add(yLocal, yLocal, tmp, (int32_t)tileSize);
 
-        // Clamp to [-1, 1]
-        float minVal = -1.0f;
-        float maxVal = 1.0f;
-        // clamp min: max(x, -1)
-        AscendC::Maxs(tmp2, tmp1, minVal, this->tileLength);
-        // clamp max: min(x, 1)
-        AscendC::Mins(tmp1, tmp2, maxVal, this->tileLength);
+        // 2. Add per-channel scalar
+        AscendC::Adds(yLocal, yLocal, scalar, (int32_t)tileSize);
 
-        // GELU approximation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-        // But we can use: x * 0.5 * (1 + erf(x / sqrt(2)))
-        // Use simpler approach with available ops
+        // 3. Clamp to [-1, 1]
+        AscendC::Maxs(yLocal, yLocal, -1.0f, (int32_t)tileSize);
+        AscendC::Mins(yLocal, yLocal, 1.0f, (int32_t)tileSize);
 
-        // Compute x^2
-        AscendC::Mul(tmp2, tmp1, tmp1, this->tileLength);
-        // Compute x^3
-        AscendC::Mul(zLocal, tmp2, tmp1, this->tileLength);
-        // 0.044715 * x^3
-        AscendC::Muls(zLocal, zLocal, 0.044715f, this->tileLength);
-        // x + 0.044715*x^3
-        AscendC::Add(zLocal, tmp1, zLocal, this->tileLength);
-        // sqrt(2/pi) = 0.7978845608
-        AscendC::Muls(zLocal, zLocal, 0.7978845608f, this->tileLength);
-        // tanh
-        for (uint32_t i = 0; i < this->tileLength; i++) {
-            float val = zLocal.GetValue(i);
-            // tanh approximation
-            float ep = 1.0f;
-            float en = 1.0f;
-            float absval = val > 0 ? val : -val;
-            // Use polynomial approximation for exp for speed, or direct computation
-            // Simple: tanh(x) = (exp(2x)-1)/(exp(2x)+1)
-            float e2x;
-            float tv = 2.0f * val;
-            // Clamp to avoid overflow
-            if (tv > 10.0f) tv = 10.0f;
-            if (tv < -10.0f) tv = -10.0f;
-            // exp approximation using iterations
-            e2x = 1.0f + tv + tv*tv*0.5f + tv*tv*tv/6.0f + tv*tv*tv*tv/24.0f + tv*tv*tv*tv*tv/120.0f + tv*tv*tv*tv*tv*tv/720.0f;
-            if (e2x < 0.0f) e2x = 0.0001f;
-            float tanhVal = (e2x - 1.0f) / (e2x + 1.0f);
-            tmp2.SetValue(i, tanhVal);
-        }
-        // 1 + tanh(...)
-        AscendC::Adds(zLocal, tmp2, 1.0f, this->tileLength);
-        // 0.5 * x
-        AscendC::Muls(tmp2, tmp1, 0.5f, this->tileLength);
-        // result = 0.5*x * (1 + tanh(...))
-        AscendC::Mul(zLocal, tmp2, zLocal, this->tileLength);
+        // 4. GELU (tanh approximation)
+        // GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        const float SQRT_2_OVER_PI = 0.7978845608028654f;
+        const float GELU_COEFF = 0.044715f;
 
-        outQueueZ.EnQue<float>(zLocal);
-        inQueueX.FreeTensor(xLocal);
-    }
-    __aicore__ inline void CopyOut(int32_t progress)
-    {
-        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
-        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
-        outQueueZ.FreeTensor(zLocal);
+        AscendC::Mul(tmp, yLocal, yLocal, (int32_t)tileSize);          // x^2
+        AscendC::Mul(tmp, tmp, yLocal, (int32_t)tileSize);             // x^3
+        AscendC::Muls(tmp, tmp, GELU_COEFF, (int32_t)tileSize);        // 0.044715 * x^3
+        AscendC::Add(tmp, tmp, yLocal, (int32_t)tileSize);             // x + 0.044715*x^3
+        AscendC::Muls(tmp, tmp, SQRT_2_OVER_PI, (int32_t)tileSize);    // inner
+        AscendC::Tanh(tmp, tmp, (int32_t)tileSize);                    // tanh(inner)
+        AscendC::Adds(tmp, tmp, 1.0f, (int32_t)tileSize);              // 1 + tanh(inner)
+        AscendC::Mul(yLocal, yLocal, tmp, (int32_t)tileSize);          // x * (1 + tanh(inner))
+        AscendC::Muls(yLocal, yLocal, 0.5f, (int32_t)tileSize);        // 0.5 * x * (1 + tanh(inner))
+
+        outQueue.EnQue(yLocal);
+        inQueue.FreeTensor(xIn);
+
+        // CopyOut
+        AscendC::LocalTensor<float> yOut = outQueue.DeQue<float>();
+        AscendC::DataCopyExtParams copyOutParams;
+        copyOutParams.blockCount = 1;
+        copyOutParams.blockLen = tileSize * (uint32_t)sizeof(float);
+        copyOutParams.srcStride = 0;
+        copyOutParams.dstStride = 0;
+        copyOutParams.rsv = 0;
+        AscendC::DataCopyPad(yGm[offset], yOut, copyOutParams);
+        outQueue.FreeTensor(yOut);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> sumBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
     AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
     AscendC::GlobalTensor<float> sumGm;
-    AscendC::GlobalTensor<float> zGm;
-    uint32_t blockLength;
-    uint32_t tileNum;
-    uint32_t tileLength;
-    uint32_t outChannels;
+    uint32_t startRow;
+    uint32_t rowsThisCore;
+    uint32_t channelSize;
     uint32_t spatialSize;
+    uint32_t rowTileSize;
 };
 
-extern "C" __global__ __aicore__ void conv3d_leaky_relu_sum_clamp_gelu_custom(GM_ADDR x, GM_ADDR sumTensor, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv3d_leaky_relu_sum_clamp_gelu_custom(
+    GM_ADDR x, GM_ADDR sum_tensor, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConv3dLeakyReluSumClampGelu op;
-    op.Init(x, sumTensor, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.outChannels, tiling_data.spatialSize);
+    KernelFusedOp op;
+    op.Init(x, sum_tensor, y, tiling_data.totalRows, tiling_data.channelSize,
+            tiling_data.spatialSize, tiling_data.rowTileSize);
     op.Process();
 }

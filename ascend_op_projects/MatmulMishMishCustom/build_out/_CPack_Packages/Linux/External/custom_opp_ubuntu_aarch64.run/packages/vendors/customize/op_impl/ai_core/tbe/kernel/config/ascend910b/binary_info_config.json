@@ -15,7 +15,7 @@
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
@@ -31,8 +31,8 @@
           "MatmulMishMishCustom/d=1,p=1/0,2/0,2",
           "MatmulMishMishCustom/d=1,p=0/0,2/0,2"
         ],
-        "binPath": "ascend910b/matmul_mish_mish_custom/MatmulMishMishCustom_1865c3132db6951fbbb452695291827a.o",
-        "jsonPath": "ascend910b/matmul_mish_mish_custom/MatmulMishMishCustom_1865c3132db6951fbbb452695291827a.json"
+        "binPath": "ascend910b/matmul_mish_mish_custom/MatmulMishMishCustom_2b83b562bf7aa738612ee0dead7d0fd3.o",
+        "jsonPath": "ascend910b/matmul_mish_mish_custom/MatmulMishMishCustom_2b83b562bf7aa738612ee0dead7d0fd3.json"
       }
     ]
   }

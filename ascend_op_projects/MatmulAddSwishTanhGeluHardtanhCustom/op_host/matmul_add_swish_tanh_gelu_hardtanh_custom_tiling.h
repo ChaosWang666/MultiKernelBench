@@ -3,9 +3,8 @@
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(MatmulAddSwishTanhGeluHardtanhCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
-  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
-  TILING_DATA_FIELD_DEF(uint32_t, addValueLength);
+  TILING_DATA_FIELD_DEF(uint32_t, totalRows);
+  TILING_DATA_FIELD_DEF(uint32_t, cols);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(MatmulAddSwishTanhGeluHardtanhCustom, MatmulAddSwishTanhGeluHardtanhCustomTilingData)

@@ -26,33 +26,6 @@
                     "float"
                 ]
             }
-        ],
-        "attr_desc": [
-            {
-                "name": "dimD",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "channels",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "height",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "width",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "batchSize",
-                "param_type": "required",
-                "type": "int"
-            }
         ]
     }
 ]

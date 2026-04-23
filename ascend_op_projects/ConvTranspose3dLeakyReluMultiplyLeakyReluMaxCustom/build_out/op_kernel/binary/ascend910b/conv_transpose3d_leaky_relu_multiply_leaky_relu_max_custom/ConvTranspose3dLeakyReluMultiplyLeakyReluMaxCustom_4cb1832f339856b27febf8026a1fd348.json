@@ -8,14 +8,14 @@
  "kernelName": "ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom_4cb1832f339856b27febf8026a1fd348",
  "magic": "RT_DEV_BINARY_MAGIC_ELF_AIVEC",
  "memoryStamping": [],
- "opParaSize": 48,
+ "opParaSize": 24,
  "parameters": [
   null,
   null,
   null,
   null
  ],
- "sha256": "a720b85d4639692a1f80856ab88ec341fc3b2e683264de4f9240b14d3fac4ced",
+ "sha256": "3c7710a3e06590c5a82deba626b3d97e038f1f227bb7ffc08bd9eb41b17e8c77",
  "workspace": {
   "num": 1,
   "size": [

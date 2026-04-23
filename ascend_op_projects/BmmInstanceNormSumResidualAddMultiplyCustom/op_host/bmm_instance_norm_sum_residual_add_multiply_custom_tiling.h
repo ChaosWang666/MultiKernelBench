@@ -3,11 +3,8 @@
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(BmmInstanceNormSumResidualAddMultiplyCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
-  TILING_DATA_FIELD_DEF(uint32_t, inFeatures);
-  TILING_DATA_FIELD_DEF(uint32_t, outFeatures);
-  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
-  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+    TILING_DATA_FIELD_DEF(uint32_t, totalRows);
+    TILING_DATA_FIELD_DEF(uint32_t, rowLen);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(BmmInstanceNormSumResidualAddMultiplyCustom, BmmInstanceNormSumResidualAddMultiplyCustomTilingData)

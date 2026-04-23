@@ -15,11 +15,6 @@ extern "C" {
 /* funtion: aclnnConv3dMinSoftmaxCustomGetWorkspaceSize
  * parameters :
  * x : required
- * dimD : required
- * channels : required
- * height : required
- * width : required
- * batchSize : required
  * out : required
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
@@ -27,11 +22,6 @@ extern "C" {
 __attribute__((visibility("default")))
 aclnnStatus aclnnConv3dMinSoftmaxCustomGetWorkspaceSize(
     const aclTensor *x,
-    int64_t dimD,
-    int64_t channels,
-    int64_t height,
-    int64_t width,
-    int64_t batchSize,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);

@@ -2,22 +2,18 @@
 #include "gemm_batch_norm_scaling_softmax_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 4096;
+const uint32_t BLOCK_DIM = 20;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     GemmBatchNormScalingSoftmaxCustomTilingData tiling;
-    uint32_t batchSize = context->GetInputShape(0)->GetOriginShape().GetDim(0);
-    uint32_t inFeatures = context->GetInputShape(0)->GetOriginShape().GetDim(1);
-    uint32_t outFeatures = context->GetOutputShape(0)->GetOriginShape().GetDim(1);
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t totalRows = shape.GetDim(0);
+    uint32_t cols = shape.GetDim(1);
     context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_inFeatures(inFeatures);
-    tiling.set_outFeatures(outFeatures);
-    tiling.set_bnEps(1e-5f);
-    tiling.set_bnMomentum(0.1f);
-    tiling.set_scaleShape0(1);
+    tiling.set_totalRows(totalRows);
+    tiling.set_cols(cols);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -25,6 +21,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -36,11 +33,12 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-const auto inputDataType = context->GetInputDataType(0);
-context->SetOutputDataType(0, inputDataType);
-return ge::GRAPH_SUCCESS;
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class GemmBatchNormScalingSoftmaxCustom : public OpDef {

@@ -13,19 +13,11 @@
                 "type": [
                     "float"
                 ]
-            },
+            }
+        ],
+        "output_desc": [
             {
-                "name": "add_value",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "scale",
+                "name": "y",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -35,16 +27,16 @@
                 ]
             }
         ],
-        "output_desc": [
+        "attr": [
             {
-                "name": "z",
+                "name": "add_value",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "type": "float"
+            },
+            {
+                "name": "scale",
+                "param_type": "required",
+                "type": "float"
             }
         ]
     }

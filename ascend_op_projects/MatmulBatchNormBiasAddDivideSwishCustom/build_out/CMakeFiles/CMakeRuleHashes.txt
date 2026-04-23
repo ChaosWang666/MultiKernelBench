@@ -1,5 +1,5 @@
 # Hashes of file build rules.
-76ae18c9c8c20a82c074330706cb1e4f CMakeFiles/gen_version_info
+d057928ff2b786aa8673bda02c38b8fa CMakeFiles/gen_version_info
 a0d20403df74e1f67c483df37c8f2ecc CMakeFiles/modify_vendor
 99f2fa44440655789c483cfc8ae51d03 op_host/CMakeFiles/optiling_compat
 99a634b0173a5abf05df36132ff2b0a5 op_kernel/CMakeFiles/MatmulBatchNormBiasAddDivideSwishCustom_ascend910b

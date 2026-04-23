@@ -1,7 +1,7 @@
 
 [
     {
-        "op": "MatmulSumMaxAvgPoolLogSumExpLogSumExpCustom",
+        "op": "MatmulSumMaxAvgPoolLogSumExpLogSumExp",
         "language": "cpp",
         "input_desc": [
             {
@@ -15,7 +15,17 @@
                 ]
             },
             {
-                "name": "w",
+                "name": "w_sum",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "b_sum",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -27,7 +37,7 @@
         ],
         "output_desc": [
             {
-                "name": "y",
+                "name": "z",
                 "param_type": "required",
                 "format": [
                     "ND"

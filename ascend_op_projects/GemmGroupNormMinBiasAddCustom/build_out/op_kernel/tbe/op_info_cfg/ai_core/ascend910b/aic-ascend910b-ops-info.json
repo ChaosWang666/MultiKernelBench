@@ -23,6 +23,14 @@
             "shape":"all",
             "unknownshape_format":"ND"
         },
+        "input1":{
+            "dtype":"float32",
+            "format":"ND",
+            "name":"bias",
+            "paramType":"required",
+            "shape":"all",
+            "unknownshape_format":"ND"
+        },
         "needCheckSupport":{
             "flag":"false"
         },

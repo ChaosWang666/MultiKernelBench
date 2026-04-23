@@ -2,31 +2,34 @@
 #include "conv3d_min_softmax_custom_tiling.h"
 #include "register/op_def_registry.h"
 
-namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 8;
 
+namespace optiling {
+const uint32_t BLOCK_DIM = 20;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv3dMinSoftmaxCustomTilingData tiling;
+    auto inputShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = (uint32_t)inputShape.GetDim(0);
+    uint32_t C = (uint32_t)inputShape.GetDim(1);
+    uint32_t D = (uint32_t)inputShape.GetDim(2);
+    uint32_t H = (uint32_t)inputShape.GetDim(3);
+    uint32_t W = (uint32_t)inputShape.GetDim(4);
 
-    auto attrs = context->GetAttrs();
-    uint32_t dimD = *(attrs->GetAttrPointer<uint32_t>(0));
-    uint32_t channels = *(attrs->GetAttrPointer<uint32_t>(1));
-    uint32_t height = *(attrs->GetAttrPointer<uint32_t>(2));
-    uint32_t width = *(attrs->GetAttrPointer<uint32_t>(3));
-    uint32_t batchSize = *(attrs->GetAttrPointer<uint32_t>(4));
+    uint32_t totalSlices = N * H;
+    uint32_t blockDim = BLOCK_DIM;
+    if (totalSlices < blockDim) {
+        blockDim = totalSlices;
+    }
+    uint32_t slicesPerCore = (totalSlices + blockDim - 1) / blockDim;
 
-    uint32_t totalOutput = batchSize * channels * height * width;
-
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_channels(channels);
-    tiling.set_dimD(dimD);
-    tiling.set_height(height);
-    tiling.set_width(width);
-    tiling.set_totalOutput(totalOutput);
-    tiling.set_tileNum(TILE_NUM);
+    context->SetBlockDim(blockDim);
+    tiling.set_N(N);
+    tiling.set_C(C);
+    tiling.set_D(D);
+    tiling.set_H(H);
+    tiling.set_W(W);
+    tiling.set_totalSlices(totalSlices);
+    tiling.set_slicesPerCore(slicesPerCore);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
@@ -36,19 +39,17 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
+
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-
-    auto attrs = context->GetAttrs();
-    uint32_t channels = *(attrs->GetAttrPointer<uint32_t>(1));
-    uint32_t height = *(attrs->GetAttrPointer<uint32_t>(2));
-    uint32_t width = *(attrs->GetAttrPointer<uint32_t>(3));
-    uint32_t batchSize = *(attrs->GetAttrPointer<uint32_t>(4));
-
-    *y_shape = gert::Shape({(int64_t)batchSize, (int64_t)channels, (int64_t)height, (int64_t)width});
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, x_shape->GetDim(1));
+    y_shape->SetDim(2, x_shape->GetDim(3));
+    y_shape->SetDim(3, x_shape->GetDim(4));
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -58,6 +59,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class Conv3dMinSoftmaxCustom : public OpDef {
@@ -74,11 +76,6 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("dimD").AttrType(REQUIRED).Int();
-        this->Attr("channels").AttrType(REQUIRED).Int();
-        this->Attr("height").AttrType(REQUIRED).Int();
-        this->Attr("width").AttrType(REQUIRED).Int();
-        this->Attr("batchSize").AttrType(REQUIRED).Int();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 

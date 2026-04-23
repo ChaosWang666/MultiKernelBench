@@ -2,29 +2,39 @@
 #include "conv_transpose3d_max_max_sum_custom_tiling.h"
 #include "register/op_def_registry.h"
 
-namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 8;
 
+namespace optiling {
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose3dMaxMaxSumCustomTilingData tiling;
-    const gert::StorageShape* xShape = context->GetInputShape(0);
-    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
-    uint32_t channels = xShape->GetStorageShape().GetDim(1);
-    uint32_t depth = xShape->GetStorageShape().GetDim(2);
-    uint32_t height = xShape->GetStorageShape().GetDim(3);
-    uint32_t width = xShape->GetStorageShape().GetDim(4);
-    uint32_t totalLength = batchSize * channels * depth * height * width;
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t B = static_cast<uint32_t>(shape.GetDim(0));
+    uint32_t C = static_cast<uint32_t>(shape.GetDim(1));
+    uint32_t D = static_cast<uint32_t>(shape.GetDim(2));
+    uint32_t H = static_cast<uint32_t>(shape.GetDim(3));
+    uint32_t W = static_cast<uint32_t>(shape.GetDim(4));
+    uint32_t DHW = D * H * W;
 
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_channels(channels);
-    tiling.set_depth(depth);
-    tiling.set_height(height);
-    tiling.set_width(width);
-    tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(TILE_NUM);
+    uint32_t tileLen = 128;
+    if (DHW == 0) DHW = 1;
+    uint32_t tilesPerBatch = (DHW + tileLen - 1) / tileLen;
+    uint32_t totalTiles = B * tilesPerBatch;
+    if (totalTiles == 0) totalTiles = 1;
+
+    uint32_t numCores = 20;
+    uint32_t tilesPerCore = (totalTiles + numCores - 1) / numCores;
+    if (tilesPerCore == 0) tilesPerCore = 1;
+    uint32_t usedCores = (totalTiles + tilesPerCore - 1) / tilesPerCore;
+    if (usedCores == 0) usedCores = 1;
+
+    context->SetBlockDim(usedCores);
+    tiling.set_B(B);
+    tiling.set_C(C);
+    tiling.set_DHW(DHW);
+    tiling.set_tileLen(tileLen);
+    tiling.set_tilesPerBatch(tilesPerBatch);
+    tiling.set_totalTiles(totalTiles);
+    tiling.set_tilesPerCore(tilesPerCore);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -33,25 +43,18 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
+
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x_shape = context->GetInputShape(0);
-    gert::Shape* y_shape = context->GetOutputShape(0);
-    // Input: [B, C, D, H, W]
-    // After MaxPool3d(2): [B, C, D/2, H/2, W/2]
-    // After MaxPool3d(3): [B, C, D/6, H/6, W/6]
-    // After sum(dim=1, keepdim=True): [B, 1, D/6, H/6, W/6]
-    int64_t B = x_shape->GetDim(0);
-    int64_t D = x_shape->GetDim(2);
-    int64_t H = x_shape->GetDim(3);
-    int64_t W = x_shape->GetDim(4);
-    y_shape->SetDimNum(5);
-    y_shape->SetDim(0, B);
-    y_shape->SetDim(1, 1);
-    y_shape->SetDim(2, D / 6);
-    y_shape->SetDim(3, H / 6);
-    y_shape->SetDim(4, W / 6);
+    const gert::Shape* xShape = context->GetInputShape(0);
+    gert::Shape* yShape = context->GetOutputShape(0);
+    yShape->SetDimNum(5);
+    yShape->SetDim(0, xShape->GetDim(0));
+    yShape->SetDim(1, 1);
+    yShape->SetDim(2, xShape->GetDim(2));
+    yShape->SetDim(3, xShape->GetDim(3));
+    yShape->SetDim(4, xShape->GetDim(4));
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -61,6 +64,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class ConvTranspose3dMaxMaxSumCustom : public OpDef {

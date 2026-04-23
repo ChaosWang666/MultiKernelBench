@@ -17,6 +17,10 @@ extern "C" {
  * x : required
  * bias : required
  * scale : required
+ * gamma : required
+ * beta : required
+ * numGroups : required
+ * eps : required
  * out : required
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
@@ -26,6 +30,10 @@ aclnnStatus aclnnConv2dAddScaleSigmoidGroupNormCustomGetWorkspaceSize(
     const aclTensor *x,
     const aclTensor *bias,
     const aclTensor *scale,
+    const aclTensor *gamma,
+    const aclTensor *beta,
+    int64_t numGroups,
+    double eps,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);

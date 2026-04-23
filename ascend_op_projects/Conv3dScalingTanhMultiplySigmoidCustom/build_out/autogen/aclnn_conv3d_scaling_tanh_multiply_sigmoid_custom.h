@@ -15,7 +15,7 @@ extern "C" {
 /* funtion: aclnnConv3dScalingTanhMultiplySigmoidCustomGetWorkspaceSize
  * parameters :
  * x : required
- * scalingFactor : required
+ * scale : required
  * bias : required
  * out : required
  * workspaceSize : size of workspace(output).
@@ -24,7 +24,7 @@ extern "C" {
 __attribute__((visibility("default")))
 aclnnStatus aclnnConv3dScalingTanhMultiplySigmoidCustomGetWorkspaceSize(
     const aclTensor *x,
-    const aclTensor *scalingFactor,
+    const aclTensor *scale,
     const aclTensor *bias,
     const aclTensor *out,
     uint64_t *workspaceSize,

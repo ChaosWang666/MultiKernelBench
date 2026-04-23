@@ -28,19 +28,20 @@ typedef struct {
 } OpSupportList;
 enum SocType {
     SOC_VERSION_ASCEND910A = 1,
-    SOC_VERSION_ASCEND910B = 2,
-    SOC_VERSION_ASCEND910_93 = 3,
-    SOC_VERSION_ASCEND950 = 4,
-    SOC_VERSION_ASCEND310P = 5,
-    SOC_VERSION_ASCEND310B = 6,
-    SOC_VERSION_BS9SX1A = 7,
-    SOC_VERSION_ASCEND610Lite = 8,
-    SOC_VERSION_MC61AM21A = 10, // 9 is deprecated
-    SOC_VERSION_MC62CM12A = 11,
-    SOC_VERSION_BS9SX2A = 12,
-    SOC_VERSION_ASCEND910_96 = 13,
-    SOC_VERSION_KIRINX90 = 14,
-    SOC_VERSION_KIRIN9030 = 15
+    SOC_VERSION_ASCEND910B,
+    SOC_VERSION_ASCEND910_93,
+    SOC_VERSION_ASCEND910_95,
+    SOC_VERSION_ASCEND310P,
+    SOC_VERSION_ASCEND310B,
+    SOC_VERSION_BS9SX1A,
+    SOC_VERSION_ASCEND610Lite,
+    SOC_VERSION_ASCEND910_55,
+    SOC_VERSION_MC61AM21A,
+    SOC_VERSION_MC62CM12A,
+    SOC_VERSION_BS9SX2A,
+    SOC_VERSION_ASCEND910_96,
+    SOC_VERSION_KIRINX90,
+    SOC_VERSION_KIRIN9030
 };
 enum NnopbaseAttrDtype {
     kNnopbaseBool = 0U,
@@ -127,11 +128,6 @@ extern bool __attribute__((weak)) NnopbaseMatchArgs(void *executor, uint64_t *wo
 
 aclnnStatus aclnnConv3dMinSoftmaxCustomGetWorkspaceSize(
     const aclTensor *x,
-    int64_t dimD,
-    int64_t channels,
-    int64_t height,
-    int64_t width,
-    int64_t batchSize,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor)
@@ -144,7 +140,7 @@ aclnnStatus aclnnConv3dMinSoftmaxCustomGetWorkspaceSize(
     const char *opType = "Conv3dMinSoftmaxCustom";
     char inputDesc[] = {1};
     char outputDesc[] = {1};
-    char attrDesc[] = {1, 1, 1, 1, 1};
+    char attrDesc[] = {};
 
     NNOPBASE_ASSERT_NOTNULL_RETVAL(x);
     NNOPBASE_ASSERT_NOTNULL_RETVAL(out);
@@ -162,11 +158,6 @@ aclnnStatus aclnnConv3dMinSoftmaxCustomGetWorkspaceSize(
         NnopbaseSetMatchArgsFlag(*executor);
     }
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddInput(*executor, x, 0));
-    NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddAttrWithDtype(*executor, static_cast<void*>(&dimD), sizeof(int64_t), 0, kNnopbaseInt));
-    NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddAttrWithDtype(*executor, static_cast<void*>(&channels), sizeof(int64_t), 1, kNnopbaseInt));
-    NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddAttrWithDtype(*executor, static_cast<void*>(&height), sizeof(int64_t), 2, kNnopbaseInt));
-    NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddAttrWithDtype(*executor, static_cast<void*>(&width), sizeof(int64_t), 3, kNnopbaseInt));
-    NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddAttrWithDtype(*executor, static_cast<void*>(&batchSize), sizeof(int64_t), 4, kNnopbaseInt));
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddOutput(*executor, out, 0));
     if (NnopbaseMatchArgs != NULL) {
         if (NnopbaseMatchArgs(*executor, workspaceSize)) {

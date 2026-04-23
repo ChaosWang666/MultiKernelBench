@@ -1,77 +1,100 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConvTranspose3dSwishGroupNormHardSwish {
+class KernelHardSwish {
 public:
-    __aicore__ inline KernelConvTranspose3dSwishGroupNormHardSwish() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batch, uint32_t inChannels, uint32_t outChannels,
-                                uint32_t depth, uint32_t height, uint32_t width, uint32_t kernelSize,
-                                uint32_t stride, uint32_t padding, uint32_t groups, float eps)
+    __aicore__ inline KernelHardSwish() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileLength)
     {
-        this->batch = batch;
-        this->inChannels = inChannels;
-        this->outChannels = outChannels;
-        this->depth = depth;
-        this->height = height;
-        this->width = width;
-        this->kernelSize = kernelSize;
-        this->stride = stride;
-        this->padding = padding;
-        this->groups = groups;
-        this->eps = eps;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
 
-        this->blockLength = batch * inChannels * depth * height * width / AscendC::GetBlockNum();
-        this->totalElements = batch * inChannels * depth * height * width;
+        uint32_t baseLen = totalLength / blockNum;
+        uint32_t remainder = totalLength % blockNum;
 
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        uint32_t myStart;
+        uint32_t myLen;
+        if (blockIdx < remainder) {
+            myLen = baseLen + 1;
+            myStart = blockIdx * myLen;
+        } else {
+            myLen = baseLen;
+            myStart = remainder * (baseLen + 1) + (blockIdx - remainder) * baseLen;
+        }
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->blockLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->blockLength * sizeof(DTYPE_Y));
+        this->myLen = myLen;
+        this->tileLength = tileLength;
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + myStart, myLen);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + myStart, myLen);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(tmpBuf, tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(constBuf, tileLength * sizeof(DTYPE_X));
     }
 
     __aicore__ inline void Process()
     {
-        int32_t loopCount = 1; // Simplified for demonstration
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
+        uint32_t processed = 0;
+        while (processed < myLen) {
+            uint32_t remaining = myLen - processed;
+            uint32_t curLen = (remaining < tileLength) ? remaining : tileLength;
+            CopyIn(processed, curLen);
+            Compute(curLen);
+            CopyOut(processed, curLen);
+            processed += curLen;
         }
     }
 
 private:
-    __aicore__ inline void CopyIn(int32_t progress)
+    __aicore__ inline void CopyIn(uint32_t offset, uint32_t len)
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->blockLength], this->blockLength);
+        AscendC::DataCopyExtParams copyParams;
+        copyParams.blockCount = 1;
+        copyParams.blockLen = (uint32_t)(len * sizeof(DTYPE_X));
+        copyParams.srcStride = 0;
+        copyParams.dstStride = 0;
+        AscendC::DataCopyPadExtParams<DTYPE_X> padParams;
+        padParams.isPad = false;
+        padParams.leftPadding = 0;
+        padParams.rightPadding = 0;
+        padParams.paddingValue = 0;
+        AscendC::DataCopyPad(xLocal, xGm[offset], copyParams, padParams);
         inQueueX.EnQue(xLocal);
     }
 
-    __aicore__ inline void Compute(int32_t progress)
+    __aicore__ inline void Compute(uint32_t len)
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
         AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<DTYPE_X> tmp = tmpBuf.Get<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_X> cst = constBuf.Get<DTYPE_X>();
 
-        // Placeholder for actual computation logic
-        // In practice, this would involve:
-        // 1. ConvTranspose3d operation
-        // 2. Swish activation (sigmoid * input)
-        // 3. GroupNorm
-        // 4. HardSwish activation
+        AscendC::Adds(tmp, xLocal, (DTYPE_X)3.0f, len);
+        AscendC::Duplicate(cst, (DTYPE_X)6.0f, len);
+        AscendC::Min(tmp, tmp, cst, len);
+        AscendC::Duplicate(cst, (DTYPE_X)0.0f, len);
+        AscendC::Max(tmp, tmp, cst, len);
+        AscendC::Mul(yLocal, tmp, xLocal, len);
+        AscendC::Muls(yLocal, yLocal, (DTYPE_X)(1.0f / 6.0f), len);
 
-        // For now, just copy data as placeholder
-        AscendC::DataCopy(yLocal, xLocal, this->blockLength);
         outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
     }
 
-    __aicore__ inline void CopyOut(int32_t progress)
+    __aicore__ inline void CopyOut(uint32_t offset, uint32_t len)
     {
         AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
-        AscendC::DataCopy(yGm[progress * this->blockLength], yLocal, this->blockLength);
+        AscendC::DataCopyExtParams copyParams;
+        copyParams.blockCount = 1;
+        copyParams.blockLen = (uint32_t)(len * sizeof(DTYPE_Y));
+        copyParams.srcStride = 0;
+        copyParams.dstStride = 0;
+        AscendC::DataCopyPad(yGm[offset], yLocal, copyParams);
         outQueueY.FreeTensor(yLocal);
     }
 
@@ -79,29 +102,17 @@ private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> constBuf;
     AscendC::GlobalTensor<DTYPE_X> xGm;
     AscendC::GlobalTensor<DTYPE_Y> yGm;
-    uint32_t batch;
-    uint32_t inChannels;
-    uint32_t outChannels;
-    uint32_t depth;
-    uint32_t height;
-    uint32_t width;
-    uint32_t kernelSize;
-    uint32_t stride;
-    uint32_t padding;
-    uint32_t groups;
-    float eps;
-    uint32_t blockLength;
-    uint32_t totalElements;
+    uint32_t myLen;
+    uint32_t tileLength;
 };
 
-extern "C" __global__ __aicore__ void conv_transpose3d_swish_group_norm_hard_swish_custom(
-    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv_transpose3d_swish_group_norm_hard_swish_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConvTranspose3dSwishGroupNormHardSwish op;
-    op.Init(x, y, tiling_data.batch, tiling_data.inChannels, tiling_data.outChannels,
-            tiling_data.depth, tiling_data.height, tiling_data.width, tiling_data.kernelSize,
-            tiling_data.stride, tiling_data.padding, tiling_data.groups, tiling_data.eps);
+    KernelHardSwish op;
+    op.Init(x, y, tiling_data.totalLength, tiling_data.tileLength);
     op.Process();
 }

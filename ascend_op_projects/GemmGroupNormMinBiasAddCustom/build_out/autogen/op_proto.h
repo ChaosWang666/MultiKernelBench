@@ -8,6 +8,7 @@ namespace ge {
 
 REG_OP(GemmGroupNormMinBiasAddCustom)
     .INPUT(x, ge::TensorType::ALL())
+    .INPUT(bias, ge::TensorType::ALL())
     .OUTPUT(z, ge::TensorType::ALL())
     .OP_END_FACTORY_REG(GemmGroupNormMinBiasAddCustom);
 

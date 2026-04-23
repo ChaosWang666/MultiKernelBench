@@ -1,5 +1,5 @@
 # Hashes of file build rules.
-b301569ff87cb6b41eedc9694b0c6367 CMakeFiles/gen_version_info
+3233dbcd050ecda3a5847e80dafc74db CMakeFiles/gen_version_info
 1bca349976353edd6c566be44947f0e2 CMakeFiles/modify_vendor
 8943b8d3a11e276f01445a853bd06d28 op_host/CMakeFiles/optiling_compat
 becd812654e8fa79666814b9efdc078e op_kernel/CMakeFiles/ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom_ascend910b

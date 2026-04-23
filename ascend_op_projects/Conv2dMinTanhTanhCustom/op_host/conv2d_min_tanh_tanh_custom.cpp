@@ -3,24 +3,27 @@
 #include "register/op_def_registry.h"
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 16;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv2dMinTanhTanhCustomTilingData tiling;
-    const gert::StorageShape* xShape = context->GetInputShape(0);
-    uint32_t batch = xShape->GetStorageShape().GetDim(0);
-    uint32_t channels = xShape->GetStorageShape().GetDim(1);
-    uint32_t height = xShape->GetStorageShape().GetDim(2);
-    uint32_t width = xShape->GetStorageShape().GetDim(3);
-    uint32_t spatialSize = height * width;
-    uint32_t totalLength = batch * spatialSize;
-    
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(TILE_NUM);
-    tiling.set_channels(channels);
-    tiling.set_spatialSize(spatialSize);
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = shape.GetDim(0);
+    uint32_t C = shape.GetDim(1);
+    uint32_t H = shape.GetDim(2);
+    uint32_t W = shape.GetDim(3);
+    uint32_t HW = H * W;
+
+    uint32_t blockDim = 32;
+    if (N < blockDim) {
+        blockDim = N;
+    }
+    uint32_t batchPerBlock = (N + blockDim - 1) / blockDim;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_batchPerBlock(batchPerBlock);
+    tiling.set_channels(C);
+    tiling.set_hw(HW);
+    tiling.set_totalBatch(N);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -34,7 +37,6 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    // Output: [batch, 1, H, W]
     y_shape->SetDimNum(4);
     y_shape->SetDim(0, x_shape->GetDim(0));
     y_shape->SetDim(1, 1);
@@ -42,6 +44,7 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
     y_shape->SetDim(3, x_shape->GetDim(3));
     return GRAPH_SUCCESS;
 }
+
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
     const auto inputDataType = context->GetInputDataType(0);

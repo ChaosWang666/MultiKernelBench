@@ -1,5 +1,5 @@
 # Hashes of file build rules.
-0eb9fe2f065639334ff8299de6f6cc86 CMakeFiles/gen_version_info
+82f96d3827048201db0e860522392519 CMakeFiles/gen_version_info
 bd18399bd5f8b84127de00bcfb2ffabb CMakeFiles/modify_vendor
 275f133f8de0156c9dbffd115927822b op_host/CMakeFiles/optiling_compat
 c27a4bf6e5e3ec247a894d35ecf07fd3 op_kernel/CMakeFiles/Conv2dAddScaleSigmoidGroupNormCustom_ascend910b

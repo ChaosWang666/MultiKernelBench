@@ -4,26 +4,25 @@
 
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
+const uint32_t BLOCK_DIM = 40;
+const uint32_t TILE_ROWS = 240;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose3dMaxPoolSoftmaxSubtractSwishMaxCustomTilingData tiling;
-    const gert::Shape* inputShape = context->GetInputShape(0);
-    const std::vector<int64_t>& shape = inputShape->GetOriginShape().GetShapeVector();
-    tiling.set_batchSize(shape[0]);
-    tiling.set_inChannels(shape[1]);
-    tiling.set_outChannels(shape[1]);
-    tiling.set_depth(shape[2]);
-    tiling.set_height(shape[3]);
-    tiling.set_width(shape[4]);
-    tiling.set_kernelSize(3);
-    tiling.set_stride(2);
-    tiling.set_padding(1);
-    tiling.set_outputPadding(1);
-    tiling.set_poolKernelSize(2);
-    tiling.set_poolStride(2);
-    tiling.set_poolPadding(0);
-    context->SetBlockDim(BLOCK_DIM);
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    uint32_t totalElems = xShape->GetOriginShape().GetShapeSize();
+    uint32_t totalRows = totalElems / 16;
+
+    uint32_t blockDim = BLOCK_DIM;
+    if (totalRows < blockDim) {
+        blockDim = (totalRows == 0) ? 1 : totalRows;
+    }
+    uint32_t rowsPerCore = (totalRows + blockDim - 1) / blockDim;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_totalRows(totalRows);
+    tiling.set_rowsPerCore(rowsPerCore);
+    tiling.set_tileRows(TILE_ROWS);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -36,16 +35,18 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x1_shape = context->GetInputShape(0);
+    const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x1_shape;
+    y_shape->SetDimNum(1);
+    int64_t totalRows = x_shape->GetDim(0);
+    y_shape->SetDim(0, totalRows);
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-const auto inputDataType = context->GetInputDataType(0);
-context->SetOutputDataType(0, inputDataType);
-return ge::GRAPH_SUCCESS;
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
 }
 }
 
@@ -58,9 +59,14 @@ public:
         this->Input("x")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_NCDHW})
-            .UnknownShapeFormat({ge::FORMAT_NCDHW});
-        this->Output("z")
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("sub")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
@@ -71,7 +77,6 @@ public:
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
-
     }
 };
 

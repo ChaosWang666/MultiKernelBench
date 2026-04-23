@@ -5,12 +5,12 @@
       "int64Mode": false,
       "simplifiedKeyMode": 0,
       "simplifiedKey": [
-        "Conv2dHardSwishReluCustom/d=0,p=1/0,2/0,2",
-        "Conv2dHardSwishReluCustom/d=0,p=0/0,2/0,2",
-        "Conv2dHardSwishReluCustom/d=1,p=1/0,2/0,2",
-        "Conv2dHardSwishReluCustom/d=1,p=0/0,2/0,2"
+        "Conv2dHardSwishReluCustom/d=0,p=1/0,2/0,2/0,2/0,2",
+        "Conv2dHardSwishReluCustom/d=0,p=0/0,2/0,2/0,2/0,2",
+        "Conv2dHardSwishReluCustom/d=1,p=1/0,2/0,2/0,2/0,2",
+        "Conv2dHardSwishReluCustom/d=1,p=0/0,2/0,2/0,2/0,2"
       ],
-      "staticKey": "ed019adc02c4ef2c154076e56faf06976be9b74c8438bfd28b1cccb0b7635e35,174b597c066dd43443d16f1cbf342fb69d122ca8a248e828c078b208c9bfe6f7",
+      "staticKey": "e7ee671befb09f01a579e6b447052e4f8660d41790aaa0c02a813a8d991f88b7,10ece6b820443a55859e93e431b9869965527700534b902d054c8d6c436c9db4",
       "inputs": [
         {
           "name": "x",
@@ -22,11 +22,33 @@
             -2
           ],
           "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "weight",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "bias",
+          "index": 2,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
         }
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "dtype": "float32",
           "format": "ND",
@@ -42,7 +64,7 @@
       "deterministic": "ignore",
       "optionalOutputMode": "gen_placeholder",
       "binInfo": {
-        "jsonFilePath": "ascend910b/conv2d_hard_swish_relu_custom/Conv2dHardSwishReluCustom_99d98277330c41d2dafa87a3b336416f.json"
+        "jsonFilePath": "ascend910b/conv2d_hard_swish_relu_custom/Conv2dHardSwishReluCustom_6712481d773ed7b1cfc8d0a761adc216.json"
       }
     }
   ]

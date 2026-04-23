@@ -3,114 +3,94 @@
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConv2dGroupNormScaleMaxPoolClamp {
+class KernelClamp {
 public:
-    __aicore__ inline KernelConv2dGroupNormScaleMaxPoolClamp() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR convWeight, GM_ADDR convBias,
-                                GM_ADDR groupNormWeight, GM_ADDR groupNormBias, GM_ADDR scale,
-                                float clampMin, float clampMax,
-                                uint32_t batchSize, uint32_t inChannels, uint32_t outChannels,
-                                uint32_t height, uint32_t width, uint32_t kernelSize,
-                                uint32_t numGroups, uint32_t maxpoolKernelSize)
+    __aicore__ inline KernelClamp() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t tileLength)
     {
-        this->batchSize = batchSize;
-        this->inChannels = inChannels;
-        this->outChannels = outChannels;
-        this->height = height;
-        this->width = width;
-        this->kernelSize = kernelSize;
-        this->numGroups = numGroups;
-        this->maxpoolKernelSize = maxpoolKernelSize;
-        this->clampMin = clampMin;
-        this->clampMax = clampMax;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t basePerBlock = totalLength / blockNum;
+        uint32_t remainder = totalLength % blockNum;
+        this->myLength = basePerBlock + (blockIdx < remainder ? 1 : 0);
+        uint32_t blockStart = blockIdx * basePerBlock + (blockIdx < remainder ? blockIdx : remainder);
+        this->tileLength = tileLength;
 
-        this->totalElements = batchSize * outChannels * height * width;
-        this->blockLength = this->totalElements / AscendC::GetBlockNum();
-
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ float *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-
-        pipe.InitBuffer(inQueue, BUFFER_NUM, this->blockLength * sizeof(float));
-        pipe.InitBuffer(outQueue, BUFFER_NUM, this->blockLength * sizeof(float));
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + blockStart, this->myLength);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + blockStart, this->myLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
     }
 
     __aicore__ inline void Process()
     {
-        // Simulate processing steps: conv -> group norm -> scale -> maxpool -> clamp
-        int32_t loopCount = 1; // Simplified for demonstration
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
+        uint32_t offset = 0;
+        while (offset < this->myLength) {
+            uint32_t remaining = this->myLength - offset;
+            uint32_t curLen = (remaining >= this->tileLength) ? this->tileLength : remaining;
+            CopyIn(offset, curLen);
+            Compute(curLen);
+            CopyOut(offset, curLen);
+            offset += curLen;
         }
     }
 
 private:
-    __aicore__ inline void CopyIn(int32_t progress)
+    __aicore__ inline void CopyIn(uint32_t offset, uint32_t len)
     {
-        AscendC::LocalTensor<float> local = inQueue.AllocTensor<float>();
-        AscendC::DataCopy(local, xGm[progress * this->blockLength], this->blockLength);
-        inQueue.EnQue(local);
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopyExtParams copyParams;
+        copyParams.blockCount = 1;
+        copyParams.blockLen = len * sizeof(DTYPE_X);
+        copyParams.srcStride = 0;
+        copyParams.dstStride = 0;
+        copyParams.rsv = 0;
+        AscendC::DataCopyPadExtParams<DTYPE_X> padParams;
+        padParams.isPad = false;
+        padParams.leftPadding = 0;
+        padParams.rightPadding = 0;
+        padParams.paddingValue = 0;
+        AscendC::DataCopyPad(xLocal, xGm[offset], copyParams, padParams);
+        inQueueX.EnQue(xLocal);
     }
 
-    __aicore__ inline void Compute(int32_t progress)
+    __aicore__ inline void Compute(uint32_t len)
     {
-        AscendC::LocalTensor<float> local = inQueue.DeQue<float>();
-        AscendC::LocalTensor<float> result = outQueue.AllocTensor<float>();
-
-        // Placeholder for actual computation logic
-        // In practice, this would involve:
-        // 1. Convolution
-        // 2. Group normalization
-        // 3. Scaling
-        // 4. Max pooling
-        // 5. Clamping
-
-        // For now, just copy data
-        AscendC::Copy(result, local, this->blockLength);
-
-        outQueue.EnQue<float>(result);
-        inQueue.FreeTensor(local);
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        AscendC::Mins(zLocal, xLocal, (DTYPE_X)1.0f, len);
+        AscendC::Maxs(zLocal, zLocal, (DTYPE_X)0.0f, len);
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        inQueueX.FreeTensor(xLocal);
     }
 
-    __aicore__ inline void CopyOut(int32_t progress)
+    __aicore__ inline void CopyOut(uint32_t offset, uint32_t len)
     {
-        AscendC::LocalTensor<float> local = outQueue.DeQue<float>();
-        AscendC::DataCopy(yGm[progress * this->blockLength], local, this->blockLength);
-        outQueue.FreeTensor(local);
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
+        AscendC::DataCopyExtParams copyParams;
+        copyParams.blockCount = 1;
+        copyParams.blockLen = len * sizeof(DTYPE_Z);
+        copyParams.srcStride = 0;
+        copyParams.dstStride = 0;
+        copyParams.rsv = 0;
+        AscendC::DataCopyPad(zGm[offset], zLocal, copyParams);
+        outQueueZ.FreeTensor(zLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
-
-    uint32_t batchSize;
-    uint32_t inChannels;
-    uint32_t outChannels;
-    uint32_t height;
-    uint32_t width;
-    uint32_t kernelSize;
-    uint32_t numGroups;
-    uint32_t maxpoolKernelSize;
-    float clampMin;
-    float clampMax;
-    uint32_t totalElements;
-    uint32_t blockLength;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
+    uint32_t myLength;
+    uint32_t tileLength;
 };
 
 extern "C" __global__ __aicore__ void conv2d_group_norm_scale_max_pool_clamp_custom(
-    GM_ADDR x, GM_ADDR y, GM_ADDR convWeight, GM_ADDR convBias,
-    GM_ADDR groupNormWeight, GM_ADDR groupNormBias, GM_ADDR scale,
-    GM_ADDR workspace, GM_ADDR tiling, float clampMin, float clampMax) {
+    GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConv2dGroupNormScaleMaxPoolClamp op;
-    op.Init(x, y, convWeight, convBias, groupNormWeight, groupNormBias, scale,
-            clampMin, clampMax,
-            tiling_data.batchSize, tiling_data.inChannels, tiling_data.outChannels,
-            tiling_data.height, tiling_data.width, tiling_data.kernelSize,
-            tiling_data.numGroups, tiling_data.maxpoolKernelSize);
+    KernelClamp op;
+    op.Init(x, z, tiling_data.totalLength, tiling_data.tileLength);
     op.Process();
 }

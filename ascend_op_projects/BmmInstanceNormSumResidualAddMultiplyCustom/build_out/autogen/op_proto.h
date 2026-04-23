@@ -9,8 +9,6 @@ namespace ge {
 REG_OP(BmmInstanceNormSumResidualAddMultiplyCustom)
     .INPUT(x, ge::TensorType::ALL())
     .INPUT(y, ge::TensorType::ALL())
-    .INPUT(weight, ge::TensorType::ALL())
-    .INPUT(bias, ge::TensorType::ALL())
     .OUTPUT(z, ge::TensorType::ALL())
     .OP_END_FACTORY_REG(BmmInstanceNormSumResidualAddMultiplyCustom);
 

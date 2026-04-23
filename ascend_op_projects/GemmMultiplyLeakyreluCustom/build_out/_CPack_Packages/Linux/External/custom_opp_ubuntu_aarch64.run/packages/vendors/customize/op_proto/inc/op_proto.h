@@ -8,11 +8,9 @@ namespace ge {
 
 REG_OP(GemmMultiplyLeakyreluCustom)
     .INPUT(x, ge::TensorType::ALL())
-    .INPUT(weight, ge::TensorType::ALL())
-    .INPUT(bias, ge::TensorType::ALL())
-    .OUTPUT(z, ge::TensorType::ALL())
+    .OUTPUT(y, ge::TensorType::ALL())
     .REQUIRED_ATTR(multiplier, Float)
-    .REQUIRED_ATTR(negativeSlope, Float)
+    .REQUIRED_ATTR(negative_slope, Float)
     .OP_END_FACTORY_REG(GemmMultiplyLeakyreluCustom);
 
 }

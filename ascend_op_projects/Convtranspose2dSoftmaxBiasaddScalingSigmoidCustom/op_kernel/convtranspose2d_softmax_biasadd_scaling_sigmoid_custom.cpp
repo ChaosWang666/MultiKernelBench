@@ -3,193 +3,151 @@
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelSoftmaxBiasScaleSigmoid {
+class KernelBiasScaleSigmoid {
 public:
-    __aicore__ inline KernelSoftmaxBiasScaleSigmoid() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR z,
-                                 uint32_t batchSize, uint32_t channels,
-                                 uint32_t height, uint32_t width,
-                                 float scalingFactor, uint32_t totalLength, uint32_t tileNum)
+    __aicore__ inline KernelBiasScaleSigmoid() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t totalNC, uint32_t C, uint32_t HW,
+                                 uint32_t tileSize, float scalingFactor)
     {
-        this->batchSize = batchSize;
-        this->channels = channels;
-        this->height = height;
-        this->width = width;
+        this->C = C;
+        this->HW = HW;
+        this->tileSize = tileSize;
         this->scalingFactor = scalingFactor;
-        this->hw = height * width;
-        
-        // Each block processes a portion of spatial locations across all batches
-        // Total spatial work items = batchSize * height * width
-        uint32_t totalSpatial = batchSize * hw;
-        uint32_t numBlocks = AscendC::GetBlockNum();
+
+        uint32_t coreNum = AscendC::GetBlockNum();
         uint32_t blockIdx = AscendC::GetBlockIdx();
-        
-        this->spatialStart = (totalSpatial / numBlocks) * blockIdx;
-        uint32_t spatialEnd = (blockIdx == numBlocks - 1) ? totalSpatial : (totalSpatial / numBlocks) * (blockIdx + 1);
-        this->spatialCount = spatialEnd - this->spatialStart;
-        
-        // Align channels to 32 bytes / 4 = 8 floats
-        this->channelsAligned = ((channels + 7) / 8) * 8;
-        
-        xGm.SetGlobalBuffer((__gm__ float*)x, totalLength);
-        biasGm.SetGlobalBuffer((__gm__ float*)bias, channels);
-        zGm.SetGlobalBuffer((__gm__ float*)z, totalLength);
-        
-        // We process one spatial location at a time, need channelsAligned buffer
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->channelsAligned * sizeof(float));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->channelsAligned * sizeof(float));
-        pipe.InitBuffer(tmpBuf1, BUFFER_NUM, this->channelsAligned * sizeof(float));
-        pipe.InitBuffer(tmpBuf2, BUFFER_NUM, this->channelsAligned * sizeof(float));
-        pipe.InitBuffer(biasBuf, 1, this->channelsAligned * sizeof(float));
-        
-        // Load bias into local buffer
-        AscendC::LocalTensor<float> biasLocal = biasBuf.AllocTensor<float>();
-        // bias shape is (channels, 1, 1), stored contiguously
-        AscendC::DataCopy(biasLocal, biasGm[0], this->channelsAligned);
-        biasBuf.EnQue(biasLocal);
+        uint32_t workPerCore = (totalNC + coreNum - 1) / coreNum;
+        uint32_t sU = blockIdx * workPerCore;
+        uint32_t eU = sU + workPerCore;
+        if (eU > totalNC) eU = totalNC;
+        if (sU > totalNC) sU = totalNC;
+        this->startUnit = sU;
+        this->endUnit = eU;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias);
+        yGm.SetGlobalBuffer((__gm__ float*)y);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileSize * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, tileSize * sizeof(float));
+
+        uint32_t biasAlignBytes = ((C * sizeof(float) + 31) / 32) * 32;
+        pipe.InitBuffer(biasBuf, biasAlignBytes);
+        pipe.InitBuffer(onesBuf, tileSize * sizeof(float));
     }
-    
+
     __aicore__ inline void Process()
     {
-        for (uint32_t i = 0; i < this->spatialCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
+        if (startUnit >= endUnit) return;
+
+        AscendC::LocalTensor<float> biasLocal = biasBuf.Get<float>();
+        AscendC::LocalTensor<float> onesLocal = onesBuf.Get<float>();
+
+        AscendC::DataCopyExtParams biasParams;
+        biasParams.blockCount = 1;
+        biasParams.blockLen = static_cast<uint32_t>(C * sizeof(float));
+        biasParams.srcStride = 0;
+        biasParams.dstStride = 0;
+        AscendC::DataCopyPadExtParams<float> biasPadParams;
+        biasPadParams.isPad = false;
+        biasPadParams.leftPadding = 0;
+        biasPadParams.rightPadding = 0;
+        biasPadParams.paddingValue = 0.0f;
+        AscendC::DataCopyPad(biasLocal, biasGm, biasParams, biasPadParams);
+
+        AscendC::Duplicate<float>(onesLocal, 1.0f, tileSize);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        for (uint32_t unit = startUnit; unit < endUnit; unit++) {
+            uint32_t c = unit % C;
+            uint64_t baseOffset = (uint64_t)unit * HW;
+            float biasVal = biasLocal.GetValue(c);
+
+            uint32_t remaining = HW;
+            uint32_t processed = 0;
+            while (remaining > 0) {
+                uint32_t thisTile = (remaining > tileSize) ? tileSize : remaining;
+                CopyIn(baseOffset + processed, thisTile);
+                Compute(thisTile, biasVal, onesLocal);
+                CopyOut(baseOffset + processed, thisTile);
+                processed += thisTile;
+                remaining -= thisTile;
+            }
         }
     }
 
 private:
-    __aicore__ inline uint32_t GetGlobalOffset(uint32_t spatialIdx)
-    {
-        // spatialIdx is local index, actual = spatialStart + spatialIdx
-        uint32_t actualSpatial = this->spatialStart + spatialIdx;
-        uint32_t b = actualSpatial / this->hw;
-        uint32_t spatialPos = actualSpatial % this->hw;
-        uint32_t h = spatialPos / this->width;
-        uint32_t w = spatialPos % this->width;
-        // NCHW layout: offset = b*C*H*W + 0*H*W + h*W + w
-        // We need to gather C values at stride H*W
-        return b * this->channels * this->hw + h * this->width + w;
-    }
-    
-    __aicore__ inline void CopyIn(uint32_t progress)
+    __aicore__ inline void CopyIn(uint64_t offset, uint32_t size)
     {
         AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        uint32_t baseOffset = GetGlobalOffset(progress);
-        
-        // Gather channel values: x[b, c, h, w] for all c
-        // Stride between channels is hw
-        for (uint32_t c = 0; c < this->channels; c++) {
-            // Use scalar copy approach - copy one element at a time
-            float val = *(((__gm__ float*)xGm.GetPhyAddr()) + baseOffset + c * this->hw);
-            xLocal.SetValue(c, val);
-        }
-        // Pad remaining
-        for (uint32_t c = this->channels; c < this->channelsAligned; c++) {
-            xLocal.SetValue(c, 0.0f);
-        }
+        AscendC::DataCopyExtParams params;
+        params.blockCount = 1;
+        params.blockLen = static_cast<uint32_t>(size * sizeof(float));
+        params.srcStride = 0;
+        params.dstStride = 0;
+        AscendC::DataCopyPadExtParams<float> padParams;
+        padParams.isPad = false;
+        padParams.leftPadding = 0;
+        padParams.rightPadding = 0;
+        padParams.paddingValue = 0.0f;
+        AscendC::DataCopyPad(xLocal, xGm[offset], params, padParams);
         inQueueX.EnQue(xLocal);
     }
-    
-    __aicore__ inline void Compute(uint32_t progress)
+
+    __aicore__ inline void Compute(uint32_t size, float biasVal, AscendC::LocalTensor<float>& onesLocal)
     {
         AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
-        AscendC::LocalTensor<float> tmp1 = tmpBuf1.AllocTensor<float>();
-        AscendC::LocalTensor<float> tmp2 = tmpBuf2.AllocTensor<float>();
-        AscendC::LocalTensor<float> biasLocal = biasBuf.DeQue<float>();
-        
-        uint32_t len = this->channelsAligned;
-        
-        // Step 1: Softmax along channels
-        // Find max for numerical stability
-        AscendC::ReduceMax(tmp1, xLocal, tmp2, len);
-        float maxVal = tmp1.GetValue(0);
-        
-        // Subtract max: xLocal = xLocal - maxVal
-        AscendC::Adds(xLocal, xLocal, -maxVal, len);
-        
-        // Exp
-        AscendC::Exp(xLocal, xLocal, len);
-        
-        // Zero out padded channels
-        for (uint32_t c = this->channels; c < this->channelsAligned; c++) {
-            xLocal.SetValue(c, 0.0f);
-        }
-        
-        // Sum of exponentials
-        AscendC::ReduceSum(tmp1, xLocal, tmp2, len);
-        float sumVal = tmp1.GetValue(0);
-        
-        // Divide by sum
-        if (sumVal > 0.0f) {
-            float invSum = 1.0f / sumVal;
-            AscendC::Muls(xLocal, xLocal, invSum, len);
-        }
-        
-        // Step 2: Add bias
-        AscendC::Add(xLocal, xLocal, biasLocal, len);
-        
-        // Step 3: Scale
-        AscendC::Muls(xLocal, xLocal, this->scalingFactor, len);
-        
-        // Step 4: Sigmoid: 1/(1+exp(-x))
-        // Negate
-        AscendC::Muls(zLocal, xLocal, -1.0f, len);
-        // Exp
-        AscendC::Exp(zLocal, zLocal, len);
-        // Add 1
-        AscendC::Adds(zLocal, zLocal, 1.0f, len);
-        // Reciprocal
-        AscendC::Reciprocal(zLocal, zLocal, len);
-        
-        biasBuf.EnQue(biasLocal);
-        outQueueZ.EnQue<float>(zLocal);
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+
+        AscendC::Adds<float>(yLocal, xLocal, biasVal, size);
+        AscendC::Muls<float>(yLocal, yLocal, scalingFactor, size);
+
+        AscendC::Muls<float>(yLocal, yLocal, -1.0f, size);
+        AscendC::Exp<float>(yLocal, yLocal, size);
+        AscendC::Adds<float>(yLocal, yLocal, 1.0f, size);
+        AscendC::Div<float>(yLocal, onesLocal, yLocal, size);
+
+        outQueueY.EnQue<float>(yLocal);
         inQueueX.FreeTensor(xLocal);
-        tmpBuf1.FreeTensor(tmp1);
-        tmpBuf2.FreeTensor(tmp2);
     }
-    
-    __aicore__ inline void CopyOut(uint32_t progress)
+
+    __aicore__ inline void CopyOut(uint64_t offset, uint32_t size)
     {
-        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
-        uint32_t baseOffset = GetGlobalOffset(progress);
-        
-        // Scatter channel values back
-        for (uint32_t c = 0; c < this->channels; c++) {
-            float val = zLocal.GetValue(c);
-            *(((__gm__ float*)zGm.GetPhyAddr()) + baseOffset + c * this->hw) = val;
-        }
-        outQueueZ.FreeTensor(zLocal);
+        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+        AscendC::DataCopyExtParams params;
+        params.blockCount = 1;
+        params.blockLen = static_cast<uint32_t>(size * sizeof(float));
+        params.srcStride = 0;
+        params.dstStride = 0;
+        AscendC::DataCopyPad(yGm[offset], yLocal, params);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::TQue<AscendC::TPosition::VECCALC, BUFFER_NUM> tmpBuf1, tmpBuf2;
-    AscendC::TQue<AscendC::TPosition::VECCALC, 1> biasBuf;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> biasBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> onesBuf;
     AscendC::GlobalTensor<float> xGm;
     AscendC::GlobalTensor<float> biasGm;
-    AscendC::GlobalTensor<float> zGm;
-    uint32_t batchSize;
-    uint32_t channels;
-    uint32_t height;
-    uint32_t width;
-    uint32_t hw;
-    uint32_t channelsAligned;
-    uint32_t spatialStart;
-    uint32_t spatialCount;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t C;
+    uint32_t HW;
+    uint32_t startUnit;
+    uint32_t endUnit;
+    uint32_t tileSize;
     float scalingFactor;
 };
 
 extern "C" __global__ __aicore__ void convtranspose2d_softmax_biasadd_scaling_sigmoid_custom(
-    GM_ADDR x, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelSoftmaxBiasScaleSigmoid op;
-    op.Init(x, bias, z,
-            tiling_data.batchSize, tiling_data.channels,
-            tiling_data.height, tiling_data.width,
-            tiling_data.scalingFactor, tiling_data.totalLength, tiling_data.tileNum);
+    KernelBiasScaleSigmoid op;
+    op.Init(x, bias, y, tiling_data.totalNC, tiling_data.C, tiling_data.HW,
+            tiling_data.tileSize, tiling_data.scalingFactor);
     op.Process();
 }

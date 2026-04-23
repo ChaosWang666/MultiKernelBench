@@ -3,44 +3,37 @@
 #include "register/op_def_registry.h"
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 8;
+const uint32_t MAX_BLOCK_DIM = 32;
+const uint32_t DEFAULT_TILE_LEN = 4096;
 
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose3dScaleBatchNormGlobalAvgPoolCustomTilingData tiling;
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t B = (uint32_t)shape.GetDim(0);
+    uint32_t C = (uint32_t)shape.GetDim(1);
+    uint32_t D = (uint32_t)shape.GetDim(2);
+    uint32_t H = (uint32_t)shape.GetDim(3);
+    uint32_t W = (uint32_t)shape.GetDim(4);
 
-    // x shape: [batch, channels, D, H, W]
-    const gert::Shape* x_shape = context->GetInputShape(0);
-    uint32_t batchSize = x_shape->GetDim(0);
-    uint32_t channels = x_shape->GetDim(1);
-    uint32_t spatialSize = 1;
-    for (int i = 2; i < x_shape->GetDimNum(); i++) {
-        spatialSize *= x_shape->GetDim(i);
+    uint32_t numGroups = B * C;
+    uint32_t groupSize = D * H * W;
+
+    uint32_t numBlocks = (numGroups < MAX_BLOCK_DIM) ? numGroups : MAX_BLOCK_DIM;
+    if (numBlocks == 0) numBlocks = 1;
+    uint32_t groupsPerBlock = (numGroups + numBlocks - 1) / numBlocks;
+
+    uint32_t tileLength = DEFAULT_TILE_LEN;
+    if (groupSize < tileLength) {
+        tileLength = ((groupSize + 7) / 8) * 8;
+        if (tileLength < 8) tileLength = 8;
     }
 
-    // Get attrs from tiling context - we pass scale_factor and eps via tiling
-    // For now use defaults that will be overridden
-    float scaleFactor = 2.0f;
-    float eps = 1e-5f;
-
-    // Try to get attrs
-    const auto* attrs = context->GetAttrs();
-    if (attrs != nullptr) {
-        const float* sf = attrs->GetAttrPointer<float>(0);
-        if (sf) scaleFactor = *sf;
-        const float* ep = attrs->GetAttrPointer<float>(1);
-        if (ep) eps = *ep;
-    }
-
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_channels(channels);
-    tiling.set_spatialSize(spatialSize);
-    tiling.set_scaleFactor(scaleFactor);
-    tiling.set_eps(eps);
-    tiling.set_tileNum(TILE_NUM);
-
+    context->SetBlockDim(numBlocks);
+    tiling.set_numGroups(numGroups);
+    tiling.set_groupSize(groupSize);
+    tiling.set_tileLength(tileLength);
+    tiling.set_groupsPerBlock(groupsPerBlock);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -54,7 +47,6 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    // Output: [batch, channels, 1, 1, 1]
     y_shape->SetDimNum(5);
     y_shape->SetDim(0, x_shape->GetDim(0));
     y_shape->SetDim(1, x_shape->GetDim(1));
@@ -81,34 +73,11 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("weight")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("bias")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("running_mean")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("running_var")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-
-        this->Attr("scale_factor").AttrType(OPTIONAL).Float(2.0f);
-        this->Attr("eps").AttrType(OPTIONAL).Float(1e-5f);
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 

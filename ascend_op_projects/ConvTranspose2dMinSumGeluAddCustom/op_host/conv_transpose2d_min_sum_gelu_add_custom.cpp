@@ -6,27 +6,21 @@ namespace optiling {
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose2dMinSumGeluAddCustomTilingData tiling;
-    
-    const gert::Shape* xShape = context->GetInputShape(0);
-    uint32_t batchSize = xShape->GetDim(0);
-    uint32_t channels = xShape->GetDim(1);
-    uint32_t height = xShape->GetDim(2);
-    uint32_t width = xShape->GetDim(3);
-    
-    const gert::Shape* biasShape = context->GetInputShape(1);
-    uint32_t biasLength = biasShape->GetOriginShape().GetShapeSize();
-    
-    // Use batch_size as block dim, one block per batch
-    uint32_t blockDim = batchSize;
-    if (blockDim > 32) blockDim = 32;
-    
+    const gert::StorageShape* xShape = context->GetInputShape(0);
+    uint32_t totalN = xShape->GetOriginShape().GetDim(0);
+    uint32_t totalC = xShape->GetOriginShape().GetDim(1);
+    uint32_t totalH = xShape->GetOriginShape().GetDim(2);
+    uint32_t totalW = xShape->GetOriginShape().GetDim(3);
+
+    tiling.set_totalN(totalN);
+    tiling.set_totalC(totalC);
+    tiling.set_totalH(totalH);
+    tiling.set_totalW(totalW);
+
+    uint32_t blockDim = totalN;
+    if (blockDim == 0) blockDim = 1;
     context->SetBlockDim(blockDim);
-    tiling.set_batchSize(batchSize);
-    tiling.set_channels(channels);
-    tiling.set_height(height);
-    tiling.set_width(width);
-    tiling.set_biasLength(biasLength);
-    
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -40,7 +34,6 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    // Output shape: [batch, 1, 1, width]
     y_shape->SetDimNum(4);
     y_shape->SetDim(0, x_shape->GetDim(0));
     y_shape->SetDim(1, 1);
@@ -48,6 +41,7 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
     y_shape->SetDim(3, x_shape->GetDim(3));
     return GRAPH_SUCCESS;
 }
+
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
     const auto inputDataType = context->GetInputDataType(0);
@@ -71,16 +65,14 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
-
-        this->AICore()
-            .SetTiling(optiling::TilingFunc);
+        this->AICore().SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
     }
 };

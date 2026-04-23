@@ -11,26 +11,22 @@
           "index": 0,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
-        },
-        {
-          "name": "add_value",
-          "index": 1,
-          "paramType": "required",
-          "formatMode": "static_nd_agnostic"
-        },
-        {
-          "name": "scale",
-          "index": 2,
-          "paramType": "required",
-          "formatMode": "static_nd_agnostic"
         }
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "add_value"
+        },
+        {
+          "name": "scale"
         }
       ]
     },
@@ -38,13 +34,13 @@
       {
         "coreType": 2,
         "simplifiedKey": [
-          "ConvTranspose2dMishAddHardtanhScalingCustom/d=0,p=1/0,2/0,2/0,2/0,2",
-          "ConvTranspose2dMishAddHardtanhScalingCustom/d=0,p=0/0,2/0,2/0,2/0,2",
-          "ConvTranspose2dMishAddHardtanhScalingCustom/d=1,p=1/0,2/0,2/0,2/0,2",
-          "ConvTranspose2dMishAddHardtanhScalingCustom/d=1,p=0/0,2/0,2/0,2/0,2"
+          "ConvTranspose2dMishAddHardtanhScalingCustom/d=0,p=1/0,2/0,2",
+          "ConvTranspose2dMishAddHardtanhScalingCustom/d=0,p=0/0,2/0,2",
+          "ConvTranspose2dMishAddHardtanhScalingCustom/d=1,p=1/0,2/0,2",
+          "ConvTranspose2dMishAddHardtanhScalingCustom/d=1,p=0/0,2/0,2"
         ],
-        "binPath": "ascend910b/conv_transpose2d_mish_add_hardtanh_scaling_custom/ConvTranspose2dMishAddHardtanhScalingCustom_d0865063af16e746ea29dcf743e4574c.o",
-        "jsonPath": "ascend910b/conv_transpose2d_mish_add_hardtanh_scaling_custom/ConvTranspose2dMishAddHardtanhScalingCustom_d0865063af16e746ea29dcf743e4574c.json"
+        "binPath": "ascend910b/conv_transpose2d_mish_add_hardtanh_scaling_custom/ConvTranspose2dMishAddHardtanhScalingCustom_6aab34b9cedd3b826ea944e39131aa3c.o",
+        "jsonPath": "ascend910b/conv_transpose2d_mish_add_hardtanh_scaling_custom/ConvTranspose2dMishAddHardtanhScalingCustom_6aab34b9cedd3b826ea944e39131aa3c.json"
       }
     ]
   }

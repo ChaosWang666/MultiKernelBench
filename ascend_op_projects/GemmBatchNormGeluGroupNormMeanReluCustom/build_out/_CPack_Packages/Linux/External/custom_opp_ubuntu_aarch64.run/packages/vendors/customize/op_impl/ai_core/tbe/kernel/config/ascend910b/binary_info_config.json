@@ -15,7 +15,7 @@
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
@@ -31,8 +31,8 @@
           "GemmBatchNormGeluGroupNormMeanReluCustom/d=1,p=1/0,2/0,2",
           "GemmBatchNormGeluGroupNormMeanReluCustom/d=1,p=0/0,2/0,2"
         ],
-        "binPath": "ascend910b/gemm_batch_norm_gelu_group_norm_mean_relu_custom/GemmBatchNormGeluGroupNormMeanReluCustom_c4b219949841730762f3f80beeaea075.o",
-        "jsonPath": "ascend910b/gemm_batch_norm_gelu_group_norm_mean_relu_custom/GemmBatchNormGeluGroupNormMeanReluCustom_c4b219949841730762f3f80beeaea075.json"
+        "binPath": "ascend910b/gemm_batch_norm_gelu_group_norm_mean_relu_custom/GemmBatchNormGeluGroupNormMeanReluCustom_5f8f12f9b680eed535eb974af1a8fd29.o",
+        "jsonPath": "ascend910b/gemm_batch_norm_gelu_group_norm_mean_relu_custom/GemmBatchNormGeluGroupNormMeanReluCustom_5f8f12f9b680eed535eb974af1a8fd29.json"
       }
     ]
   }

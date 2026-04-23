@@ -8,7 +8,17 @@
                 "name": "x",
                 "param_type": "required",
                 "format": [
-                    "NCDHW"
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
                 ],
                 "type": [
                     "float"
@@ -20,33 +30,11 @@
                 "name": "z",
                 "param_type": "required",
                 "format": [
-                    "NCDHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
                 ]
-            }
-        ],
-        "attr": [
-            {
-                "name": "in_channels",
-                "type": "int",
-                "default_value": "0"
-            },
-            {
-                "name": "out_channels",
-                "type": "int",
-                "default_value": "0"
-            },
-            {
-                "name": "kernel_size",
-                "type": "int",
-                "default_value": "0"
-            },
-            {
-                "name": "pool_kernel_size",
-                "type": "int",
-                "default_value": "0"
             }
         ]
     }

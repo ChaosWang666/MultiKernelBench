@@ -3,189 +3,146 @@
 
 constexpr int32_t BUFFER_NUM = 2;
 
-// Each block handles a subset of (batch, spatial) positions.
-// For each position (b, h, w), we compute:
-// 1. mean over D for each channel
-// 2. add bias
-// 3. softmax over channels
-// 4. tanh
-// 5. scale
-
-class KernelMeanAddSoftmaxTanhScale {
+class KernelFused {
 public:
-    __aicore__ inline KernelMeanAddSoftmaxTanhScale() {}
-
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace,
-                                 uint32_t batchSize, uint32_t channels, uint32_t depth,
-                                 uint32_t height, uint32_t width, float scalingFactor, uint32_t tileNum)
+    __aicore__ inline KernelFused() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t B, uint32_t C, uint32_t D, uint32_t H, uint32_t W)
     {
-        this->B = batchSize;
-        this->C = channels;
-        this->D = depth;
-        this->H = height;
-        this->W = width;
-        this->scalingFactor = scalingFactor;
-        this->HW = H * W;
-        this->DHW = D * H * W;
+        this->B = B; this->C = C; this->D = D; this->H = H; this->W = W;
 
-        // Total spatial positions across all batches: B * H * W
-        uint32_t totalPositions = B * HW;
+        uint32_t totalBH = B * H;
         uint32_t blockNum = AscendC::GetBlockNum();
         uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t perBlock = (totalBH + blockNum - 1) / blockNum;
+        uint32_t bhStart = blockIdx * perBlock;
+        uint32_t bhEnd = bhStart + perBlock;
+        if (bhEnd > totalBH) bhEnd = totalBH;
+        this->bhStart = bhStart;
+        this->bhCount = (bhEnd > bhStart) ? (bhEnd - bhStart) : 0;
 
-        this->posStart = (totalPositions / blockNum) * blockIdx;
-        uint32_t posEnd = (blockIdx == blockNum - 1) ? totalPositions : (totalPositions / blockNum) * (blockIdx + 1);
-        this->posCount = posEnd - this->posStart;
+        uint64_t totalElems = (uint64_t)B * C * D * H * W;
+        uint64_t outElems = (uint64_t)B * C * H * W;
+        xGm.SetGlobalBuffer((__gm__ float*)x, totalElems);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias, C);
+        yGm.SetGlobalBuffer((__gm__ float*)y, outElems);
 
-        // Align C to 8 for float (32 bytes)
-        this->alignedC = ((C + 7) / 8) * 8;
-
-        xGm.SetGlobalBuffer((__gm__ float *)x, B * C * DHW);
-        biasGm.SetGlobalBuffer((__gm__ float *)bias, C);
-        zGm.SetGlobalBuffer((__gm__ float *)z, B * C * HW);
-
-        // We need buffers for: channel vector read from x (for accumulation), bias, intermediate computations
-        // inQueueX: for reading depth slices per channel group
-        // outQueueZ: for writing output
-        pipe.InitBuffer(inQueueX, 1, alignedC * sizeof(float));
-        pipe.InitBuffer(inQueueY, 1, alignedC * sizeof(float));
-        pipe.InitBuffer(outQueueZ, 1, alignedC * sizeof(float));
-        pipe.InitBuffer(tmpBuf1, 1, alignedC * sizeof(float));
-        pipe.InitBuffer(tmpBuf2, 1, alignedC * sizeof(float));
+        uint32_t alignedC = ((C * sizeof(float) + 31) / 32) * 32;
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, W * sizeof(float));
+        pipe.InitBuffer(meanBuf, C * W * sizeof(float));
+        pipe.InitBuffer(biasBuf, alignedC);
+        pipe.InitBuffer(rowMaxBuf, W * sizeof(float));
+        pipe.InitBuffer(rowSumBuf, W * sizeof(float));
+        pipe.InitBuffer(tmpBufU8, 32 * 1024);
     }
 
     __aicore__ inline void Process()
     {
-        for (uint32_t i = 0; i < posCount; i++) {
-            uint32_t globalPos = posStart + i;
-            uint32_t b = globalPos / HW;
-            uint32_t hw = globalPos % HW;
-            uint32_t h = hw / W;
-            uint32_t w = hw % W;
+        if (bhCount == 0) return;
 
-            ComputePosition(b, h, w);
+        AscendC::LocalTensor<float> biasLocal = biasBuf.Get<float>();
+        AscendC::DataCopy(biasLocal, biasGm, C);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        for (uint32_t i = 0; i < bhCount; i++) {
+            uint32_t bh = bhStart + i;
+            uint32_t b = bh / H;
+            uint32_t h = bh % H;
+            ProcessBH(b, h, biasLocal);
         }
     }
 
 private:
-    __aicore__ inline void ComputePosition(uint32_t b, uint32_t h, uint32_t w)
+    __aicore__ inline void ProcessBH(uint32_t b, uint32_t h, AscendC::LocalTensor<float>& biasLocal)
     {
-        // Step 1: Compute mean over depth for each channel
-        // accumulator
-        AscendC::LocalTensor<float> accLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> meanLocal = meanBuf.Get<float>();
+        AscendC::LocalTensor<float> rowMax = rowMaxBuf.Get<float>();
+        AscendC::LocalTensor<float> rowSum = rowSumBuf.Get<float>();
+        AscendC::LocalTensor<uint8_t> tmpU8 = tmpBufU8.Get<uint8_t>();
 
-        // Zero the accumulator
-        AscendC::Duplicate<float>(accLocal, 0.0f, alignedC);
+        uint32_t totalCW = C * W;
+        AscendC::Duplicate<float>(meanLocal, 0.0f, totalCW);
 
-        AscendC::LocalTensor<float> tmpLocal = tmpBuf1.AllocTensor<float>();
+        uint64_t xBase = (uint64_t)b * C * D * H * W + (uint64_t)h * W;
+        uint64_t strideDHW = (uint64_t)D * H * W;
+        uint64_t strideHW = (uint64_t)H * W;
 
         for (uint32_t d = 0; d < D; d++) {
-            // For each channel c, x[b, c, d, h, w] is at offset: b*C*DHW + c*DHW + d*HW + h*W + w
-            // We need to gather C values with stride DHW
-            // Since channels are not contiguous in memory for a given spatial position, we load one by one
             for (uint32_t c = 0; c < C; c++) {
-                uint32_t idx = b * C * DHW + c * DHW + d * HW + h * W + w;
-                // We'll use scalar approach - copy single values
-                AscendC::DataCopy(tmpLocal[c], xGm[idx], 1);
+                uint64_t offset = xBase + (uint64_t)c * strideDHW + (uint64_t)d * strideHW;
+                AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+                AscendC::DataCopy(xLocal, xGm[offset], W);
+                inQueueX.EnQue(xLocal);
+                AscendC::LocalTensor<float> xIn = inQueueX.DeQue<float>();
+                AscendC::Add<float>(meanLocal[c * W], meanLocal[c * W], xIn, W);
+                inQueueX.FreeTensor(xIn);
             }
-            AscendC::PipeBarrier<PIPE_ALL>();
-            AscendC::Add(accLocal, accLocal, tmpLocal, alignedC);
         }
 
-        // Divide by D to get mean
         float invD = 1.0f / (float)D;
-        AscendC::Muls(accLocal, accLocal, invD, alignedC);
-
-        // Step 2: Add bias - bias shape (1, C, 1, 1, 1), stored as C floats
-        AscendC::LocalTensor<float> biasLocal = inQueueY.AllocTensor<float>();
-        AscendC::DataCopy(biasLocal, biasGm[0], alignedC);
-        AscendC::PipeBarrier<PIPE_ALL>();
-        AscendC::Add(accLocal, accLocal, biasLocal, alignedC);
-
-        // Step 3: Softmax over channels
-        // Find max for numerical stability
-        AscendC::LocalTensor<float> tmp2Local = tmpBuf2.AllocTensor<float>();
-
-        // ReduceMax
-        float maxVal;
-        AscendC::ReduceMax(tmpLocal, accLocal, alignedC, false);
-        AscendC::PipeBarrier<PIPE_ALL>();
-        maxVal = tmpLocal.GetValue(0);
-
-        // Subtract max
-        AscendC::Adds(accLocal, accLocal, -maxVal, alignedC);
-
-        // Exp
-        AscendC::Exp(accLocal, accLocal, alignedC);
-
-        // Sum
-        float sumVal;
-        AscendC::ReduceSum(tmpLocal, accLocal, alignedC, false);
-        AscendC::PipeBarrier<PIPE_ALL>();
-        sumVal = tmpLocal.GetValue(0);
-
-        // Divide by sum
-        float invSum = 1.0f / sumVal;
-        AscendC::Muls(accLocal, accLocal, invSum, alignedC);
-
-        // Step 4: Tanh
-        // tanh(x) for softmax outputs (0,1) => tanh(small positive) ≈ small positive
-        // Use the Tanh intrinsic if available, or compute manually
-        // For AscendC, we can approximate or use available math ops
-
-        // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
-        AscendC::Muls(tmp2Local, accLocal, 2.0f, alignedC);
-        AscendC::Exp(tmp2Local, tmp2Local, alignedC);  // exp(2x)
-        AscendC::Adds(tmpLocal, tmp2Local, -1.0f, alignedC);  // exp(2x) - 1
-        AscendC::Adds(tmp2Local, tmp2Local, 1.0f, alignedC);  // exp(2x) + 1
-        AscendC::Div(accLocal, tmpLocal, tmp2Local, alignedC); // tanh
-
-        // Step 5: Scale
-        AscendC::Muls(accLocal, accLocal, scalingFactor, alignedC);
-
-        // Write output: z[b, c, 0, h, w] at offset b*C*HW + c*HW + h*W + w
-        AscendC::LocalTensor<float> outLocal = outQueueZ.AllocTensor<float>();
-        AscendC::DataCopy(outLocal, accLocal, alignedC);
-        AscendC::PipeBarrier<PIPE_ALL>();
-
+        AscendC::Muls<float>(meanLocal, meanLocal, invD, totalCW);
         for (uint32_t c = 0; c < C; c++) {
-            uint32_t outIdx = b * C * HW + c * HW + h * W + w;
-            AscendC::DataCopy(zGm[outIdx], outLocal[c], 1);
+            float bc = biasLocal.GetValue(c);
+            AscendC::Adds<float>(meanLocal[c * W], meanLocal[c * W], bc, W);
         }
+
+        uint32_t srcShape[2] = {C, W};
+        AscendC::ReduceMax<float, AscendC::Pattern::Reduce::RA, false>(
+            rowMax, meanLocal, tmpU8, srcShape, true);
+
+        uint8_t repStride = (uint8_t)(W / 8);
+        for (uint32_t wOff = 0; wOff < W; wOff += 64) {
+            uint32_t curMask = (W - wOff >= 64) ? 64 : (W - wOff);
+            AscendC::Sub<float>(meanLocal[wOff], meanLocal[wOff], rowMax[wOff],
+                                (uint64_t)curMask, (uint8_t)C,
+                                {1, 1, 1, repStride, repStride, 0});
+        }
+
+        AscendC::Exp<float>(meanLocal, meanLocal, totalCW);
+
+        AscendC::ReduceSum<float, AscendC::Pattern::Reduce::RA, false>(
+            rowSum, meanLocal, tmpU8, srcShape, true);
+
+        for (uint32_t wOff = 0; wOff < W; wOff += 64) {
+            uint32_t curMask = (W - wOff >= 64) ? 64 : (W - wOff);
+            AscendC::Div<float>(meanLocal[wOff], meanLocal[wOff], rowSum[wOff],
+                                (uint64_t)curMask, (uint8_t)C,
+                                {1, 1, 1, repStride, repStride, 0});
+        }
+
+        AscendC::Tanh<float>(meanLocal, meanLocal, totalCW);
+
         AscendC::PipeBarrier<PIPE_ALL>();
 
-        tmpBuf2.FreeTensor(tmp2Local);
-        tmpBuf1.FreeTensor(tmpLocal);
-        inQueueY.FreeTensor(biasLocal);
-        inQueueX.FreeTensor(accLocal);
-        outQueueZ.FreeTensor(outLocal);
+        uint64_t yBase = (uint64_t)b * C * H * W + (uint64_t)h * W;
+        AscendC::DataCopyExtParams copyOutParams;
+        copyOutParams.blockCount = (uint16_t)C;
+        copyOutParams.blockLen = (uint32_t)(W * sizeof(float));
+        copyOutParams.srcStride = 0;
+        copyOutParams.dstStride = (uint32_t)((H - 1) * W * sizeof(float));
+        copyOutParams.rsv = 0;
+        AscendC::DataCopyPad(yGm[yBase], meanLocal, copyOutParams);
+        AscendC::PipeBarrier<PIPE_ALL>();
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX, inQueueY;
-    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueZ;
-    AscendC::TQue<AscendC::TPosition::VECCALC, 1> tmpBuf1, tmpBuf2;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> biasGm;
-    AscendC::GlobalTensor<float> zGm;
-
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> meanBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> biasBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> rowMaxBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> rowSumBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBufU8;
+    AscendC::GlobalTensor<float> xGm, biasGm, yGm;
     uint32_t B, C, D, H, W;
-    uint32_t HW, DHW;
-    uint32_t alignedC;
-    float scalingFactor;
-    uint32_t posStart;
-    uint32_t posCount;
+    uint32_t bhStart, bhCount;
 };
 
 extern "C" __global__ __aicore__ void convtranspose3d_mean_add_softmax_tanh_scaling_custom(
-    GM_ADDR x, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
+    GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
 {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelMeanAddSoftmaxTanhScale op;
-    op.Init(x, bias, z, workspace,
-            tiling_data.batchSize, tiling_data.channels, tiling_data.depth,
-            tiling_data.height, tiling_data.width, tiling_data.scalingFactor,
-            tiling_data.tileNum);
+    KernelFused op;
+    op.Init(x, bias, y, tiling_data.B, tiling_data.C, tiling_data.D, tiling_data.H, tiling_data.W);
     op.Process();
 }

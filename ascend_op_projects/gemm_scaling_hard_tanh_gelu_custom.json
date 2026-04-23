@@ -13,26 +13,6 @@
                 "type": [
                     "float"
                 ]
-            },
-            {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bias",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
             }
         ],
         "output_desc": [
@@ -45,6 +25,23 @@
                 "type": [
                     "float"
                 ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "scaling_factor",
+                "type": "float",
+                "param_type": "required"
+            },
+            {
+                "name": "hardtanh_min",
+                "type": "float",
+                "param_type": "required"
+            },
+            {
+                "name": "hardtanh_max",
+                "type": "float",
+                "param_type": "required"
             }
         ]
     }

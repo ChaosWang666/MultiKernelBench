@@ -8,7 +8,7 @@ namespace ge {
 
 REG_OP(MatmulSigmoidSumCustom)
     .INPUT(x, ge::TensorType::ALL())
-    .OUTPUT(z, ge::TensorType::ALL())
+    .OUTPUT(y, ge::TensorType::ALL())
     .OP_END_FACTORY_REG(MatmulSigmoidSumCustom);
 
 }

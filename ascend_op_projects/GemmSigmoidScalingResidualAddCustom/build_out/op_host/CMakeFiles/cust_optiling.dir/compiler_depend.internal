@@ -5,7 +5,7 @@ op_host/CMakeFiles/cust_optiling.dir/gemm_sigmoid_scaling_residual_add_custom.cp
  /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmSigmoidScalingResidualAddCustom/op_host/gemm_sigmoid_scaling_residual_add_custom.cpp
  /usr/include/stdc-predef.h
  /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmSigmoidScalingResidualAddCustom/op_host/gemm_sigmoid_scaling_residual_add_custom_tiling.h
- /home/developer/Ascend/cann-9.0.0/include/register/tilingdata_base.h
+ /home/developer/Ascend/cann-8.5.0/include/register/tilingdata_base.h
  /usr/include/c++/9/vector
  /usr/include/c++/9/bits/stl_algobase.h
  /usr/include/aarch64-linux-gnu/c++/9/bits/c++config.h
@@ -194,25 +194,135 @@ op_host/CMakeFiles/cust_optiling.dir/gemm_sigmoid_scaling_residual_add_custom.cp
  /usr/include/strings.h
  /usr/include/aarch64-linux-gnu/bits/strings_fortified.h
  /usr/include/aarch64-linux-gnu/bits/string_fortified.h
- /home/developer/Ascend/cann-9.0.0/include/securec.h
- /home/developer/Ascend/cann-9.0.0/include/securectype.h
+ /home/developer/Ascend/cann-8.5.0/include/securec.h
+ /home/developer/Ascend/cann-8.5.0/include/securectype.h
  /usr/include/c++/9/stdlib.h
- /home/developer/Ascend/cann-9.0.0/include/graph/ascend_string.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/ascend_string.h
  /usr/include/c++/9/functional
  /usr/include/c++/9/bits/std_function.h
- /home/developer/Ascend/cann-9.0.0/include/graph/types.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/types.h
  /usr/include/c++/9/atomic
- /home/developer/Ascend/cann-9.0.0/include/graph/c_types.h
- /home/developer/Ascend/cann-9.0.0/include/register/op_def_registry.h
- /home/developer/Ascend/cann-9.0.0/include/register/op_def.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/c_types.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/tiling_api.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/matmul/matmul_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/matmul/matmul_tiling_base.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/matmul/matmul_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/kernel_tiling/kernel_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/platform/platform_ascendc.h
+ /usr/include/c++/9/mutex
+ /usr/include/c++/9/chrono
+ /usr/include/c++/9/ratio
+ /usr/include/c++/9/limits
+ /usr/include/c++/9/ctime
+ /usr/include/c++/9/bits/parse_numbers.h
+ /usr/include/c++/9/system_error
+ /usr/include/aarch64-linux-gnu/c++/9/bits/error_constants.h
+ /usr/include/c++/9/bits/std_mutex.h
+ /usr/include/c++/9/bits/unique_lock.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/matmul/bmm_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/activation/softmax_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/tensor.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/ge_error_codes.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/types.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/ascend_string.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/activation/softmax_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/activation/logsoftmax_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/activation/logsoftmax_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/filter/dropout_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/sort/sort_tiling_intf.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/sort/sort_utils_constants.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/index/arithprogression_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/quantization/ascend_dequant_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/quantization/ascend_quant_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/quantization/ascend_antiquant_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/reduce/sum_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/activation/silu_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/activation/swish_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/activation/gelu_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/pad/pad_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/pad/pad_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/rmsnorm_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/rmsnorm_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/deepnorm_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/deepnorm_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/layernorm_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/layernorm_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/normalize_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/batchnorm_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/batchnorm_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/layernorm_grad_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/layernorm_grad_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/layernorm_grad_beta_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/layernorm_grad_beta_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/welfordfinalize_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/transpose/confusion_transpose_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/transpose/confusion_transpose_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/sort/topk_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/sort/topk_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/sort/topk_utils_constants.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/tanh_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/activation/sigmoid_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/frac_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/acos_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/asin_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/acosh_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/asinh_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/sin_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/sin_utils.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/cos_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/cos_utils.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/atan_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/power_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/log_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/cosh_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/clamp_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/erf_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/erfc_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/round_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/sinh_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/activation/swiglu_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/tan_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/select/selectwithbytesmask_tiling.h
+ /usr/include/c++/9/algorithm
+ /usr/include/c++/9/bits/stl_algo.h
+ /usr/include/c++/9/bits/algorithmfwd.h
+ /usr/include/c++/9/bits/stl_heap.h
+ /usr/include/c++/9/bits/uniform_int_dist.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/trunc_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/activation/geglu_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/lgamma_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/digamma_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/atanh_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/xor_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/sign_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/reduce/mean_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/exp_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/axpy_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/ceil_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/floor_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/activation/reglu_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/pad/broadcast_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/reduce/reduce_xor_sum_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/reduce/reduce_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/cumsum_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/math/fmod_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/groupnorm_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/normalization/groupnorm_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/transpose/transdata_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/hccl/hccl_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/hccl/hccl_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/hccl/hccl_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/impl/adv_api/tiling/hccl/hccl_tiling_impl_def.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/conv/conv3d/conv3d_tiling.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/conv/conv3d/conv3d_tiling_base.h
+ /home/developer/Ascend/cann-8.5.0/include/tiling/conv/conv3d/conv3d_tilingdata.h
+ /home/developer/Ascend/cann-8.5.0/impl/adv_api/tiling/conv/conv3d_tiling_util.h
  /usr/include/c++/9/iostream
  /usr/include/c++/9/ostream
  /usr/include/c++/9/ios
  /usr/include/c++/9/bits/ios_base.h
  /usr/include/c++/9/bits/locale_classes.h
  /usr/include/c++/9/bits/locale_classes.tcc
- /usr/include/c++/9/system_error
- /usr/include/aarch64-linux-gnu/c++/9/bits/error_constants.h
  /usr/include/c++/9/streambuf
  /usr/include/c++/9/bits/streambuf.tcc
  /usr/include/c++/9/bits/basic_ios.h
@@ -228,79 +338,91 @@ op_host/CMakeFiles/cust_optiling.dir/gemm_sigmoid_scaling_residual_add_custom.cp
  /usr/include/c++/9/bits/ostream.tcc
  /usr/include/c++/9/istream
  /usr/include/c++/9/bits/istream.tcc
- /home/developer/Ascend/cann-9.0.0/include/register/op_impl_registry.h
+ /usr/include/c++/9/cmath
+ /usr/include/math.h
+ /usr/include/aarch64-linux-gnu/bits/math-vector.h
+ /usr/include/aarch64-linux-gnu/bits/libm-simd-decl-stubs.h
+ /usr/include/aarch64-linux-gnu/bits/flt-eval-method.h
+ /usr/include/aarch64-linux-gnu/bits/fp-logb.h
+ /usr/include/aarch64-linux-gnu/bits/fp-fast.h
+ /usr/include/aarch64-linux-gnu/bits/mathcalls-helper-functions.h
+ /usr/include/aarch64-linux-gnu/bits/mathcalls.h
+ /usr/include/aarch64-linux-gnu/bits/mathcalls-narrow.h
+ /usr/include/aarch64-linux-gnu/bits/iscanonical.h
+ /usr/include/aarch64-linux-gnu/bits/mathinline.h
+ /home/developer/Ascend/cann-8.5.0/impl/adv_api/detail/conv/common/conv_common.h
+ /home/developer/Ascend/cann-8.5.0/include/adv_api/matmul/matmul_tiling_base.h
+ /home/developer/Ascend/cann-8.5.0/include/adv_api/conv/common/conv_common.h
+ /home/developer/Ascend/cann-8.5.0/include/register/op_def_registry.h
+ /home/developer/Ascend/cann-8.5.0/include/register/op_def.h
+ /home/developer/Ascend/cann-8.5.0/include/register/op_impl_registry.h
  /usr/include/c++/9/unordered_set
  /usr/include/c++/9/bits/hashtable.h
  /usr/include/c++/9/bits/hashtable_policy.h
- /usr/include/c++/9/limits
  /usr/include/c++/9/bits/unordered_set.h
- /home/developer/Ascend/cann-9.0.0/include/graph/compiler_def.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/base_type.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/infer_shape_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/shape.h
- /home/developer/Ascend/cann-9.0.0/include/utils/extern_math_util.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tensor.h
- /home/developer/Ascend/cann-9.0.0/include/graph/ge_error_codes.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/storage_shape.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/storage_format.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/expand_dims_type.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/compiler_def.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/base_type.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/infer_shape_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/shape.h
+ /home/developer/Ascend/cann-8.5.0/include/utils/extern_math_util.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tensor.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/ge_error_codes.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/storage_shape.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/storage_format.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/expand_dims_type.h
  /usr/include/c++/9/cstddef
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tensor_data.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/stride.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/runtime_attrs.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/continuous_vector.h
- /home/developer/Ascend/cann-9.0.0/include/external/ge_common/ge_api_error_codes.h
- /home/developer/Ascend/cann-9.0.0/include/external/ge_common/ge_error_codes.h
- /home/developer/Ascend/cann-9.0.0/include/external/ge_common/ge_api_types.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tensor_data.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/stride.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/runtime_attrs.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/continuous_vector.h
+ /home/developer/Ascend/cann-8.5.0/include/external/ge_common/ge_api_error_codes.h
+ /home/developer/Ascend/cann-8.5.0/include/external/ge_common/ge_error_codes.h
+ /home/developer/Ascend/cann-8.5.0/include/external/ge_common/ge_api_types.h
  /usr/include/c++/9/set
  /usr/include/c++/9/bits/stl_set.h
  /usr/include/c++/9/bits/stl_multiset.h
- /home/developer/Ascend/cann-9.0.0/include/graph/tensor.h
- /home/developer/Ascend/cann-9.0.0/include/graph/ge_error_codes.h
- /home/developer/Ascend/cann-9.0.0/include/graph/types.h
- /home/developer/Ascend/cann-9.0.0/include/graph/ascend_string.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tensor.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/extended_kernel_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/kernel_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/kernel_run_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/context_extend.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/compute_node_info.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/infer_shape_range_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/range.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/infer_datatype_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tiling_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tiling_data.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/continuous_vector.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/runtime_attrs.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tiling_parse_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/extended_kernel_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/op_execute_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/shape.h
- /home/developer/Ascend/cann-9.0.0/include/ge/ge_allocator.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/op_execute_prepare_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/op_execute_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/op_execute_launch_context.h
- /home/developer/Ascend/cann-9.0.0/include/graph/infer_format_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/exe_res_generation_context.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/storage_shape.h
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/compute_node_info.h
- /home/developer/Ascend/cann-9.0.0/include/graph/operator_reg.h
- /home/developer/Ascend/cann-9.0.0/include/graph/operator.h
- /home/developer/Ascend/cann-9.0.0/include/graph/inference_context.h
- /home/developer/Ascend/cann-9.0.0/include/graph/tensor.h
- /home/developer/Ascend/cann-9.0.0/include/graph/types.h
- /home/developer/Ascend/cann-9.0.0/include/graph/ascend_string.h
- /home/developer/Ascend/cann-9.0.0/include/graph/resource_context.h
- /home/developer/Ascend/cann-9.0.0/include/graph/ge_error_codes.h
- /home/developer/Ascend/cann-9.0.0/include/graph/tensor.h
- /home/developer/Ascend/cann-9.0.0/include/graph/operator_factory.h
- /home/developer/Ascend/cann-9.0.0/include/graph/operator.h
- /home/developer/Ascend/cann-9.0.0/include/graph/ascend_string.h
- /home/developer/Ascend/cann-9.0.0/include/graph/graph.h
- /home/developer/Ascend/cann-9.0.0/include/graph/gnode.h
- /home/developer/Ascend/cann-9.0.0/include/graph/ge_error_codes.h
- /home/developer/Ascend/cann-9.0.0/include/graph/types.h
- /home/developer/Ascend/cann-9.0.0/include/graph/tensor.h
- /home/developer/Ascend/cann-9.0.0/include/graph/ascend_string.h
- /home/developer/Ascend/cann-9.0.0/include/register/op_def_factory.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tensor.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/extended_kernel_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/kernel_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/kernel_run_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/context_extend.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/compute_node_info.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/infer_shape_range_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/range.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/infer_datatype_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tiling_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tiling_data.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/continuous_vector.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/runtime_attrs.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tiling_parse_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/extended_kernel_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/op_execute_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/shape.h
+ /home/developer/Ascend/cann-8.5.0/include/ge/ge_allocator.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/op_execute_prepare_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/op_execute_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/op_execute_launch_context.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/infer_format_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/exe_res_generation_context.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/storage_shape.h
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/compute_node_info.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/operator_reg.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/operator.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/inference_context.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/tensor.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/types.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/ascend_string.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/resource_context.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/ge_error_codes.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/tensor.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/operator_factory.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/operator.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/ascend_string.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/graph.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/gnode.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/ge_error_codes.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/types.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/tensor.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/ascend_string.h
+ /home/developer/Ascend/cann-8.5.0/include/register/op_def_factory.h
 

@@ -1,7 +1,7 @@
 framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_gemm_group_norm_min_bias_add_custom_plugin.cc.o: \
  /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/GemmGroupNormMinBiasAddCustom/framework/tf_plugin/tensorflow_gemm_group_norm_min_bias_add_custom_plugin.cc \
  /usr/include/stdc-predef.h \
- /home/developer/Ascend/cann-9.0.0/include/register/register.h \
+ /home/developer/Ascend/cann-8.5.0/include/register/register.h \
  /usr/include/c++/9/functional \
  /usr/include/aarch64-linux-gnu/c++/9/bits/c++config.h \
  /usr/include/aarch64-linux-gnu/c++/9/bits/os_defines.h \
@@ -157,22 +157,22 @@ framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_gemm_group_norm_mi
  /usr/include/c++/9/bits/unordered_map.h /usr/include/c++/9/vector \
  /usr/include/c++/9/bits/stl_vector.h \
  /usr/include/c++/9/bits/stl_bvector.h /usr/include/c++/9/bits/vector.tcc \
- /home/developer/Ascend/cann-9.0.0/include/graph/operator.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./ge_error_codes.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./inference_context.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./tensor.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/operator.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./ge_error_codes.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./inference_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./tensor.h \
  /usr/include/c++/9/atomic \
- /home/developer/Ascend/cann-9.0.0/include/graph/././ge_error_codes.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/././types.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/././c_types.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./ascend_string.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/types.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./types.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./resource_context.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./ge_error_codes.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./tensor.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./types.h \
- /home/developer/Ascend/cann-9.0.0/include/register/register_error_codes.h \
- /home/developer/Ascend/cann-9.0.0/include/register/register_fmk_types.h \
- /home/developer/Ascend/cann-9.0.0/include/register/register_types.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/ascend_string.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/././ge_error_codes.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/././types.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/././c_types.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./ascend_string.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/types.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./types.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./resource_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./ge_error_codes.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./tensor.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./types.h \
+ /home/developer/Ascend/cann-8.5.0/include/register/register_error_codes.h \
+ /home/developer/Ascend/cann-8.5.0/include/register/register_fmk_types.h \
+ /home/developer/Ascend/cann-8.5.0/include/register/register_types.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/ascend_string.h

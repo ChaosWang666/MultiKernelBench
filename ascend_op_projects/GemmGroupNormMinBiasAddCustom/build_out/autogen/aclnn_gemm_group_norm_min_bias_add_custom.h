@@ -15,6 +15,7 @@ extern "C" {
 /* funtion: aclnnGemmGroupNormMinBiasAddCustomGetWorkspaceSize
  * parameters :
  * x : required
+ * bias : required
  * out : required
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
@@ -22,6 +23,7 @@ extern "C" {
 __attribute__((visibility("default")))
 aclnnStatus aclnnGemmGroupNormMinBiasAddCustomGetWorkspaceSize(
     const aclTensor *x,
+    const aclTensor *bias,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);

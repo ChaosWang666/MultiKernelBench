@@ -1,5 +1,5 @@
 # Hashes of file build rules.
-6713f672321dcc75fc5eb6f5dc9e6b65 CMakeFiles/gen_version_info
+2d540adca4523a49d52f862fdc613ab9 CMakeFiles/gen_version_info
 4c8af6f9a4889c6442872df54899550b CMakeFiles/modify_vendor
 fe581c0d6f8b075590f59af09c1c46df op_host/CMakeFiles/optiling_compat
 b32e6876dfdba5a399b2593823217d96 op_kernel/CMakeFiles/GemmBatchNormGeluGroupNormMeanReluCustom_ascend910b

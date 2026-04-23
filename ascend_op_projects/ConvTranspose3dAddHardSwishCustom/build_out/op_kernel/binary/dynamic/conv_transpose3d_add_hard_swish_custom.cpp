@@ -12,14 +12,14 @@ public:
         this->tileNum = tileNum;
         this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ float *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(inQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(DTYPE_Z));
+        pipe.InitBuffer(sixBuf, this->tileLength * sizeof(DTYPE_Z));
     }
     __aicore__ inline void Process()
     {
@@ -34,8 +34,8 @@ public:
 private:
     __aicore__ inline void CopyIn(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::LocalTensor<float> yLocal = inQueueY.AllocTensor<float>();
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = inQueueY.AllocTensor<DTYPE_Y>();
         AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
         AscendC::DataCopy(yLocal, yGm[progress * this->tileLength], this->tileLength);
         inQueueX.EnQue(xLocal);
@@ -43,39 +43,36 @@ private:
     }
     __aicore__ inline void Compute(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> yLocal = inQueueY.DeQue<float>();
-        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
-        AscendC::LocalTensor<float> tmp1 = tmpBuf1.Get<float>();
-        AscendC::LocalTensor<float> tmp2 = tmpBuf2.Get<float>();
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = inQueueY.DeQue<DTYPE_Y>();
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        AscendC::LocalTensor<DTYPE_Z> tmpLocal = tmpBuf.Get<DTYPE_Z>();
+        AscendC::LocalTensor<DTYPE_Z> sixLocal = sixBuf.Get<DTYPE_Z>();
 
-        // t = x + y (add_input)
-        AscendC::Add(tmp1, xLocal, yLocal, this->tileLength);
+        // t = x + y  -> zLocal
+        AscendC::Add(zLocal, xLocal, yLocal, this->tileLength);
+        // tmp = t + 3
+        AscendC::Adds(tmpLocal, zLocal, (DTYPE_Z)3.0f, this->tileLength);
+        // tmp = max(tmp, 0)  (ReLU)
+        AscendC::Relu(tmpLocal, tmpLocal, this->tileLength);
+        // sixLocal = 6.0
+        AscendC::Duplicate(sixLocal, (DTYPE_Z)6.0f, this->tileLength);
+        // tmp = min(tmp, 6)  -> ReLU6(t+3)
+        AscendC::Min(tmpLocal, tmpLocal, sixLocal, this->tileLength);
+        // tmp = tmp * (1/6)  -> hardswish(t) / t
+        AscendC::Muls(tmpLocal, tmpLocal, (DTYPE_Z)(1.0f / 6.0f), this->tileLength);
+        // tmp = t * tmp   -> hardswish(t)
+        AscendC::Mul(tmpLocal, zLocal, tmpLocal, this->tileLength);
+        // z = t * hardswish(t)
+        AscendC::Mul(zLocal, zLocal, tmpLocal, this->tileLength);
 
-        // compute hardswish(t) = t * clamp(t+3, 0, 6) / 6
-        // step1: tmp2 = t + 3
-        AscendC::Adds(tmp2, tmp1, (float)3.0f, this->tileLength);
-
-        // step2: clamp to [0, 6]: mins with 6, then maxs with 0
-        AscendC::Mins(tmp2, tmp2, (float)6.0f, this->tileLength);
-        AscendC::Maxs(tmp2, tmp2, (float)0.0f, this->tileLength);
-
-        // step3: tmp2 = tmp2 / 6
-        AscendC::Muls(tmp2, tmp2, (float)(1.0f / 6.0f), this->tileLength);
-
-        // step4: hardswish_val = t * tmp2
-        AscendC::Mul(tmp2, tmp1, tmp2, this->tileLength);
-
-        // final: result = t * hardswish_val = t * (t * clamp(t+3,0,6)/6)
-        AscendC::Mul(zLocal, tmp1, tmp2, this->tileLength);
-
-        outQueueZ.EnQue<float>(zLocal);
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
         inQueueX.FreeTensor(xLocal);
         inQueueY.FreeTensor(yLocal);
     }
     __aicore__ inline void CopyOut(int32_t progress)
     {
-        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
         AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
         outQueueZ.FreeTensor(zLocal);
     }
@@ -84,10 +81,11 @@ private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
-    AscendC::GlobalTensor<float> zGm;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> sixBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;

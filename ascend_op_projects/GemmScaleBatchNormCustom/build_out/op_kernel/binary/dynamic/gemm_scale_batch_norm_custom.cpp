@@ -1,132 +1,99 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+constexpr int32_t BUFFER_NUM = 2;
 
 class KernelGemmScaleBatchNorm {
 public:
     __aicore__ inline KernelGemmScaleBatchNorm() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR scale,
-                                GM_ADDR mean, GM_ADDR variance, GM_ADDR y,
-                                uint32_t batchSize, uint32_t inFeatures, uint32_t outFeatures, uint32_t tileNum)
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR scale, GM_ADDR z,
+                                uint32_t batchSize, uint32_t featureSize)
     {
-        this->batchSize = batchSize;
-        this->inFeatures = inFeatures;
-        this->outFeatures = outFeatures;
-        this->tileNum = tileNum;
-        this->blockLength = outFeatures / AscendC::GetBlockNum();
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->featureSize = featureSize;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inFeatures);
-        weightGm.SetGlobalBuffer((__gm__ float *)weight, inFeatures * outFeatures);
-        biasGm.SetGlobalBuffer((__gm__ float *)bias, outFeatures);
-        scaleGm.SetGlobalBuffer((__gm__ float *)scale, outFeatures);
-        meanGm.SetGlobalBuffer((__gm__ float *)mean, outFeatures);
-        varianceGm.SetGlobalBuffer((__gm__ float *)variance, outFeatures);
-        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * outFeatures);
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t rowsPerBlock = (batchSize + blockNum - 1) / blockNum;
+        uint32_t rowStart = blockIdx * rowsPerBlock;
+        uint32_t rowEnd = rowStart + rowsPerBlock;
+        if (rowEnd > batchSize) {
+            rowEnd = batchSize;
+        }
+        this->myRows = (rowEnd > rowStart) ? (rowEnd - rowStart) : 0;
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueScale, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueMean, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueVariance, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        xGm.SetGlobalBuffer((__gm__ float *)x + (uint64_t)rowStart * featureSize,
+                            (uint64_t)this->myRows * featureSize);
+        zGm.SetGlobalBuffer((__gm__ float *)z + (uint64_t)rowStart * featureSize,
+                            (uint64_t)this->myRows * featureSize);
+        scaleGm.SetGlobalBuffer((__gm__ float *)scale, featureSize);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, featureSize * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, featureSize * sizeof(float));
+        pipe.InitBuffer(scaleQueue, 1, featureSize * sizeof(float));
     }
+
     __aicore__ inline void Process()
     {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
-        for (int32_t i = 0; i < loopCount; i++) {
+        if (this->myRows == 0) {
+            return;
+        }
+
+        AscendC::LocalTensor<float> scaleAlloc = scaleQueue.AllocTensor<float>();
+        AscendC::DataCopy(scaleAlloc, scaleGm, this->featureSize);
+        scaleQueue.EnQue(scaleAlloc);
+        AscendC::LocalTensor<float> scaleLocal = scaleQueue.DeQue<float>();
+
+        for (uint32_t i = 0; i < this->myRows; i++) {
             CopyIn(i);
-            Compute(i);
+            Compute(i, scaleLocal);
             CopyOut(i);
         }
+
+        scaleQueue.FreeTensor(scaleLocal);
     }
 
 private:
-    __aicore__ inline void CopyIn(int32_t progress)
+    __aicore__ inline void CopyIn(uint32_t rowIdx)
     {
         AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::LocalTensor<float> weightLocal = inQueueWeight.AllocTensor<float>();
-        AscendC::LocalTensor<float> biasLocal = inQueueBias.AllocTensor<float>();
-        AscendC::LocalTensor<float> scaleLocal = inQueueScale.AllocTensor<float>();
-        AscendC::LocalTensor<float> meanLocal = inQueueMean.AllocTensor<float>();
-        AscendC::LocalTensor<float> varianceLocal = inQueueVariance.AllocTensor<float>();
-
-        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(weightLocal, weightGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(biasLocal, biasGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(scaleLocal, scaleGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(meanLocal, meanGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(varianceLocal, varianceGm[progress * this->tileLength], this->tileLength);
-
+        AscendC::DataCopy(xLocal, xGm[(uint64_t)rowIdx * this->featureSize], this->featureSize);
         inQueueX.EnQue(xLocal);
-        inQueueWeight.EnQue(weightLocal);
-        inQueueBias.EnQue(biasLocal);
-        inQueueScale.EnQue(scaleLocal);
-        inQueueMean.EnQue(meanLocal);
-        inQueueVariance.EnQue(varianceLocal);
     }
-    __aicore__ inline void Compute(int32_t progress)
+
+    __aicore__ inline void Compute(uint32_t rowIdx, AscendC::LocalTensor<float>& scaleLocal)
     {
         AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> weightLocal = inQueueWeight.DeQue<float>();
-        AscendC::LocalTensor<float> biasLocal = inQueueBias.DeQue<float>();
-        AscendC::LocalTensor<float> scaleLocal = inQueueScale.DeQue<float>();
-        AscendC::LocalTensor<float> meanLocal = inQueueMean.DeQue<float>();
-        AscendC::LocalTensor<float> varianceLocal = inQueueVariance.DeQue<float>();
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-
-        // GEMM operation
-        AscendC::MatMul(yLocal, xLocal, weightLocal, this->tileLength, this->tileLength, this->tileLength);
-
-        // Scale operation
-        AscendC::Mul(yLocal, yLocal, scaleLocal, this->tileLength);
-
-        // BatchNorm operation
-        AscendC::Sub(yLocal, yLocal, meanLocal, this->tileLength);
-        AscendC::Add(yLocal, yLocal, varianceLocal, this->tileLength);
-
-        outQueueY.EnQue<float>(yLocal);
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::Mul(zLocal, xLocal, scaleLocal, this->featureSize);
+        outQueueZ.EnQue<float>(zLocal);
         inQueueX.FreeTensor(xLocal);
-        inQueueWeight.FreeTensor(weightLocal);
-        inQueueBias.FreeTensor(biasLocal);
-        inQueueScale.FreeTensor(scaleLocal);
-        inQueueMean.FreeTensor(meanLocal);
-        inQueueVariance.FreeTensor(varianceLocal);
     }
-    __aicore__ inline void CopyOut(int32_t progress)
+
+    __aicore__ inline void CopyOut(uint32_t rowIdx)
     {
-        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
-        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
-        outQueueY.FreeTensor(yLocal);
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[(uint64_t)rowIdx * this->featureSize], zLocal, this->featureSize);
+        outQueueZ.FreeTensor(zLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueWeight, inQueueBias, inQueueScale, inQueueMean, inQueueVariance;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> scaleQueue;
     AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> weightGm;
-    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> zGm;
     AscendC::GlobalTensor<float> scaleGm;
-    AscendC::GlobalTensor<float> meanGm;
-    AscendC::GlobalTensor<float> varianceGm;
-    AscendC::GlobalTensor<float> yGm;
-    uint32_t batchSize;
-    uint32_t inFeatures;
-    uint32_t outFeatures;
-    uint32_t blockLength;
-    uint32_t tileNum;
-    uint32_t tileLength;
+    uint32_t featureSize;
+    uint32_t myRows;
 };
 
 extern "C" __global__ __aicore__ void gemm_scale_batch_norm_custom(
-    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR scale,
-    GM_ADDR mean, GM_ADDR variance, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GM_ADDR x, GM_ADDR scale, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
     KernelGemmScaleBatchNorm op;
-    op.Init(x, weight, bias, scale, mean, variance, y,
-            tiling_data.batchSize, tiling_data.inFeatures, tiling_data.outFeatures, tiling_data.tileNum);
+    op.Init(x, scale, z, tiling_data.batchSize, tiling_data.featureSize);
     op.Process();
 }

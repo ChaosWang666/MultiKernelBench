@@ -7,46 +7,22 @@
             {
                 "name": "x",
                 "param_type": "required",
-                "format": [
-                    "NCHW"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "multiplier",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
             }
         ],
         "output_desc": [
             {
                 "name": "z",
                 "param_type": "required",
-                "format": [
-                    "NCHW"
-                ],
-                "type": [
-                    "float"
-                ]
-            }
-        ],
-        "attr": [
-            {
-                "name": "in_channels",
-                "type": "int",
-                "default_value": "0"
-            },
-            {
-                "name": "out_channels",
-                "type": "int",
-                "default_value": "0"
-            },
-            {
-                "name": "kernel_size",
-                "type": "int",
-                "default_value": "0"
-            },
-            {
-                "name": "multiplier_shape",
-                "type": "list",
-                "default_value": "[0]"
+                "format": ["ND"],
+                "type": ["float"]
             }
         ]
     }

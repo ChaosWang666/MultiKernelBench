@@ -1,96 +1,137 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConvTranspose3dScalingAvgPoolBiasAddScaling {
+class KernelPostProcess {
 public:
-    __aicore__ inline KernelConvTranspose3dScalingAvgPoolBiasAddScaling() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t inChannels, uint32_t outChannels,
-                                uint32_t kernelSize, uint32_t stride, uint32_t padding,
-                                float scale1, float scale2, uint32_t biasShape0, uint32_t biasShape1,
-                                uint32_t biasShape2, uint32_t biasShape3, uint32_t totalLength)
-    {
-        this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->inChannels = inChannels;
-        this->outChannels = outChannels;
-        this->kernelSize = kernelSize;
-        this->stride = stride;
-        this->padding = padding;
-        this->scale1 = scale1;
-        this->scale2 = scale2;
-        this->biasShape0 = biasShape0;
-        this->biasShape1 = biasShape1;
-        this->biasShape2 = biasShape2;
-        this->biasShape3 = biasShape3;
+    __aicore__ inline KernelPostProcess() {}
 
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->blockLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->blockLength * sizeof(DTYPE_Z));
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR scale1, GM_ADDR scale2, GM_ADDR y,
+                                uint32_t totalOuter, uint32_t numChannels, uint32_t spatial, uint32_t tileSize)
+    {
+        this->numChannels = numChannels;
+        this->spatial = spatial;
+        this->tileSize = tileSize;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t outerPerBlock = (totalOuter + blockNum - 1) / blockNum;
+        this->outerStart = blockIdx * outerPerBlock;
+        uint32_t outerEndTmp = this->outerStart + outerPerBlock;
+        this->outerEnd = (outerEndTmp > totalOuter) ? totalOuter : outerEndTmp;
+
+        uint64_t totalElements = (uint64_t)totalOuter * (uint64_t)spatial;
+        xGm.SetGlobalBuffer((__gm__ float *)x, totalElements);
+        yGm.SetGlobalBuffer((__gm__ float *)y, totalElements);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, numChannels);
+        scale1Gm.SetGlobalBuffer((__gm__ float *)scale1, 1);
+        scale2Gm.SetGlobalBuffer((__gm__ float *)scale2, 1);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileSize * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, tileSize * sizeof(float));
+        pipe.InitBuffer(scale1Buf, 32);
+        pipe.InitBuffer(scale2Buf, 32);
+
+        uint32_t biasAlignedSize = ((numChannels * sizeof(float) + 31) / 32) * 32;
+        if (biasAlignedSize < 32) {
+            biasAlignedSize = 32;
+        }
+        pipe.InitBuffer(biasBuf, biasAlignedSize);
     }
+
     __aicore__ inline void Process()
     {
-        int32_t loopCount = 1;
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
+        if (outerStart >= outerEnd) {
+            return;
+        }
+
+        AscendC::LocalTensor<float> scale1Local = scale1Buf.Get<float>();
+        AscendC::LocalTensor<float> scale2Local = scale2Buf.Get<float>();
+        AscendC::LocalTensor<float> biasLocal = biasBuf.Get<float>();
+
+        {
+            AscendC::DataCopyExtParams cp{1, (uint32_t)sizeof(float), 0, 0, 0};
+            AscendC::DataCopyPadExtParams<float> pp{false, 0, 0, 0.0f};
+            AscendC::DataCopyPad(scale1Local, scale1Gm, cp, pp);
+            AscendC::DataCopyPad(scale2Local, scale2Gm, cp, pp);
+        }
+        {
+            AscendC::DataCopyExtParams cp{1, (uint32_t)(numChannels * sizeof(float)), 0, 0, 0};
+            AscendC::DataCopyPadExtParams<float> pp{false, 0, 0, 0.0f};
+            AscendC::DataCopyPad(biasLocal, biasGm, cp, pp);
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        float scale1Val = scale1Local.GetValue(0);
+        float scale2Val = scale2Local.GetValue(0);
+        float combinedScale = scale1Val * scale2Val;
+
+        for (uint32_t outer = outerStart; outer < outerEnd; outer++) {
+            uint32_t c = outer % numChannels;
+            float biasVal = biasLocal.GetValue(c);
+            float biasScaled = scale2Val * biasVal;
+
+            uint64_t baseOffset = (uint64_t)outer * (uint64_t)spatial;
+            uint32_t processed = 0;
+            while (processed < spatial) {
+                uint32_t remain = spatial - processed;
+                uint32_t curSize = (remain < tileSize) ? remain : tileSize;
+                CopyIn(baseOffset + processed, curSize);
+                Compute(curSize, combinedScale, biasScaled);
+                CopyOut(baseOffset + processed, curSize);
+                processed += curSize;
+            }
         }
     }
 
 private:
-    __aicore__ inline void CopyIn(int32_t progress)
+    __aicore__ inline void CopyIn(uint64_t offset, uint32_t size)
     {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->blockLength], this->blockLength);
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopyExtParams cp{1, (uint32_t)(size * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<float> pp{false, 0, 0, 0.0f};
+        AscendC::DataCopyPad(xLocal, xGm[offset], cp, pp);
         inQueueX.EnQue(xLocal);
     }
-    __aicore__ inline void Compute(int32_t progress)
+
+    __aicore__ inline void Compute(uint32_t size, float scale, float bias)
     {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        // Simulate operations: ConvTranspose3d, Scale1, AvgPool3d, BiasAdd, Scale2
-        // For simplicity, we just do element-wise operations here
-        AscendC::Mul(zLocal, xLocal, this->scale1, this->blockLength);
-        AscendC::Add(zLocal, zLocal, this->scale2, this->blockLength);
-        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+        AscendC::Muls<float>(yLocal, xLocal, scale, size);
+        AscendC::Adds<float>(yLocal, yLocal, bias, size);
+        outQueueY.EnQue<float>(yLocal);
         inQueueX.FreeTensor(xLocal);
     }
-    __aicore__ inline void CopyOut(int32_t progress)
+
+    __aicore__ inline void CopyOut(uint64_t offset, uint32_t size)
     {
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
-        AscendC::DataCopy(zGm[progress * this->blockLength], zLocal, this->blockLength);
-        outQueueZ.FreeTensor(zLocal);
+        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+        AscendC::DataCopyExtParams cp{1, (uint32_t)(size * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPad(yGm[offset], yLocal, cp);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::GlobalTensor<DTYPE_X> xGm;
-    AscendC::GlobalTensor<DTYPE_Z> zGm;
-    uint32_t blockLength;
-    uint32_t inChannels;
-    uint32_t outChannels;
-    uint32_t kernelSize;
-    uint32_t stride;
-    uint32_t padding;
-    float scale1;
-    float scale2;
-    uint32_t biasShape0;
-    uint32_t biasShape1;
-    uint32_t biasShape2;
-    uint32_t biasShape3;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> scale1Buf, scale2Buf, biasBuf;
+    AscendC::GlobalTensor<float> xGm, yGm, biasGm, scale1Gm, scale2Gm;
+    uint32_t numChannels;
+    uint32_t spatial;
+    uint32_t tileSize;
+    uint32_t outerStart;
+    uint32_t outerEnd;
 };
 
 extern "C" __global__ __aicore__ void conv_transpose3d_scaling_avg_pool_bias_add_scaling_custom(
-    GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GM_ADDR x, GM_ADDR bias, GM_ADDR scale1, GM_ADDR scale2, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConvTranspose3dScalingAvgPoolBiasAddScaling op;
-    op.Init(x, z, tiling_data.inChannels, tiling_data.outChannels, tiling_data.kernelSize,
-            tiling_data.stride, tiling_data.padding, tiling_data.scale1, tiling_data.scale2,
-            tiling_data.biasShape0, tiling_data.biasShape1, tiling_data.biasShape2, tiling_data.biasShape3,
-            tiling_data.totalLength);
+    KernelPostProcess op;
+    op.Init(x, bias, scale1, scale2, y,
+            tiling_data.totalOuter, tiling_data.numChannels, tiling_data.spatial, tiling_data.tileSize);
     op.Process();
 }

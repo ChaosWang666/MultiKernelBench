@@ -1,5 +1,5 @@
 # Hashes of file build rules.
-c24ffd8ba8a5b5f8603e2be910507b34 CMakeFiles/gen_version_info
+dc7d09beb07075168d5dbaf2729dc134 CMakeFiles/gen_version_info
 cb1c276cbdb989eced0e19204475dda2 CMakeFiles/modify_vendor
 c0e0fa7486cb8635c242661fe2ba6efd op_host/CMakeFiles/optiling_compat
 5d1d18078bd2ef44d79b1c55aa11c80c op_kernel/CMakeFiles/MatmulScaleResidualAddClampLogSumExpMishCustom_ascend910b

@@ -17,7 +17,7 @@ op_host/CMakeFiles/cust_opapi.dir/__/autogen/aclnn_matmul_gelu_softmax_custom.cp
   /usr/include/strings.h \
   /usr/include/aarch64-linux-gnu/bits/strings_fortified.h \
   /usr/include/aarch64-linux-gnu/bits/string_fortified.h \
-  /home/developer/Ascend/cann-9.0.0/include/graph/types.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/types.h \
   /usr/include/c++/9/atomic \
   /usr/include/c++/9/bits/atomic_base.h \
   /usr/include/aarch64-linux-gnu/c++/9/bits/c++config.h \
@@ -187,23 +187,21 @@ op_host/CMakeFiles/cust_opapi.dir/__/autogen/aclnn_matmul_gelu_softmax_custom.cp
   /usr/include/c++/9/bits/stl_vector.h \
   /usr/include/c++/9/bits/stl_bvector.h \
   /usr/include/c++/9/bits/vector.tcc \
-  /home/developer/Ascend/cann-9.0.0/include/graph/c_types.h \
+  /home/developer/Ascend/cann-8.5.0/include/graph/c_types.h \
   autogen/aclnn_matmul_gelu_softmax_custom.h \
-  /home/developer/Ascend/cann-9.0.0/include/aclnn/acl_meta.h \
-  /home/developer/Ascend/cann-9.0.0/include/acl/acl_base.h \
-  /home/developer/Ascend/cann-9.0.0/include/acl/acl_base_rt.h \
-  /home/developer/Ascend/cann-9.0.0/include/acl/acl_base_mdl.h \
-  /home/developer/Ascend/cann-9.0.0/include/acl/error_codes/rt_error_codes.h \
-  /home/developer/Ascend/cann-9.0.0/include/acl/error_codes/ge_error_codes.h
+  /home/developer/Ascend/cann-8.5.0/include/aclnn/acl_meta.h \
+  /home/developer/Ascend/cann-8.5.0/include/acl/acl_base.h \
+  /home/developer/Ascend/cann-8.5.0/include/acl/acl_base_rt.h \
+  /home/developer/Ascend/cann-8.5.0/include/acl/acl_base_mdl.h \
+  /home/developer/Ascend/cann-8.5.0/include/acl/error_codes/rt_error_codes.h \
+  /home/developer/Ascend/cann-8.5.0/include/acl/error_codes/ge_error_codes.h
 
 
-/home/developer/Ascend/cann-9.0.0/include/acl/error_codes/ge_error_codes.h:
+/home/developer/Ascend/cann-8.5.0/include/acl/acl_base_mdl.h:
 
-/home/developer/Ascend/cann-9.0.0/include/acl/error_codes/rt_error_codes.h:
+/home/developer/Ascend/cann-8.5.0/include/acl/acl_base_rt.h:
 
-/home/developer/Ascend/cann-9.0.0/include/acl/acl_base_rt.h:
-
-/home/developer/Ascend/cann-9.0.0/include/aclnn/acl_meta.h:
+/home/developer/Ascend/cann-8.5.0/include/graph/c_types.h:
 
 /usr/include/c++/9/bits/vector.tcc:
 
@@ -343,6 +341,8 @@ op_host/CMakeFiles/cust_opapi.dir/__/autogen/aclnn_matmul_gelu_softmax_custom.cp
 
 /usr/include/aarch64-linux-gnu/bits/types/__fpos_t.h:
 
+/home/developer/Ascend/cann-8.5.0/include/acl/error_codes/ge_error_codes.h:
+
 /usr/include/c++/9/bits/nested_exception.h:
 
 /usr/include/c++/9/array:
@@ -353,13 +353,17 @@ op_host/CMakeFiles/cust_opapi.dir/__/autogen/aclnn_matmul_gelu_softmax_custom.cp
 
 /usr/include/c++/9/backward/binders.h:
 
+/home/developer/Ascend/cann-8.5.0/include/graph/types.h:
+
+/usr/include/c++/9/ext/atomicity.h:
+
+/usr/include/aarch64-linux-gnu/bits/libc-header-start.h:
+
+/usr/include/aarch64-linux-gnu/bits/waitstatus.h:
+
 /usr/include/c++/9/bits/exception_ptr.h:
 
 /usr/include/c++/9/bits/ptr_traits.h:
-
-/home/developer/Ascend/cann-9.0.0/include/acl/acl_base_mdl.h:
-
-/home/developer/Ascend/cann-9.0.0/include/acl/acl_base.h:
 
 /usr/include/c++/9/vector:
 
@@ -368,6 +372,8 @@ op_host/CMakeFiles/cust_opapi.dir/__/autogen/aclnn_matmul_gelu_softmax_custom.cp
 /usr/include/aarch64-linux-gnu/bits/timesize.h:
 
 /usr/include/aarch64-linux-gnu/bits/types/mbstate_t.h:
+
+/home/developer/Ascend/cann-8.5.0/include/acl/error_codes/rt_error_codes.h:
 
 /usr/include/features.h:
 
@@ -380,8 +386,6 @@ op_host/CMakeFiles/cust_opapi.dir/__/autogen/aclnn_matmul_gelu_softmax_custom.cp
 /usr/include/aarch64-linux-gnu/c++/9/bits/cpu_defines.h:
 
 /usr/include/aarch64-linux-gnu/bits/types/struct_timespec.h:
-
-/home/developer/Ascend/cann-9.0.0/include/graph/types.h:
 
 /usr/include/aarch64-linux-gnu/bits/types.h:
 
@@ -413,6 +417,8 @@ autogen/aclnn_matmul_gelu_softmax_custom.cpp:
 
 /usr/include/aarch64-linux-gnu/c++/9/bits/os_defines.h:
 
+/home/developer/Ascend/cann-8.5.0/include/acl/acl_base.h:
+
 /usr/include/c++/9/stdexcept:
 
 /usr/include/c++/9/ext/numeric_traits.h:
@@ -433,13 +439,9 @@ autogen/aclnn_matmul_gelu_softmax_custom.cpp:
 
 /usr/include/aarch64-linux-gnu/bits/sys_errlist.h:
 
-/usr/include/c++/9/ext/atomicity.h:
-
-/usr/include/aarch64-linux-gnu/bits/libc-header-start.h:
-
-/usr/include/aarch64-linux-gnu/bits/waitstatus.h:
-
 /usr/include/aarch64-linux-gnu/c++/9/bits/gthr.h:
+
+/home/developer/Ascend/cann-8.5.0/include/aclnn/acl_meta.h:
 
 /usr/include/pthread.h:
 
@@ -554,8 +556,6 @@ autogen/aclnn_matmul_gelu_softmax_custom.h:
 /usr/include/c++/9/cstdio:
 
 /usr/include/aarch64-linux-gnu/bits/byteswap.h:
-
-/home/developer/Ascend/cann-9.0.0/include/graph/c_types.h:
 
 /usr/include/aarch64-linux-gnu/bits/stdio2.h:
 

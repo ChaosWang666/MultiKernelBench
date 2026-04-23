@@ -15,6 +15,9 @@ extern "C" {
 /* funtion: aclnnMatmulScaleResidualAddClampLogSumExpMishCustomGetWorkspaceSize
  * parameters :
  * x : required
+ * scaleFactor : required
+ * clampMin : required
+ * clampMax : required
  * out : required
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
@@ -22,6 +25,9 @@ extern "C" {
 __attribute__((visibility("default")))
 aclnnStatus aclnnMatmulScaleResidualAddClampLogSumExpMishCustomGetWorkspaceSize(
     const aclTensor *x,
+    double scaleFactor,
+    double clampMin,
+    double clampMax,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);

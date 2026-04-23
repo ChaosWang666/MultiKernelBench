@@ -2,27 +2,32 @@
 #include "conv3d_leaky_relu_sum_clamp_gelu_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 2048;
+const uint32_t BLOCK_DIM = 20;
+const uint32_t ROW_TILE_SIZE = 8192;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv3dLeakyReluSumClampGeluCustomTilingData tiling;
-    const gert::Shape* xShape = context->GetInputShape(0);
-    uint32_t totalLength = xShape->GetOriginShape().GetShapeSize();
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t totalDims = xShape.GetDimNum();
 
-    // x shape is [N, C, D, H, W]
-    uint32_t outChannels = xShape->GetOriginShape().GetDim(1);
+    uint32_t N = (totalDims > 0) ? static_cast<uint32_t>(xShape.GetDim(0)) : 1;
+    uint32_t C = (totalDims > 1) ? static_cast<uint32_t>(xShape.GetDim(1)) : 1;
     uint32_t spatialSize = 1;
-    for (int i = 2; i < xShape->GetOriginShape().GetDimNum(); i++) {
-        spatialSize *= xShape->GetOriginShape().GetDim(i);
+    for (uint32_t i = 2; i < totalDims; i++) {
+        spatialSize *= static_cast<uint32_t>(xShape.GetDim(i));
     }
 
+    uint32_t totalRows = N * C;
+
     context->SetBlockDim(BLOCK_DIM);
-    tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(TILE_NUM);
-    tiling.set_outChannels(outChannels);
+    tiling.set_totalRows(totalRows);
+    tiling.set_channelSize(C);
     tiling.set_spatialSize(spatialSize);
+    tiling.set_rowTileSize(ROW_TILE_SIZE);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -30,6 +35,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -47,6 +53,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 }
 }
 
+
 namespace ops {
 class Conv3dLeakyReluSumClampGeluCustom : public OpDef {
 public:
@@ -62,7 +69,7 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})

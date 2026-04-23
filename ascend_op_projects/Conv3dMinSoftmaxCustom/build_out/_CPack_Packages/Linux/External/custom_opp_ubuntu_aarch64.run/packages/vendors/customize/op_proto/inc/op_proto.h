@@ -9,11 +9,6 @@ namespace ge {
 REG_OP(Conv3dMinSoftmaxCustom)
     .INPUT(x, ge::TensorType::ALL())
     .OUTPUT(y, ge::TensorType::ALL())
-    .REQUIRED_ATTR(dimD, Int)
-    .REQUIRED_ATTR(channels, Int)
-    .REQUIRED_ATTR(height, Int)
-    .REQUIRED_ATTR(width, Int)
-    .REQUIRED_ATTR(batchSize, Int)
     .OP_END_FACTORY_REG(Conv3dMinSoftmaxCustom);
 
 }

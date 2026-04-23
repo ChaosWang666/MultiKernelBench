@@ -20,11 +20,6 @@
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
         }
-      ],
-      "attrs": [
-        {
-          "name": "subtract_value"
-        }
       ]
     },
     "binaryList": [
@@ -36,8 +31,8 @@
           "Conv2dSubtractSubtractMishCustom/d=1,p=1/0,2/0,2",
           "Conv2dSubtractSubtractMishCustom/d=1,p=0/0,2/0,2"
         ],
-        "binPath": "ascend910b/conv2d_subtract_subtract_mish_custom/Conv2dSubtractSubtractMishCustom_c66c41db5ebd93988160d46209024e30.o",
-        "jsonPath": "ascend910b/conv2d_subtract_subtract_mish_custom/Conv2dSubtractSubtractMishCustom_c66c41db5ebd93988160d46209024e30.json"
+        "binPath": "ascend910b/conv2d_subtract_subtract_mish_custom/Conv2dSubtractSubtractMishCustom_c116d1f49d38c5b190f8f33bd89052a7.o",
+        "jsonPath": "ascend910b/conv2d_subtract_subtract_mish_custom/Conv2dSubtractSubtractMishCustom_c116d1f49d38c5b190f8f33bd89052a7.json"
       }
     ]
   }

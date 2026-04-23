@@ -2,9 +2,11 @@
 #include "gemm_multiply_leakyrelu_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 4096;
+const uint32_t TILE_NUM = 16;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     GemmMultiplyLeakyreluCustomTilingData tiling;
@@ -13,13 +15,13 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_totalLength(totalLength);
     tiling.set_tileNum(TILE_NUM);
 
-    const float* multiplierPtr = context->GetAttrs()->GetAttrPointer<float>(0);
-    float multiplier = multiplierPtr ? *multiplierPtr : 1.0f;
+    auto* attrs = context->GetAttrs();
+    const float* multiplierPtr = attrs->GetAttrPointer<float>(0);
+    const float* negSlopePtr   = attrs->GetAttrPointer<float>(1);
+    float multiplier = (multiplierPtr != nullptr) ? *multiplierPtr : 1.0f;
+    float negSlope   = (negSlopePtr   != nullptr) ? *negSlopePtr   : 0.0f;
     tiling.set_multiplier(multiplier);
-
-    const float* negativeSlopePtr = context->GetAttrs()->GetAttrPointer<float>(1);
-    float negativeSlope = negativeSlopePtr ? *negativeSlopePtr : 0.01f;
-    tiling.set_negativeSlope(negativeSlope);
+    tiling.set_negSlope(negSlope);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
@@ -28,6 +30,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -45,6 +48,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 }
 }
 
+
 namespace ops {
 class GemmMultiplyLeakyreluCustom : public OpDef {
 public:
@@ -55,27 +59,14 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("weight")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("bias")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("multiplier")
-            .AttrType(REQUIRED)
-            .Float();
-        this->Attr("negativeSlope")
-            .AttrType(REQUIRED)
-            .Float();
+
+        this->Attr("multiplier").Float();
+        this->Attr("negative_slope").Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 

@@ -1,5 +1,5 @@
 # Hashes of file build rules.
-6282dbaea19d2a3eddee9695580e5f98 CMakeFiles/gen_version_info
+9f56d9df26597d3eab7f1c619b47ce98 CMakeFiles/gen_version_info
 8e3af8882368240453c4959cb388962b CMakeFiles/modify_vendor
 02a42a1c8c39e8f90db8f91ef2007fd9 op_host/CMakeFiles/optiling_compat
 e706cd479f16b285b817b9784c828067 op_kernel/CMakeFiles/BmmInstanceNormSumResidualAddMultiplyCustom_ascend910b

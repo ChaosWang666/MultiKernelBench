@@ -34,8 +34,8 @@
         "attr": [
             {
                 "name": "scaling_factor",
-                "param_type": "required",
-                "type": "float"
+                "type": "float",
+                "param_type": "required"
             }
         ]
     }

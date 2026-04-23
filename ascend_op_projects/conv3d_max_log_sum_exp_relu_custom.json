@@ -8,7 +8,7 @@
                 "name": "x",
                 "param_type": "required",
                 "format": [
-                    "NCDHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
@@ -17,41 +17,14 @@
         ],
         "output_desc": [
             {
-                "name": "z",
+                "name": "y",
                 "param_type": "required",
                 "format": [
-                    "NCDHW"
+                    "ND"
                 ],
                 "type": [
                     "float"
                 ]
-            }
-        ],
-        "attr": [
-            {
-                "name": "in_channels",
-                "type": "int",
-                "param_type": "required"
-            },
-            {
-                "name": "out_channels",
-                "type": "int",
-                "param_type": "required"
-            },
-            {
-                "name": "kernel_size",
-                "type": "int",
-                "param_type": "required"
-            },
-            {
-                "name": "stride",
-                "type": "int",
-                "param_type": "required"
-            },
-            {
-                "name": "padding",
-                "type": "int",
-                "param_type": "required"
             }
         ]
     }

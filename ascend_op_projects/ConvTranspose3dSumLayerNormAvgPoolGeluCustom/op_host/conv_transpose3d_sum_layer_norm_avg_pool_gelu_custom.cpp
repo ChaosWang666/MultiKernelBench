@@ -2,20 +2,22 @@
 #include "conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 512;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose3dSumLayerNormAvgPoolGeluCustomTilingData tiling;
-    const gert::Shape* inputShape = context->GetInputShape(0);
-    const std::vector<int64_t>& shape = inputShape->GetOriginShape().GetDims();
-    tiling.set_batchSize(shape[0]);
-    tiling.set_inChannels(shape[1]);
-    tiling.set_depth(shape[2]);
-    tiling.set_height(shape[3]);
-    tiling.set_width(shape[4]);
-
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
     context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+
+    const gert::RuntimeAttrs* attrs = context->GetAttrs();
+    const float* sumWeight = attrs->GetAttrPointer<float>(0);
+    tiling.set_sumWeight(*sumWeight);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -23,6 +25,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -34,11 +37,12 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-const auto inputDataType = context->GetInputDataType(0);
-context->SetOutputDataType(0, inputDataType);
-return ge::GRAPH_SUCCESS;
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class ConvTranspose3dSumLayerNormAvgPoolGeluCustom : public OpDef {
@@ -50,18 +54,18 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("sum_weight").AttrType(REQUIRED).Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
-
     }
 };
 

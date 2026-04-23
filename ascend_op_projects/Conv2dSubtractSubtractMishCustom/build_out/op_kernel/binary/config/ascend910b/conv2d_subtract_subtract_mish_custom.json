@@ -10,7 +10,7 @@
         "Conv2dSubtractSubtractMishCustom/d=1,p=1/0,2/0,2",
         "Conv2dSubtractSubtractMishCustom/d=1,p=0/0,2/0,2"
       ],
-      "staticKey": "fc7c64e4a23910ca38d9ecf8e29c0a37df0c171f572768ed7a5ba0ab5d60d4ec,794cb4832899a70050bca87528bcf29bc742bfabd2bad2c5aa0b2e32ea7086fb",
+      "staticKey": "ed019adc02c4ef2c154076e56faf06976be9b74c8438bfd28b1cccb0b7635e35,174b597c066dd43443d16f1cbf342fb69d122ca8a248e828c078b208c9bfe6f7",
       "inputs": [
         {
           "name": "x",
@@ -37,19 +37,12 @@
           "format_match_mode": "FormatAgnostic"
         }
       ],
-      "attrs": [
-        {
-          "name": "subtract_value",
-          "dtype": "float",
-          "value": 0.0
-        }
-      ],
       "opMode": "dynamic",
       "optionalInputMode": "gen_placeholder",
       "deterministic": "ignore",
       "optionalOutputMode": "gen_placeholder",
       "binInfo": {
-        "jsonFilePath": "ascend910b/conv2d_subtract_subtract_mish_custom/Conv2dSubtractSubtractMishCustom_c66c41db5ebd93988160d46209024e30.json"
+        "jsonFilePath": "ascend910b/conv2d_subtract_subtract_mish_custom/Conv2dSubtractSubtractMishCustom_c116d1f49d38c5b190f8f33bd89052a7.json"
       }
     }
   ]

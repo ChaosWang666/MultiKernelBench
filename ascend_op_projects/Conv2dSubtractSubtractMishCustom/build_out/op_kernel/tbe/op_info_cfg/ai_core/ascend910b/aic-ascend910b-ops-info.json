@@ -1,13 +1,5 @@
 {
     "Conv2dSubtractSubtractMishCustom":{
-        "attr":{
-            "list":"subtract_value"
-        },
-        "attr_subtract_value":{
-            "paramType":"required",
-            "type":"float",
-            "value":"all"
-        },
         "coreType":{
             "value":"AiCore"
         },

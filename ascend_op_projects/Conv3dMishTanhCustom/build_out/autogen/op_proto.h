@@ -8,7 +8,7 @@ namespace ge {
 
 REG_OP(Conv3dMishTanhCustom)
     .INPUT(x, ge::TensorType::ALL())
-    .OUTPUT(y, ge::TensorType::ALL())
+    .OUTPUT(z, ge::TensorType::ALL())
     .OP_END_FACTORY_REG(Conv3dMishTanhCustom);
 
 }

@@ -4,24 +4,34 @@
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 4096;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     GemmGroupNormHardtanhCustomTilingData tiling;
-    uint32_t batch_size = context->GetInputShape(0)->GetOriginShape().GetDim(0);
-    uint32_t in_features = context->GetInputShape(0)->GetOriginShape().GetDim(1);
-    uint32_t out_features = context->GetAttrInt64("out_features");
-    uint32_t num_groups = context->GetAttrInt64("num_groups");
-    float hardtanh_min = context->GetAttrFloat("hardtanh_min");
-    float hardtanh_max = context->GetAttrFloat("hardtanh_max");
 
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batch_size(batch_size);
-    tiling.set_in_features(in_features);
-    tiling.set_out_features(out_features);
-    tiling.set_num_groups(num_groups);
-    tiling.set_hardtanh_min(hardtanh_min);
-    tiling.set_hardtanh_max(hardtanh_max);
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t totalRows = (uint32_t)xShape.GetDim(0);
+    uint32_t outFeatures = (uint32_t)xShape.GetDim(1);
+
+    auto attrs = context->GetAttrs();
+    const int64_t* numGroupsPtr = attrs->GetAttrPointer<int64_t>(0);
+    const float* htMinPtr = attrs->GetAttrPointer<float>(1);
+    const float* htMaxPtr = attrs->GetAttrPointer<float>(2);
+    const float* epsPtr = attrs->GetAttrPointer<float>(3);
+
+    uint32_t numGroups = (uint32_t)(*numGroupsPtr);
+    uint32_t blockDim = BLOCK_DIM;
+    uint32_t rowsPerBlock = (totalRows + blockDim - 1) / blockDim;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_totalRows(totalRows);
+    tiling.set_outFeatures(outFeatures);
+    tiling.set_numGroups(numGroups);
+    tiling.set_rowsPerBlock(rowsPerBlock);
+    tiling.set_htMin(*htMinPtr);
+    tiling.set_htMax(*htMaxPtr);
+    tiling.set_eps(*epsPtr);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -29,6 +39,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -40,11 +51,12 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-const auto inputDataType = context->GetInputDataType(0);
-context->SetOutputDataType(0, inputDataType);
-return ge::GRAPH_SUCCESS;
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class GemmGroupNormHardtanhCustom : public OpDef {
@@ -56,16 +68,26 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
+        this->Input("gamma")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("in_features").SetType(ATTR_TYPE_INT64).SetRequired(true);
-        this->Attr("out_features").SetType(ATTR_TYPE_INT64).SetRequired(true);
-        this->Attr("num_groups").SetType(ATTR_TYPE_INT64).SetRequired(true);
-        this->Attr("hardtanh_min").SetType(ATTR_TYPE_FLOAT).SetRequired(true);
-        this->Attr("hardtanh_max").SetType(ATTR_TYPE_FLOAT).SetRequired(true);
+        this->Input("beta")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Attr("num_groups").Int();
+        this->Attr("hardtanh_min").Float();
+        this->Attr("hardtanh_max").Float();
+        this->Attr("eps").Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 

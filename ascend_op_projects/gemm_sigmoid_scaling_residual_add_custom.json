@@ -37,7 +37,7 @@
         ],
         "output_desc": [
             {
-                "name": "z",
+                "name": "y",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -47,9 +47,9 @@
                 ]
             }
         ],
-        "attr_desc": [
+        "attr": [
             {
-                "name": "scalingFactor",
+                "name": "scaling_factor",
                 "param_type": "required",
                 "type": "float"
             }

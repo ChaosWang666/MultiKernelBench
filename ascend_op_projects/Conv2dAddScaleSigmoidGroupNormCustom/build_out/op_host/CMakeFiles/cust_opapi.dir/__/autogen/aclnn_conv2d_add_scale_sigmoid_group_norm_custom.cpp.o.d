@@ -13,7 +13,7 @@ op_host/CMakeFiles/cust_opapi.dir/__/autogen/aclnn_conv2d_add_scale_sigmoid_grou
  /usr/include/strings.h \
  /usr/include/aarch64-linux-gnu/bits/strings_fortified.h \
  /usr/include/aarch64-linux-gnu/bits/string_fortified.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/types.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/types.h \
  /usr/include/c++/9/atomic /usr/include/c++/9/bits/atomic_base.h \
  /usr/include/aarch64-linux-gnu/c++/9/bits/c++config.h \
  /usr/include/aarch64-linux-gnu/c++/9/bits/os_defines.h \
@@ -150,11 +150,11 @@ op_host/CMakeFiles/cust_opapi.dir/__/autogen/aclnn_conv2d_add_scale_sigmoid_grou
  /usr/include/c++/9/backward/auto_ptr.h /usr/include/c++/9/vector \
  /usr/include/c++/9/bits/stl_vector.h \
  /usr/include/c++/9/bits/stl_bvector.h /usr/include/c++/9/bits/vector.tcc \
- /home/developer/Ascend/cann-9.0.0/include/graph/c_types.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/c_types.h \
  /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/Conv2dAddScaleSigmoidGroupNormCustom/build_out/autogen/aclnn_conv2d_add_scale_sigmoid_group_norm_custom.h \
- /home/developer/Ascend/cann-9.0.0/include/aclnn/acl_meta.h \
- /home/developer/Ascend/cann-9.0.0/include/acl/acl_base.h \
- /home/developer/Ascend/cann-9.0.0/include/acl/acl_base_rt.h \
- /home/developer/Ascend/cann-9.0.0/include/acl/acl_base_mdl.h \
- /home/developer/Ascend/cann-9.0.0/include/acl/error_codes/rt_error_codes.h \
- /home/developer/Ascend/cann-9.0.0/include/acl/error_codes/ge_error_codes.h
+ /home/developer/Ascend/cann-8.5.0/include/aclnn/acl_meta.h \
+ /home/developer/Ascend/cann-8.5.0/include/acl/acl_base.h \
+ /home/developer/Ascend/cann-8.5.0/include/acl/acl_base_rt.h \
+ /home/developer/Ascend/cann-8.5.0/include/acl/acl_base_mdl.h \
+ /home/developer/Ascend/cann-8.5.0/include/acl/error_codes/rt_error_codes.h \
+ /home/developer/Ascend/cann-8.5.0/include/acl/error_codes/ge_error_codes.h

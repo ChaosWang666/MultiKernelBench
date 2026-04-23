@@ -3,24 +3,47 @@
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelBiasAddDivideSwish {
+class KernelMatmulBatchNormBiasAddDivideSwish {
 public:
-    __aicore__ inline KernelBiasAddDivideSwish() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR divideVal, GM_ADDR z, uint32_t totalLength, uint32_t tileNum)
+    __aicore__ inline KernelMatmulBatchNormBiasAddDivideSwish() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t totalLength, uint32_t tileNum, float divideValue)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
         this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->invDivideValue = 1.0f / divideValue;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        biasGm.SetGlobalBuffer((__gm__ float *)bias, 1);
-        divideValGm.SetGlobalBuffer((__gm__ float *)divideVal, 1);
-        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(),
+                            this->blockLength);
+        biasGm.SetGlobalBuffer((__gm__ DTYPE_BIAS *)bias, 1);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(),
+                            this->blockLength);
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuffer, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(biasBuf, 32);
+
+        AscendC::LocalTensor<float> biasLocal = biasBuf.Get<float>();
+        AscendC::DataCopyExtParams biasCopyParams;
+        biasCopyParams.blockCount = 1;
+        biasCopyParams.blockLen = (uint32_t)sizeof(float);
+        biasCopyParams.srcStride = 0;
+        biasCopyParams.dstStride = 0;
+        biasCopyParams.rsv = 0;
+        AscendC::DataCopyPadExtParams<float> biasPadParams;
+        biasPadParams.isPad = false;
+        biasPadParams.leftPadding = 0;
+        biasPadParams.rightPadding = 0;
+        biasPadParams.paddingValue = 0.0f;
+        AscendC::DataCopyPad(biasLocal, biasGm, biasCopyParams, biasPadParams);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        this->biasValue = biasLocal.GetValue(0);
+        this->scaledBias = this->biasValue * this->invDivideValue;
     }
+
     __aicore__ inline void Process()
     {
         int32_t loopCount = this->tileNum * BUFFER_NUM;
@@ -34,63 +57,58 @@ public:
 private:
     __aicore__ inline void CopyIn(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
         AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
         inQueueX.EnQue(xLocal);
     }
+
     __aicore__ inline void Compute(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
-        AscendC::LocalTensor<float> tmpLocal = tmpBuffer.Get<float>();
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
 
-        // bias add: x = x + bias
-        float biasVal = biasGm.GetValue(0);
-        AscendC::Adds(zLocal, xLocal, biasVal, this->tileLength);
+        AscendC::Muls(tmpLocal, xLocal, this->invDivideValue, this->tileLength);
+        AscendC::Adds(tmpLocal, tmpLocal, this->scaledBias, this->tileLength);
 
-        // divide: x = x / divide_value
-        float divVal = divideValGm.GetValue(0);
-        float invDiv = 1.0f / divVal;
-        AscendC::Muls(zLocal, zLocal, invDiv, this->tileLength);
+        AscendC::Muls(xLocal, tmpLocal, -1.0f, this->tileLength);
+        AscendC::Exp(xLocal, xLocal, this->tileLength);
+        AscendC::Adds(xLocal, xLocal, 1.0f, this->tileLength);
+        AscendC::Div(yLocal, tmpLocal, xLocal, this->tileLength);
 
-        // swish: x = x * sigmoid(x)
-        // sigmoid(x) = 1 / (1 + exp(-x))
-        // Compute sigmoid into tmpLocal
-        AscendC::Muls(tmpLocal, zLocal, -1.0f, this->tileLength);
-        AscendC::Exp(tmpLocal, tmpLocal, this->tileLength);
-        AscendC::Adds(tmpLocal, tmpLocal, 1.0f, this->tileLength);
-        AscendC::Reciprocal(tmpLocal, tmpLocal, this->tileLength);
-
-        // x * sigmoid(x)
-        AscendC::Mul(zLocal, zLocal, tmpLocal, this->tileLength);
-
-        outQueueZ.EnQue<float>(zLocal);
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
     }
+
     __aicore__ inline void CopyOut(int32_t progress)
     {
-        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
-        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
-        outQueueZ.FreeTensor(zLocal);
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuffer;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> biasGm;
-    AscendC::GlobalTensor<float> divideValGm;
-    AscendC::GlobalTensor<float> zGm;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> biasBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_BIAS> biasGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
+    float invDivideValue;
+    float biasValue;
+    float scaledBias;
 };
 
-extern "C" __global__ __aicore__ void matmul_batch_norm_bias_add_divide_swish_custom(GM_ADDR x, GM_ADDR bias, GM_ADDR divide_val, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void matmul_batch_norm_bias_add_divide_swish_custom(
+    GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelBiasAddDivideSwish op;
-    op.Init(x, bias, divide_val, z, tiling_data.totalLength, tiling_data.tileNum);
+    KernelMatmulBatchNormBiasAddDivideSwish op;
+    op.Init(x, bias, y, tiling_data.totalLength, tiling_data.tileNum, tiling_data.divideValue);
     op.Process();
 }

@@ -26,6 +26,13 @@
                     "float"
                 ]
             }
+        ],
+        "attr": [
+            {
+                "name": "scale",
+                "param_type": "required",
+                "type": "float"
+            }
         ]
     }
 ]

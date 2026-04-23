@@ -6,149 +6,120 @@ constexpr int32_t BUFFER_NUM = 2;
 class KernelMatmulAddSwishTanhGeluHardtanh {
 public:
     __aicore__ inline KernelMatmulAddSwishTanhGeluHardtanh() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR addVal, GM_ADDR z, uint32_t totalLength, uint32_t tileNum, uint32_t addValueLength)
-    {
-        this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->tileNum = tileNum;
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
-        this->addValueLength = addValueLength;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        addValGm.SetGlobalBuffer((__gm__ float *)addVal, addValueLength);
-        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueAdd, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR addValue, GM_ADDR y,
+                                  uint32_t totalRows, uint32_t cols)
+    {
+        this->cols = cols;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockDim = AscendC::GetBlockNum();
+
+        uint32_t rowsPerBlock = totalRows / blockDim;
+        uint32_t remainder = totalRows % blockDim;
+
+        uint32_t startRow;
+        if (blockIdx < remainder) {
+            this->rowCount = rowsPerBlock + 1;
+            startRow = blockIdx * this->rowCount;
+        } else {
+            this->rowCount = rowsPerBlock;
+            startRow = remainder * (rowsPerBlock + 1) + (blockIdx - remainder) * rowsPerBlock;
+        }
+
+        if (this->rowCount == 0) {
+            xGm.SetGlobalBuffer((__gm__ float*)x, 0);
+            yGm.SetGlobalBuffer((__gm__ float*)y, 0);
+            addGm.SetGlobalBuffer((__gm__ float*)addValue, cols);
+            return;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float*)x + startRow * cols, this->rowCount * cols);
+        yGm.SetGlobalBuffer((__gm__ float*)y + startRow * cols, this->rowCount * cols);
+        addGm.SetGlobalBuffer((__gm__ float*)addValue, cols);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, cols * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, cols * sizeof(float));
+        pipe.InitBuffer(addQueue, 1, cols * sizeof(float));
     }
+
     __aicore__ inline void Process()
     {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
-        for (int32_t i = 0; i < loopCount; i++) {
+        if (this->rowCount == 0) {
+            return;
+        }
+
+        AscendC::LocalTensor<float> addTmp = addQueue.AllocTensor<float>();
+        AscendC::DataCopy(addTmp, addGm, this->cols);
+        addQueue.EnQue(addTmp);
+        AscendC::LocalTensor<float> addLocal = addQueue.DeQue<float>();
+
+        for (uint32_t i = 0; i < this->rowCount; i++) {
             CopyIn(i);
-            Compute(i);
+            Compute(i, addLocal);
             CopyOut(i);
         }
+
+        addQueue.FreeTensor(addLocal);
     }
 
 private:
-    __aicore__ inline void CopyIn(int32_t progress)
+    __aicore__ inline void CopyIn(uint32_t progress)
     {
         AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::LocalTensor<float> addLocal = inQueueAdd.AllocTensor<float>();
-        uint32_t offset = progress * this->tileLength;
-        AscendC::DataCopy(xLocal, xGm[offset], this->tileLength);
-        // add_value is broadcast along rows; compute the column offset
-        // The global offset for this block is blockLength * blockIdx + progress * tileLength
-        // Column index = globalOffset % addValueLength
-        uint32_t globalOffset = this->blockLength * AscendC::GetBlockIdx() + offset;
-        uint32_t colOffset = globalOffset % this->addValueLength;
-        AscendC::DataCopy(addLocal, addValGm[colOffset], this->tileLength);
+        AscendC::DataCopy(xLocal, xGm[progress * this->cols], this->cols);
         inQueueX.EnQue(xLocal);
-        inQueueAdd.EnQue(addLocal);
     }
-    __aicore__ inline void Compute(int32_t progress)
+
+    __aicore__ inline void Compute(uint32_t progress, AscendC::LocalTensor<float>& addLocal)
     {
         AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> addLocal = inQueueAdd.DeQue<float>();
-        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
-        AscendC::LocalTensor<float> tmp1 = tmpBuf1.Get<float>();
-        AscendC::LocalTensor<float> tmp2 = tmpBuf2.Get<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
 
-        // x = x + add_value
-        AscendC::Add(xLocal, xLocal, addLocal, this->tileLength);
+        // Step 1: x = x + add_value
+        AscendC::Add(xLocal, xLocal, addLocal, this->cols);
 
-        // Swish: x = sigmoid(x) * x
-        // sigmoid(x) = 1/(1+exp(-x))
-        // tmp1 = -x
-        AscendC::Muls(tmp1, xLocal, (float)-1.0f, this->tileLength);
-        // tmp1 = exp(-x)
-        AscendC::Exp(tmp1, tmp1, this->tileLength);
-        // tmp1 = 1 + exp(-x)
-        AscendC::Adds(tmp1, tmp1, (float)1.0f, this->tileLength);
-        // tmp1 = 1 / (1 + exp(-x))
-        AscendC::Reciprocal(tmp1, tmp1, this->tileLength);
-        // xLocal = sigmoid(x) * x
-        AscendC::Mul(xLocal, tmp1, xLocal, this->tileLength);
+        // Step 2: Swish: x = x * sigmoid(x)
+        AscendC::Sigmoid(yLocal, xLocal, this->cols);
+        AscendC::Mul(xLocal, xLocal, yLocal, this->cols);
 
-        // Tanh: x = tanh(x)
-        // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
-        // Use: tanh(x) = 2*sigmoid(2x) - 1
-        AscendC::Muls(tmp1, xLocal, (float)2.0f, this->tileLength);
-        // tmp1 = -2x
-        AscendC::Muls(tmp1, tmp1, (float)-1.0f, this->tileLength);
-        // tmp1 = exp(-2x)
-        AscendC::Exp(tmp1, tmp1, this->tileLength);
-        // tmp1 = 1 + exp(-2x)
-        AscendC::Adds(tmp1, tmp1, (float)1.0f, this->tileLength);
-        // tmp1 = 1/(1+exp(-2x)) = sigmoid(2x)
-        AscendC::Reciprocal(tmp1, tmp1, this->tileLength);
-        // tmp1 = 2*sigmoid(2x)
-        AscendC::Muls(tmp1, tmp1, (float)2.0f, this->tileLength);
-        // xLocal = 2*sigmoid(2x) - 1 = tanh(x)
-        AscendC::Adds(xLocal, tmp1, (float)-1.0f, this->tileLength);
+        // Step 3: Tanh(x)
+        AscendC::Tanh(xLocal, xLocal, this->cols);
 
-        // GELU: x = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-        // tmp1 = x^2
-        AscendC::Mul(tmp1, xLocal, xLocal, this->tileLength);
-        // tmp1 = x^3
-        AscendC::Mul(tmp1, tmp1, xLocal, this->tileLength);
-        // tmp1 = 0.044715 * x^3
-        AscendC::Muls(tmp1, tmp1, (float)0.044715f, this->tileLength);
-        // tmp1 = x + 0.044715 * x^3
-        AscendC::Add(tmp1, tmp1, xLocal, this->tileLength);
-        // tmp1 = sqrt(2/pi) * (x + 0.044715 * x^3), sqrt(2/pi) ~ 0.7978845608
-        AscendC::Muls(tmp1, tmp1, (float)0.7978845608f, this->tileLength);
-        // tanh(tmp1): use 2*sigmoid(2*tmp1) - 1
-        AscendC::Muls(tmp1, tmp1, (float)2.0f, this->tileLength);
-        AscendC::Muls(tmp1, tmp1, (float)-1.0f, this->tileLength);
-        AscendC::Exp(tmp1, tmp1, this->tileLength);
-        AscendC::Adds(tmp1, tmp1, (float)1.0f, this->tileLength);
-        AscendC::Reciprocal(tmp1, tmp1, this->tileLength);
-        AscendC::Muls(tmp1, tmp1, (float)2.0f, this->tileLength);
-        AscendC::Adds(tmp1, tmp1, (float)-1.0f, this->tileLength);
-        // tmp1 = 1 + tanh(...)
-        AscendC::Adds(tmp1, tmp1, (float)1.0f, this->tileLength);
-        // tmp1 = 0.5 * x * (1 + tanh(...))
-        AscendC::Mul(tmp1, tmp1, xLocal, this->tileLength);
-        AscendC::Muls(xLocal, tmp1, (float)0.5f, this->tileLength);
+        // Step 4: GELU(x)
+        AscendC::Gelu(xLocal, xLocal, this->cols);
 
-        // Hardtanh: clamp to [-1, 1]
-        // min with 1.0
-        AscendC::Mins(xLocal, xLocal, (float)1.0f, this->tileLength);
-        // max with -1.0
-        AscendC::Maxs(xLocal, xLocal, (float)-1.0f, this->tileLength);
+        // Step 5: Hardtanh: clamp to [-1, 1]
+        AscendC::Maxs(xLocal, xLocal, (float)-1.0f, this->cols);
+        AscendC::Mins(yLocal, xLocal, (float)1.0f, this->cols);
 
-        AscendC::DataCopy(zLocal, xLocal, this->tileLength);
-        outQueueZ.EnQue<float>(zLocal);
+        outQueueY.EnQue<float>(yLocal);
         inQueueX.FreeTensor(xLocal);
-        inQueueAdd.FreeTensor(addLocal);
     }
-    __aicore__ inline void CopyOut(int32_t progress)
+
+    __aicore__ inline void CopyOut(uint32_t progress)
     {
-        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
-        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
-        outQueueZ.FreeTensor(zLocal);
+        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+        AscendC::DataCopy(yGm[progress * this->cols], yLocal, this->cols);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueAdd;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> addQueue;
     AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> addValGm;
-    AscendC::GlobalTensor<float> zGm;
-    uint32_t blockLength;
-    uint32_t tileNum;
-    uint32_t tileLength;
-    uint32_t addValueLength;
+    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<float> addGm;
+    uint32_t cols;
+    uint32_t rowCount;
 };
 
-extern "C" __global__ __aicore__ void matmul_add_swish_tanh_gelu_hardtanh_custom(GM_ADDR x, GM_ADDR add_value, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void matmul_add_swish_tanh_gelu_hardtanh_custom(
+    GM_ADDR x, GM_ADDR add_value, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
     KernelMatmulAddSwishTanhGeluHardtanh op;
-    op.Init(x, add_value, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.addValueLength);
+    op.Init(x, add_value, y, tiling_data.totalRows, tiling_data.cols);
     op.Process();
 }

@@ -1,146 +1,135 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConvTranspose3dSumResidualAddMultiplyResidualAdd {
+class KernelFused {
 public:
-    __aicore__ inline KernelConvTranspose3dSumResidualAddMultiplyResidualAdd() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z, uint32_t totalLength,
-                                uint32_t batch, uint32_t inChannels, uint32_t outChannels,
-                                uint32_t depth, uint32_t height, uint32_t width,
-                                uint32_t kernelDepth, uint32_t kernelHeight, uint32_t kernelWidth,
-                                uint32_t strideDepth, uint32_t strideHeight, uint32_t strideWidth,
-                                uint32_t padDepth, uint32_t padHeight, uint32_t padWidth,
-                                uint32_t outputPadDepth, uint32_t outputPadHeight, uint32_t outputPadWidth)
+    __aicore__ inline KernelFused() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+                                  uint32_t totalFeatureMaps, uint32_t featureMapSize,
+                                  uint32_t channels, uint32_t tileLength)
     {
-        this->totalLength = totalLength;
-        this->batch = batch;
-        this->inChannels = inChannels;
-        this->outChannels = outChannels;
-        this->depth = depth;
-        this->height = height;
-        this->width = width;
-        this->kernelDepth = kernelDepth;
-        this->kernelHeight = kernelHeight;
-        this->kernelWidth = kernelWidth;
-        this->strideDepth = strideDepth;
-        this->strideHeight = strideHeight;
-        this->strideWidth = strideWidth;
-        this->padDepth = padDepth;
-        this->padHeight = padHeight;
-        this->padWidth = padWidth;
-        this->outputPadDepth = outputPadDepth;
-        this->outputPadHeight = outputPadHeight;
-        this->outputPadWidth = outputPadWidth;
+        this->totalFeatureMaps = totalFeatureMaps;
+        this->featureMapSize = featureMapSize;
+        this->channels = channels;
+        this->tileLength = tileLength;
 
-        this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->tileNum = 4096;
-        this->tileLength = this->blockLength / this->tileNum / BUFFER_NUM;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
 
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        weightGm.SetGlobalBuffer((__gm__ DTYPE_WEIGHT *)weight, kernelDepth * kernelHeight * kernelWidth * inChannels * outChannels);
-        biasGm.SetGlobalBuffer((__gm__ DTYPE_BIAS *)bias, outChannels);
-        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        uint32_t fmPerBlock = totalFeatureMaps / blockNum;
+        uint32_t fmRemainder = totalFeatureMaps % blockNum;
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->tileLength * sizeof(DTYPE_WEIGHT));
-        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(DTYPE_BIAS));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
+        if (blockIdx < fmRemainder) {
+            this->startFm = blockIdx * (fmPerBlock + 1);
+            this->numFm = fmPerBlock + 1;
+        } else {
+            this->startFm = blockIdx * fmPerBlock + fmRemainder;
+            this->numFm = fmPerBlock;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float*)x, (uint64_t)totalFeatureMaps * featureMapSize);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias, channels);
+        yGm.SetGlobalBuffer((__gm__ float*)y, (uint64_t)totalFeatureMaps * featureMapSize);
+
+        uint32_t channelsAlign = ((channels + 7) / 8) * 8;
+        this->channelsAlign = channelsAlign;
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(biasQueue, 1, channelsAlign * sizeof(float));
     }
 
     __aicore__ inline void Process()
     {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
+        if (this->numFm == 0) return;
+
+        auto biasAlloc = biasQueue.AllocTensor<float>();
+        AscendC::DataCopyExtParams biasCopyParams{1, (uint32_t)(this->channels * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<float> biasPadParams{false, 0, 0, 0.0f};
+        AscendC::DataCopyPad(biasAlloc, biasGm, biasCopyParams, biasPadParams);
+        biasQueue.EnQue(biasAlloc);
+        auto biasIn = biasQueue.DeQue<float>();
+
+        for (uint32_t fm = 0; fm < this->numFm; fm++) {
+            uint32_t globalFm = this->startFm + fm;
+            uint32_t channel = globalFm % this->channels;
+            float biasVal = biasIn.GetValue(channel);
+            float biasPlus1 = biasVal + 1.0f;
+
+            uint64_t fmOffset = (uint64_t)globalFm * this->featureMapSize;
+            uint32_t processed = 0;
+            while (processed < this->featureMapSize) {
+                uint32_t remaining = this->featureMapSize - processed;
+                uint32_t thisTile = (remaining < this->tileLength) ? remaining : this->tileLength;
+
+                CopyIn(fmOffset + processed, thisTile);
+                Compute(thisTile, biasPlus1);
+                CopyOut(fmOffset + processed, thisTile);
+
+                processed += thisTile;
+            }
         }
+
+        biasQueue.FreeTensor(biasIn);
     }
 
 private:
-    __aicore__ inline void CopyIn(int32_t progress)
+    __aicore__ inline void CopyIn(uint64_t offset, uint32_t length)
     {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_WEIGHT> weightLocal = inQueueWeight.AllocTensor<DTYPE_WEIGHT>();
-        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.AllocTensor<DTYPE_BIAS>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(weightLocal, weightGm[0], this->tileLength);
-        AscendC::DataCopy(biasLocal, biasGm[0], this->tileLength);
+        auto xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopyExtParams copyParams{1, (uint32_t)(length * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<float> padParams{false, 0, 0, 0.0f};
+        AscendC::DataCopyPad(xLocal, xGm[offset], copyParams, padParams);
         inQueueX.EnQue(xLocal);
-        inQueueWeight.EnQue(weightLocal);
-        inQueueBias.EnQue(biasLocal);
     }
 
-    __aicore__ inline void Compute(int32_t progress)
+    __aicore__ inline void Compute(uint32_t length, float biasPlus1)
     {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_WEIGHT> weightLocal = inQueueWeight.DeQue<DTYPE_WEIGHT>();
-        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.DeQue<DTYPE_BIAS>();
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        auto xLocal = inQueueX.DeQue<float>();
+        auto yLocal = outQueueY.AllocTensor<float>();
 
-        // Simulate ConvTranspose3d operation
-        AscendC::Add(zLocal, xLocal, biasLocal, this->tileLength);
-        AscendC::Add(zLocal, zLocal, xLocal, this->tileLength);
-        AscendC::Mul(zLocal, zLocal, xLocal, this->tileLength);
-        AscendC::Add(zLocal, zLocal, xLocal, this->tileLength);
+        AscendC::Muls<float>(yLocal, xLocal, 2.0f, length);
+        AscendC::Adds<float>(yLocal, yLocal, biasPlus1, length);
+        AscendC::Mul<float>(yLocal, xLocal, yLocal, length);
 
-        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        outQueueY.EnQue<float>(yLocal);
         inQueueX.FreeTensor(xLocal);
-        inQueueWeight.FreeTensor(weightLocal);
-        inQueueBias.FreeTensor(biasLocal);
     }
 
-    __aicore__ inline void CopyOut(int32_t progress)
+    __aicore__ inline void CopyOut(uint64_t offset, uint32_t length)
     {
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
-        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
-        outQueueZ.FreeTensor(zLocal);
+        auto yLocal = outQueueY.DeQue<float>();
+        AscendC::DataCopyExtParams copyParams{1, (uint32_t)(length * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPad(yGm[offset], yLocal, copyParams);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueWeight, inQueueBias;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::GlobalTensor<DTYPE_X> xGm;
-    AscendC::GlobalTensor<DTYPE_WEIGHT> weightGm;
-    AscendC::GlobalTensor<DTYPE_BIAS> biasGm;
-    AscendC::GlobalTensor<DTYPE_Z> zGm;
-    uint32_t blockLength;
-    uint32_t tileNum;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> biasQueue;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t totalFeatureMaps;
+    uint32_t featureMapSize;
+    uint32_t channels;
+    uint32_t channelsAlign;
     uint32_t tileLength;
-    uint32_t totalLength;
-    uint32_t batch;
-    uint32_t inChannels;
-    uint32_t outChannels;
-    uint32_t depth;
-    uint32_t height;
-    uint32_t width;
-    uint32_t kernelDepth;
-    uint32_t kernelHeight;
-    uint32_t kernelWidth;
-    uint32_t strideDepth;
-    uint32_t strideHeight;
-    uint32_t strideWidth;
-    uint32_t padDepth;
-    uint32_t padHeight;
-    uint32_t padWidth;
-    uint32_t outputPadDepth;
-    uint32_t outputPadHeight;
-    uint32_t outputPadWidth;
+    uint32_t startFm;
+    uint32_t numFm;
 };
 
 extern "C" __global__ __aicore__ void conv_transpose3d_sum_residual_add_multiply_residual_add_custom(
-    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConvTranspose3dSumResidualAddMultiplyResidualAdd op;
-    op.Init(x, weight, bias, z, tiling_data.totalLength,
-            tiling_data.batch, tiling_data.inChannels, tiling_data.outChannels,
-            tiling_data.depth, tiling_data.height, tiling_data.width,
-            tiling_data.kernelDepth, tiling_data.kernelHeight, tiling_data.kernelWidth,
-            tiling_data.strideDepth, tiling_data.strideHeight, tiling_data.strideWidth,
-            tiling_data.padDepth, tiling_data.padHeight, tiling_data.padWidth,
-            tiling_data.outputPadDepth, tiling_data.outputPadHeight, tiling_data.outputPadWidth);
+    KernelFused op;
+    op.Init(x, bias, y, tiling_data.totalFeatureMaps, tiling_data.featureMapSize,
+            tiling_data.channels, tiling_data.tileLength);
     op.Process();
 }

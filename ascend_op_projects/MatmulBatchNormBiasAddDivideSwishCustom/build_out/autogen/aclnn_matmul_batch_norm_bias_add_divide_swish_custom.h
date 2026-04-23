@@ -16,7 +16,7 @@ extern "C" {
  * parameters :
  * x : required
  * bias : required
- * divideVal : required
+ * divideValue : required
  * out : required
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
@@ -25,7 +25,7 @@ __attribute__((visibility("default")))
 aclnnStatus aclnnMatmulBatchNormBiasAddDivideSwishCustomGetWorkspaceSize(
     const aclTensor *x,
     const aclTensor *bias,
-    const aclTensor *divideVal,
+    double divideValue,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);

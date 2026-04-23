@@ -3,18 +3,21 @@
 #include "register/op_def_registry.h"
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 8;
+const uint32_t BLOCK_DIM = 20;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     MatmulGeluSoftmaxCustomTilingData tiling;
-    const gert::StorageShape* xShape = context->GetInputShape(0);
-    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
-    uint32_t outFeatures = xShape->GetStorageShape().GetDim(1);
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_outFeatures(outFeatures);
-    tiling.set_tileNum(TILE_NUM);
+    const gert::Shape& shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t rows = static_cast<uint32_t>(shape.GetDim(0));
+    uint32_t cols = static_cast<uint32_t>(shape.GetDim(1));
+
+    uint32_t blockDim = (rows < BLOCK_DIM) ? rows : BLOCK_DIM;
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+    context->SetBlockDim(blockDim);
+    tiling.set_rows(rows);
+    tiling.set_cols(cols);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -49,7 +52,7 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("y")
+        this->Output("z")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})

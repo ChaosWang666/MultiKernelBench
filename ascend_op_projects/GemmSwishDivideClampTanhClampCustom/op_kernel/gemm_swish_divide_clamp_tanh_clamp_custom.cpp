@@ -1,92 +1,96 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+constexpr int32_t BUFFER_NUM = 2;
 
-class KernelGemmSwishDivideClampTanhClamp {
+class KernelFusedOp {
 public:
-    __aicore__ inline KernelGemmSwishDivideClampTanhClamp() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, uint32_t batch, uint32_t inFeatures, uint32_t outFeatures, bool hasBias)
+    __aicore__ inline KernelFusedOp() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
     {
-        this->batch = batch;
-        this->inFeatures = inFeatures;
-        this->outFeatures = outFeatures;
-        this->hasBias = hasBias;
-        this->blockLength = inFeatures;
-        this->tileNum = 4096;
-        this->tileLength = this->blockLength / this->tileNum / BUFFER_NUM;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x, batch * inFeatures);
-        weightGm.SetGlobalBuffer((__gm__ float *)weight, inFeatures * outFeatures);
-        if (hasBias) {
-            biasGm.SetGlobalBuffer((__gm__ float *)bias, outFeatures);
-        }
-        yGm.SetGlobalBuffer((__gm__ float *)y, batch * outFeatures);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->tileLength * outFeatures * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, outFeatures * sizeof(float));
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(DTYPE_X));
     }
     __aicore__ inline void Process()
     {
-        for (uint32_t i = 0; i < batch; i++) {
-            Gemm(i);
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
         }
     }
 
 private:
-    __aicore__ inline void Gemm(uint32_t batchId)
+    __aicore__ inline void CopyIn(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::LocalTensor<float> weightLocal = inQueueWeight.AllocTensor<float>();
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-        AscendC::GlobalTensor<float> xBatch = xGm[batchId * inFeatures];
-        AscendC::GlobalTensor<float> yBatch = yGm[batchId * outFeatures];
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<DTYPE_X> tmpLocal = tmpBuf.Get<DTYPE_X>();
 
-        // Perform GEMM operation
-        AscendC::MatMul(yLocal, xBatch, weightGm, biasGm, false, false, outFeatures, inFeatures, 1, hasBias);
-        
-        // Apply Swish activation: x * sigmoid(x)
-        AscendC::Sigmoid(yLocal, yLocal, outFeatures);
-        AscendC::Mul(yLocal, yLocal, xBatch, outFeatures);
-        
-        // Divide by 2.0
-        AscendC::ScalarDiv(yLocal, yLocal, 2.0f, outFeatures);
-        
-        // Clamp between -1.0 and 1.0
-        AscendC::Clip(yLocal, yLocal, -1.0f, 1.0f, outFeatures);
-        
-        // Tanh activation
-        AscendC::Tanh(yLocal, yLocal, outFeatures);
-        
-        // Clamp again between -1.0 and 1.0
-        AscendC::Clip(yLocal, yLocal, -1.0f, 1.0f, outFeatures);
-        
-        AscendC::DataCopy(yBatch, yLocal, outFeatures);
+        // Swish: y = x * sigmoid(x) = x / (1 + exp(-x))
+        AscendC::Muls(tmpLocal, xLocal, (DTYPE_X)(-1.0f), this->tileLength);
+        AscendC::Exp(tmpLocal, tmpLocal, this->tileLength);
+        AscendC::Adds(tmpLocal, tmpLocal, (DTYPE_X)(1.0f), this->tileLength);
+        AscendC::Div(yLocal, xLocal, tmpLocal, this->tileLength);
+
+        // Divide by 2.0 -> multiply by 0.5
+        AscendC::Muls(yLocal, yLocal, (DTYPE_X)(0.5f), this->tileLength);
+
+        // Clamp to [-1, 1]
+        AscendC::Duplicate(tmpLocal, (DTYPE_X)(1.0f), this->tileLength);
+        AscendC::Min(yLocal, yLocal, tmpLocal, this->tileLength);
+        AscendC::Duplicate(tmpLocal, (DTYPE_X)(-1.0f), this->tileLength);
+        AscendC::Max(yLocal, yLocal, tmpLocal, this->tileLength);
+
+        // Tanh
+        AscendC::Tanh(yLocal, yLocal, this->tileLength);
+
+        // Clamp to [-1, 1] (redundant after tanh but preserves original semantics)
+        AscendC::Duplicate(tmpLocal, (DTYPE_X)(1.0f), this->tileLength);
+        AscendC::Min(yLocal, yLocal, tmpLocal, this->tileLength);
+        AscendC::Duplicate(tmpLocal, (DTYPE_X)(-1.0f), this->tileLength);
+        AscendC::Max(yLocal, yLocal, tmpLocal, this->tileLength);
+
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
-        inQueueWeight.FreeTensor(weightLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
         outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueWeight;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> weightGm;
-    AscendC::GlobalTensor<float> biasGm;
-    AscendC::GlobalTensor<float> yGm;
-    uint32_t batch;
-    uint32_t inFeatures;
-    uint32_t outFeatures;
-    bool hasBias;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
 };
 
-extern "C" __global__ __aicore__ void gemm_swish_divide_clamp_tanh_clamp_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void gemm_swish_divide_clamp_tanh_clamp_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelGemmSwishDivideClampTanhClamp op;
-    op.Init(x, weight, bias, y, tiling_data.batch, tiling_data.inFeatures, tiling_data.outFeatures, tiling_data.hasBias);
+    KernelFusedOp op;
+    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum);
     op.Process();
 }

@@ -1,5 +1,23 @@
 {
     "MatmulScaleResidualAddClampLogSumExpMishCustom":{
+        "attr":{
+            "list":"scale_factor,clamp_min,clamp_max"
+        },
+        "attr_clamp_max":{
+            "paramType":"required",
+            "type":"float",
+            "value":"all"
+        },
+        "attr_clamp_min":{
+            "paramType":"required",
+            "type":"float",
+            "value":"all"
+        },
+        "attr_scale_factor":{
+            "paramType":"required",
+            "type":"float",
+            "value":"all"
+        },
         "coreType":{
             "value":"AiCore"
         },
@@ -35,7 +53,7 @@
         "output0":{
             "dtype":"float32",
             "format":"ND",
-            "name":"z",
+            "name":"y",
             "paramType":"required",
             "shape":"all",
             "unknownshape_format":"ND"

@@ -8,26 +8,6 @@
                 "name": "x",
                 "param_type": "required",
                 "format": [
-                    "NCHW"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "conv_weight",
-                "param_type": "required",
-                "format": [
-                    "OIHW"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "conv_bias",
-                "param_type": "optional",
-                "format": [
                     "ND"
                 ],
                 "type": [
@@ -35,17 +15,7 @@
                 ]
             },
             {
-                "name": "group_norm_weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "group_norm_bias",
+                "name": "y",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -60,7 +30,7 @@
                 "name": "z",
                 "param_type": "required",
                 "format": [
-                    "NCHW"
+                    "ND"
                 ],
                 "type": [
                     "float"

@@ -5,12 +5,12 @@
       "int64Mode": false,
       "simplifiedKeyMode": 0,
       "simplifiedKey": [
-        "MatmulBatchNormBiasAddDivideSwishCustom/d=0,p=1/0,2/0,2/0,2/0,2",
-        "MatmulBatchNormBiasAddDivideSwishCustom/d=0,p=0/0,2/0,2/0,2/0,2",
-        "MatmulBatchNormBiasAddDivideSwishCustom/d=1,p=1/0,2/0,2/0,2/0,2",
-        "MatmulBatchNormBiasAddDivideSwishCustom/d=1,p=0/0,2/0,2/0,2/0,2"
+        "MatmulBatchNormBiasAddDivideSwishCustom/d=0,p=1/0,2/0,2/0,2",
+        "MatmulBatchNormBiasAddDivideSwishCustom/d=0,p=0/0,2/0,2/0,2",
+        "MatmulBatchNormBiasAddDivideSwishCustom/d=1,p=1/0,2/0,2/0,2",
+        "MatmulBatchNormBiasAddDivideSwishCustom/d=1,p=0/0,2/0,2/0,2"
       ],
-      "staticKey": "e7ee671befb09f01a579e6b447052e4f8660d41790aaa0c02a813a8d991f88b7,10ece6b820443a55859e93e431b9869965527700534b902d054c8d6c436c9db4",
+      "staticKey": "5aacbf5c669e50b0cdaf51137a12b23cd521ea2e91d60aa997cfe43e0a0be9fc,f126c0ee3057ec4def2e340d56e977006e1e3b098c666baace8fe5750ac89dc3",
       "inputs": [
         {
           "name": "x",
@@ -33,22 +33,11 @@
             -2
           ],
           "format_match_mode": "FormatAgnostic"
-        },
-        {
-          "name": "divide_val",
-          "index": 2,
-          "dtype": "float32",
-          "format": "ND",
-          "paramType": "required",
-          "shape": [
-            -2
-          ],
-          "format_match_mode": "FormatAgnostic"
         }
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "dtype": "float32",
           "format": "ND",
@@ -59,12 +48,19 @@
           "format_match_mode": "FormatAgnostic"
         }
       ],
+      "attrs": [
+        {
+          "name": "divide_value",
+          "dtype": "float",
+          "value": 0.0
+        }
+      ],
       "opMode": "dynamic",
       "optionalInputMode": "gen_placeholder",
       "deterministic": "ignore",
       "optionalOutputMode": "gen_placeholder",
       "binInfo": {
-        "jsonFilePath": "ascend910b/matmul_batch_norm_bias_add_divide_swish_custom/MatmulBatchNormBiasAddDivideSwishCustom_496c6591cef73b27b82fdce57c6a8938.json"
+        "jsonFilePath": "ascend910b/matmul_batch_norm_bias_add_divide_swish_custom/MatmulBatchNormBiasAddDivideSwishCustom_06ca350b38cfd071f5f1a15a5214805f.json"
       }
     }
   ]

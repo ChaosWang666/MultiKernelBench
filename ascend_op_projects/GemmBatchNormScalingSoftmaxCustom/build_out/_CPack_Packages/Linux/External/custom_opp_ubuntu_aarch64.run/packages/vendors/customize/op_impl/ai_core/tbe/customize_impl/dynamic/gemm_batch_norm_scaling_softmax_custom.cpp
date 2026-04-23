@@ -1,72 +1,94 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+constexpr int32_t BUFFER_NUM = 2;
 
-class KernelGemmBatchNormScalingSoftmax {
+class KernelSoftmax {
 public:
-    __aicore__ inline KernelGemmBatchNormScalingSoftmax() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling, uint32_t batchSize, uint32_t inFeatures, uint32_t outFeatures, float bnEps, float bnMomentum, uint32_t scaleShape0)
-    {
-        this->batchSize = batchSize;
-        this->inFeatures = inFeatures;
-        this->outFeatures = outFeatures;
-        this->bnEps = bnEps;
-        this->bnMomentum = bnMomentum;
-        this->scaleShape0 = scaleShape0;
-        this->blockLength = outFeatures;
-        this->tileNum = 4096;
-        this->tileLength = this->blockLength / this->tileNum / BUFFER_NUM;
+    __aicore__ inline KernelSoftmax() {}
 
-        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inFeatures);
-        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * outFeatures);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalRows, uint32_t cols)
+    {
+        this->cols = cols;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+
+        uint32_t rowsPerBlockBase = totalRows / blockNum;
+        uint32_t extraRows = totalRows % blockNum;
+
+        uint32_t startRow;
+        uint32_t rowsThisBlockLocal;
+        if (blockIdx < extraRows) {
+            rowsThisBlockLocal = rowsPerBlockBase + 1;
+            startRow = blockIdx * rowsThisBlockLocal;
+        } else {
+            rowsThisBlockLocal = rowsPerBlockBase;
+            startRow = extraRows * (rowsPerBlockBase + 1) + (blockIdx - extraRows) * rowsPerBlockBase;
+        }
+
+        this->rowsThisBlock = rowsThisBlockLocal;
+
+        if (rowsThisBlockLocal == 0) {
+            return;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + startRow * cols, rowsThisBlockLocal * cols);
+        yGm.SetGlobalBuffer((__gm__ float *)y + startRow * cols, rowsThisBlockLocal * cols);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, cols * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, cols * sizeof(float));
+        pipe.InitBuffer(reduceBuf, 32 * 1024);
+        pipe.InitBuffer(scalarBuf, 64);
     }
+
     __aicore__ inline void Process()
     {
-        for (uint32_t batch = 0; batch < batchSize; ++batch) {
-            uint32_t offset = batch * outFeatures;
-            xGm.SetGlobalBuffer((__gm__ float *)xGm.GetBaseAddr() + offset, outFeatures);
-            yGm.SetGlobalBuffer((__gm__ float *)yGm.GetBaseAddr() + offset, outFeatures);
-            int32_t loopCount = this->tileNum * BUFFER_NUM;
-            for (int32_t i = 0; i < loopCount; i++) {
-                CopyIn(i);
-                Compute(i);
-                CopyOut(i);
-            }
+        if (rowsThisBlock == 0) {
+            return;
+        }
+        for (uint32_t i = 0; i < rowsThisBlock; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
         }
     }
 
 private:
-    __aicore__ inline void CopyIn(int32_t progress)
+    __aicore__ inline void CopyIn(uint32_t progress)
     {
         AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(xLocal, xGm[progress * cols], cols);
         inQueueX.EnQue(xLocal);
     }
-    __aicore__ inline void Compute(int32_t progress)
+
+    __aicore__ inline void Compute(uint32_t progress)
     {
         AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
         AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-        // Simulate Gemm + BatchNorm + Scaling + Softmax operations
-        for (int32_t i = 0; i < this->tileLength; i++) {
-            float val = xLocal[i];
-            // BatchNorm
-            val = val; // Placeholder for actual BN computation
-            // Scaling
-            val = val * 1.0f; // Placeholder for actual scaling
-            // Softmax
-            val = val; // Placeholder for actual softmax
-            yLocal[i] = val;
-        }
+        AscendC::LocalTensor<float> reduceTmp = reduceBuf.Get<float>();
+        AscendC::LocalTensor<float> scalarLocal = scalarBuf.Get<float>();
+
+        AscendC::ReduceMax<float>(scalarLocal, xLocal, reduceTmp, (int32_t)cols, false);
+        float maxVal = scalarLocal.GetValue(0);
+
+        AscendC::Adds<float>(yLocal, xLocal, -maxVal, cols);
+
+        AscendC::Exp<float>(yLocal, yLocal, cols);
+
+        AscendC::ReduceSum<float>(scalarLocal, yLocal, reduceTmp, (int32_t)cols);
+        float sumVal = scalarLocal.GetValue(0);
+        float invSum = 1.0f / sumVal;
+
+        AscendC::Muls<float>(yLocal, yLocal, invSum, cols);
+
         outQueueY.EnQue<float>(yLocal);
         inQueueX.FreeTensor(xLocal);
     }
-    __aicore__ inline void CopyOut(int32_t progress)
+
+    __aicore__ inline void CopyOut(uint32_t progress)
     {
         AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
-        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        AscendC::DataCopy(yGm[progress * cols], yLocal, cols);
         outQueueY.FreeTensor(yLocal);
     }
 
@@ -74,22 +96,17 @@ private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> scalarBuf;
     AscendC::GlobalTensor<float> xGm;
     AscendC::GlobalTensor<float> yGm;
-    uint32_t batchSize;
-    uint32_t inFeatures;
-    uint32_t outFeatures;
-    float bnEps;
-    float bnMomentum;
-    uint32_t scaleShape0;
-    uint32_t blockLength;
-    uint32_t tileNum;
-    uint32_t tileLength;
+    uint32_t rowsThisBlock;
+    uint32_t cols;
 };
 
 extern "C" __global__ __aicore__ void gemm_batch_norm_scaling_softmax_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelGemmBatchNormScalingSoftmax op;
-    op.Init(x, y, workspace, tiling, tiling_data.batchSize, tiling_data.inFeatures, tiling_data.outFeatures, tiling_data.bnEps, tiling_data.bnMomentum, tiling_data.scaleShape0);
+    KernelSoftmax op;
+    op.Init(x, y, tiling_data.totalRows, tiling_data.cols);
     op.Process();
 }

@@ -13,6 +13,16 @@
                 "type": [
                     "float"
                 ]
+            },
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             }
         ],
         "output_desc": [
@@ -25,13 +35,6 @@
                 "type": [
                     "float"
                 ]
-            }
-        ],
-        "attr": [
-            {
-                "name": "constant",
-                "param_type": "required",
-                "type": "float"
             }
         ]
     }

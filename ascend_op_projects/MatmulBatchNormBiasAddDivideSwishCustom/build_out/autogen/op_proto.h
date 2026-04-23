@@ -9,8 +9,8 @@ namespace ge {
 REG_OP(MatmulBatchNormBiasAddDivideSwishCustom)
     .INPUT(x, ge::TensorType::ALL())
     .INPUT(bias, ge::TensorType::ALL())
-    .INPUT(divide_val, ge::TensorType::ALL())
-    .OUTPUT(z, ge::TensorType::ALL())
+    .OUTPUT(y, ge::TensorType::ALL())
+    .REQUIRED_ATTR(divide_value, Float)
     .OP_END_FACTORY_REG(MatmulBatchNormBiasAddDivideSwishCustom);
 
 }

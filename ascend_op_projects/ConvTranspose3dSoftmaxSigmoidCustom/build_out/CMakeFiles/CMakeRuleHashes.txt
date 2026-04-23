@@ -1,5 +1,5 @@
 # Hashes of file build rules.
-2a0208954982bdca4c7309db920e1623 CMakeFiles/gen_version_info
+1f7efce939f63605a2a5ba6d107e2e8c CMakeFiles/gen_version_info
 9f45babc3055476fcefa03f1817b8ee9 CMakeFiles/modify_vendor
 55f96156cc74d9c3c8c0ac73c7e33553 op_host/CMakeFiles/optiling_compat
 984eb17219c5223871f312c3638d7c31 op_kernel/CMakeFiles/ConvTranspose3dSoftmaxSigmoidCustom_ascend910b

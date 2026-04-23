@@ -8,7 +8,10 @@ namespace ge {
 
 REG_OP(MatmulScaleResidualAddClampLogSumExpMishCustom)
     .INPUT(x, ge::TensorType::ALL())
-    .OUTPUT(z, ge::TensorType::ALL())
+    .OUTPUT(y, ge::TensorType::ALL())
+    .REQUIRED_ATTR(scale_factor, Float)
+    .REQUIRED_ATTR(clamp_min, Float)
+    .REQUIRED_ATTR(clamp_max, Float)
     .OP_END_FACTORY_REG(MatmulScaleResidualAddClampLogSumExpMishCustom);
 
 }

@@ -13,31 +13,11 @@
                 "type": [
                     "float"
                 ]
-            },
-            {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bias",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
             }
         ],
         "output_desc": [
             {
-                "name": "z",
+                "name": "y",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -47,14 +27,14 @@
                 ]
             }
         ],
-        "attr_desc": [
+        "attr": [
             {
                 "name": "multiplier",
                 "param_type": "required",
                 "type": "float"
             },
             {
-                "name": "negativeSlope",
+                "name": "negative_slope",
                 "param_type": "required",
                 "type": "float"
             }

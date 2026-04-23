@@ -15,7 +15,6 @@ extern "C" {
 /* funtion: aclnnConv2dSubtractSubtractMishCustomGetWorkspaceSize
  * parameters :
  * x : required
- * subtractValue : required
  * out : required
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
@@ -23,7 +22,6 @@ extern "C" {
 __attribute__((visibility("default")))
 aclnnStatus aclnnConv2dSubtractSubtractMishCustomGetWorkspaceSize(
     const aclTensor *x,
-    double subtractValue,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);

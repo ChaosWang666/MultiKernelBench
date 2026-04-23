@@ -1,5 +1,18 @@
 {
     "Conv2dAddScaleSigmoidGroupNormCustom":{
+        "attr":{
+            "list":"num_groups,eps"
+        },
+        "attr_eps":{
+            "paramType":"required",
+            "type":"float",
+            "value":"all"
+        },
+        "attr_num_groups":{
+            "paramType":"required",
+            "type":"int",
+            "value":"all"
+        },
         "coreType":{
             "value":"AiCore"
         },
@@ -35,6 +48,22 @@
             "dtype":"float32",
             "format":"ND",
             "name":"scale",
+            "paramType":"required",
+            "shape":"all",
+            "unknownshape_format":"ND"
+        },
+        "input3":{
+            "dtype":"float32",
+            "format":"ND",
+            "name":"gamma",
+            "paramType":"required",
+            "shape":"all",
+            "unknownshape_format":"ND"
+        },
+        "input4":{
+            "dtype":"float32",
+            "format":"ND",
+            "name":"beta",
             "paramType":"required",
             "shape":"all",
             "unknownshape_format":"ND"

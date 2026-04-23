@@ -28,19 +28,20 @@ typedef struct {
 } OpSupportList;
 enum SocType {
     SOC_VERSION_ASCEND910A = 1,
-    SOC_VERSION_ASCEND910B = 2,
-    SOC_VERSION_ASCEND910_93 = 3,
-    SOC_VERSION_ASCEND950 = 4,
-    SOC_VERSION_ASCEND310P = 5,
-    SOC_VERSION_ASCEND310B = 6,
-    SOC_VERSION_BS9SX1A = 7,
-    SOC_VERSION_ASCEND610Lite = 8,
-    SOC_VERSION_MC61AM21A = 10, // 9 is deprecated
-    SOC_VERSION_MC62CM12A = 11,
-    SOC_VERSION_BS9SX2A = 12,
-    SOC_VERSION_ASCEND910_96 = 13,
-    SOC_VERSION_KIRINX90 = 14,
-    SOC_VERSION_KIRIN9030 = 15
+    SOC_VERSION_ASCEND910B,
+    SOC_VERSION_ASCEND910_93,
+    SOC_VERSION_ASCEND910_95,
+    SOC_VERSION_ASCEND310P,
+    SOC_VERSION_ASCEND310B,
+    SOC_VERSION_BS9SX1A,
+    SOC_VERSION_ASCEND610Lite,
+    SOC_VERSION_ASCEND910_55,
+    SOC_VERSION_MC61AM21A,
+    SOC_VERSION_MC62CM12A,
+    SOC_VERSION_BS9SX2A,
+    SOC_VERSION_ASCEND910_96,
+    SOC_VERSION_KIRINX90,
+    SOC_VERSION_KIRIN9030
 };
 enum NnopbaseAttrDtype {
     kNnopbaseBool = 0U,
@@ -127,7 +128,6 @@ extern bool __attribute__((weak)) NnopbaseMatchArgs(void *executor, uint64_t *wo
 
 aclnnStatus aclnnConv2dSubtractSubtractMishCustomGetWorkspaceSize(
     const aclTensor *x,
-    double subtractValue,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor)
@@ -140,7 +140,7 @@ aclnnStatus aclnnConv2dSubtractSubtractMishCustomGetWorkspaceSize(
     const char *opType = "Conv2dSubtractSubtractMishCustom";
     char inputDesc[] = {1};
     char outputDesc[] = {1};
-    char attrDesc[] = {1};
+    char attrDesc[] = {};
 
     NNOPBASE_ASSERT_NOTNULL_RETVAL(x);
     NNOPBASE_ASSERT_NOTNULL_RETVAL(out);
@@ -158,8 +158,6 @@ aclnnStatus aclnnConv2dSubtractSubtractMishCustomGetWorkspaceSize(
         NnopbaseSetMatchArgsFlag(*executor);
     }
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddInput(*executor, x, 0));
-    float tmp0 = static_cast<float>(subtractValue);
-    NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddAttrWithDtype(*executor, static_cast<void*>(&tmp0), sizeof(float), 0, kNnopbaseFloat));
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddOutput(*executor, out, 0));
     if (NnopbaseMatchArgs != NULL) {
         if (NnopbaseMatchArgs(*executor, workspaceSize)) {

@@ -28,19 +28,20 @@ typedef struct {
 } OpSupportList;
 enum SocType {
     SOC_VERSION_ASCEND910A = 1,
-    SOC_VERSION_ASCEND910B = 2,
-    SOC_VERSION_ASCEND910_93 = 3,
-    SOC_VERSION_ASCEND950 = 4,
-    SOC_VERSION_ASCEND310P = 5,
-    SOC_VERSION_ASCEND310B = 6,
-    SOC_VERSION_BS9SX1A = 7,
-    SOC_VERSION_ASCEND610Lite = 8,
-    SOC_VERSION_MC61AM21A = 10, // 9 is deprecated
-    SOC_VERSION_MC62CM12A = 11,
-    SOC_VERSION_BS9SX2A = 12,
-    SOC_VERSION_ASCEND910_96 = 13,
-    SOC_VERSION_KIRINX90 = 14,
-    SOC_VERSION_KIRIN9030 = 15
+    SOC_VERSION_ASCEND910B,
+    SOC_VERSION_ASCEND910_93,
+    SOC_VERSION_ASCEND910_95,
+    SOC_VERSION_ASCEND310P,
+    SOC_VERSION_ASCEND310B,
+    SOC_VERSION_BS9SX1A,
+    SOC_VERSION_ASCEND610Lite,
+    SOC_VERSION_ASCEND910_55,
+    SOC_VERSION_MC61AM21A,
+    SOC_VERSION_MC62CM12A,
+    SOC_VERSION_BS9SX2A,
+    SOC_VERSION_ASCEND910_96,
+    SOC_VERSION_KIRINX90,
+    SOC_VERSION_KIRIN9030
 };
 enum NnopbaseAttrDtype {
     kNnopbaseBool = 0U,
@@ -129,7 +130,7 @@ extern bool __attribute__((weak)) NnopbaseMatchArgs(void *executor, uint64_t *wo
 
 aclnnStatus aclnnConv3dScalingTanhMultiplySigmoidCustomGetWorkspaceSize(
     const aclTensor *x,
-    const aclTensor *scalingFactor,
+    const aclTensor *scale,
     const aclTensor *bias,
     const aclTensor *out,
     uint64_t *workspaceSize,
@@ -146,7 +147,7 @@ aclnnStatus aclnnConv3dScalingTanhMultiplySigmoidCustomGetWorkspaceSize(
     char attrDesc[] = {};
 
     NNOPBASE_ASSERT_NOTNULL_RETVAL(x);
-    NNOPBASE_ASSERT_NOTNULL_RETVAL(scalingFactor);
+    NNOPBASE_ASSERT_NOTNULL_RETVAL(scale);
     NNOPBASE_ASSERT_NOTNULL_RETVAL(bias);
     NNOPBASE_ASSERT_NOTNULL_RETVAL(out);
 
@@ -163,7 +164,7 @@ aclnnStatus aclnnConv3dScalingTanhMultiplySigmoidCustomGetWorkspaceSize(
         NnopbaseSetMatchArgsFlag(*executor);
     }
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddInput(*executor, x, 0));
-    NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddInput(*executor, scalingFactor, 1));
+    NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddInput(*executor, scale, 1));
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddInput(*executor, bias, 2));
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddOutput(*executor, out, 0));
     if (NnopbaseMatchArgs != NULL) {
@@ -174,7 +175,7 @@ aclnnStatus aclnnConv3dScalingTanhMultiplySigmoidCustomGetWorkspaceSize(
     }
     if (NnopbaseAddParamName != NULL) {
         NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddParamName(*executor, 0, "x", true));
-        NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddParamName(*executor, 1, "scalingFactor", true));
+        NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddParamName(*executor, 1, "scale", true));
         NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddParamName(*executor, 2, "bias", true));
         NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddParamName(*executor, 0, "out", false));
     }

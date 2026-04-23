@@ -7,51 +7,50 @@
             {
                 "name": "x",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "gamma",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "beta",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
             }
         ],
         "output_desc": [
             {
-                "name": "z",
+                "name": "y",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
             }
         ],
         "attr": [
             {
-                "name": "in_features",
-                "param_type": "required",
-                "type": "int64"
-            },
-            {
-                "name": "out_features",
-                "param_type": "required",
-                "type": "int64"
-            },
-            {
                 "name": "num_groups",
-                "param_type": "required",
-                "type": "int64"
+                "type": "int",
+                "param_type": "required"
             },
             {
                 "name": "hardtanh_min",
-                "param_type": "required",
-                "type": "float"
+                "type": "float",
+                "param_type": "required"
             },
             {
                 "name": "hardtanh_max",
-                "param_type": "required",
-                "type": "float"
+                "type": "float",
+                "param_type": "required"
+            },
+            {
+                "name": "eps",
+                "type": "float",
+                "param_type": "required"
             }
         ]
     }

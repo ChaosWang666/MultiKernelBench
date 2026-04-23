@@ -9,7 +9,6 @@ namespace ge {
 REG_OP(Conv2dSubtractSubtractMishCustom)
     .INPUT(x, ge::TensorType::ALL())
     .OUTPUT(z, ge::TensorType::ALL())
-    .REQUIRED_ATTR(subtract_value, Float)
     .OP_END_FACTORY_REG(Conv2dSubtractSubtractMishCustom);
 
 }

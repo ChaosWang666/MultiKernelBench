@@ -1,89 +1,141 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
- 
-class KernelMatmulScaleResidualAddClampLogSumExpMishCustom {
-public:
-    __aicore__ inline KernelMatmulScaleResidualAddClampLogSumExpMishCustom() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t tileNum, float scale_factor, float clamp_min, float clamp_max)
-    {
-        this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->tileNum = tileNum;
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
-        this->scale_factor = scale_factor;
-        this->clamp_min = clamp_min;
-        this->clamp_max = clamp_max;
+constexpr int32_t BUFFER_NUM = 2;
 
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
+class KernelMatmulScaleResidualAddClampLogSumExpMish {
+public:
+    __aicore__ inline KernelMatmulScaleResidualAddClampLogSumExpMish() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t hiddenSize,
+                                 float scaleFactor, float clampMin, float clampMax)
+    {
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+
+        uint32_t baseRows = batchSize / blockNum;
+        uint32_t extraRows = batchSize % blockNum;
+
+        if (blockIdx < extraRows) {
+            this->rowsThisCore = baseRows + 1;
+            this->startRow = blockIdx * (baseRows + 1);
+        } else {
+            this->rowsThisCore = baseRows;
+            this->startRow = extraRows * (baseRows + 1) + (blockIdx - extraRows) * baseRows;
+        }
+
+        this->hiddenSize = hiddenSize;
+        this->combinedScale = 2.0f * scaleFactor;
+        this->clampMin = clampMin;
+        this->clampMax = clampMax;
+
+        if (this->rowsThisCore == 0) {
+            return;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float*)x + this->startRow * hiddenSize, this->rowsThisCore * hiddenSize);
+        yGm.SetGlobalBuffer((__gm__ float*)y + this->startRow, this->rowsThisCore);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, hiddenSize * sizeof(float));
+        pipe.InitBuffer(tmpBuf, 256);
+        pipe.InitBuffer(reduceBuf, 4096);
+        uint32_t outBufSize = ((this->rowsThisCore * sizeof(float) + 31) / 32) * 32;
+        if (outBufSize < 32) {
+            outBufSize = 32;
+        }
+        pipe.InitBuffer(outBuf, outBufSize);
     }
+
     __aicore__ inline void Process()
     {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
+        if (rowsThisCore == 0) {
+            return;
         }
+
+        AscendC::LocalTensor<float> outLocal = outBuf.Get<float>();
+
+        for (uint32_t i = 0; i < rowsThisCore; i++) {
+            CopyIn(i);
+            ComputeRow(i, outLocal);
+        }
+
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        AscendC::DataCopyExtParams copyParams;
+        copyParams.blockCount = 1;
+        copyParams.blockLen = static_cast<uint32_t>(rowsThisCore * sizeof(float));
+        copyParams.srcStride = 0;
+        copyParams.dstStride = 0;
+        AscendC::DataCopyPad(yGm, outLocal, copyParams);
     }
 
 private:
-    __aicore__ inline void CopyIn(int32_t progress)
+    __aicore__ inline void CopyIn(uint32_t progress)
     {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[progress * hiddenSize], hiddenSize);
         inQueueX.EnQue(xLocal);
     }
-    __aicore__ inline void Compute(int32_t progress)
+
+    __aicore__ inline void ComputeRow(uint32_t progress, AscendC::LocalTensor<float>& outLocal)
     {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        
-        // Scale operation
-        AscendC::Mul(zLocal, xLocal, this->scale_factor, this->tileLength);
-        
-        // Residual connection (add itself)
-        AscendC::Add(zLocal, zLocal, xLocal, this->tileLength);
-        
-        // Clamp operation
-        AscendC::Clip(zLocal, zLocal, this->clamp_min, this->clamp_max, this->tileLength);
-        
-        // LogSumExp (simplified approximation)
-        AscendC::ReduceSum(zLocal, zLocal, this->tileLength, 1, true);
-        
-        // Mish activation
-        AscendC::Mish(zLocal, zLocal, this->tileLength);
-        
-        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+        AscendC::LocalTensor<float> reduceTmp = reduceBuf.Get<float>();
+
+        AscendC::Muls<float>(xLocal, xLocal, combinedScale, hiddenSize);
+        AscendC::Mins<float>(xLocal, xLocal, clampMax, hiddenSize);
+        AscendC::Maxs<float>(xLocal, xLocal, clampMin, hiddenSize);
+
+        AscendC::ReduceMax<float>(tmp, xLocal, reduceTmp, static_cast<int32_t>(hiddenSize), false);
+        float maxVal = tmp.GetValue(0);
+
+        AscendC::Adds<float>(xLocal, xLocal, -maxVal, hiddenSize);
+        AscendC::Exp<float>(xLocal, xLocal, hiddenSize);
+
+        AscendC::ReduceSum<float, true>(tmp, xLocal, reduceTmp, static_cast<int32_t>(hiddenSize));
+        float sumVal = tmp.GetValue(0);
+
         inQueueX.FreeTensor(xLocal);
-    }
-    __aicore__ inline void CopyOut(int32_t progress)
-    {
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
-        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
-        outQueueZ.FreeTensor(zLocal);
+
+        AscendC::Duplicate<float>(tmp, sumVal, 8);
+        AscendC::Log<float>(tmp, tmp, 8);
+        float logSum = tmp.GetValue(0);
+        float lse = maxVal + logSum;
+
+        AscendC::Duplicate<float>(tmp, lse, 8);
+        AscendC::Exp<float>(tmp, tmp, 8);
+        AscendC::Adds<float>(tmp, tmp, 1.0f, 8);
+        AscendC::Log<float>(tmp, tmp, 8);
+        AscendC::Tanh<float>(tmp, tmp, 8);
+        float tanhSoftplus = tmp.GetValue(0);
+
+        float mishVal = lse * tanhSoftplus;
+        float result = lse * mishVal;
+
+        outLocal.SetValue(progress, result);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::GlobalTensor<DTYPE_X> xGm;
-    AscendC::GlobalTensor<DTYPE_Z> zGm;
-    uint32_t blockLength;
-    uint32_t tileNum;
-    uint32_t tileLength;
-    float scale_factor;
-    float clamp_min;
-    float clamp_max;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> outBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t hiddenSize;
+    uint32_t rowsThisCore;
+    uint32_t startRow;
+    float combinedScale;
+    float clampMin;
+    float clampMax;
 };
 
-extern "C" __global__ __aicore__ void matmul_scale_residual_add_clamp_log_sum_exp_mish_custom(GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void matmul_scale_residual_add_clamp_log_sum_exp_mish_custom(
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelMatmulScaleResidualAddClampLogSumExpMishCustom op;
-    op.Init(x, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.scale_factor, tiling_data.clamp_min, tiling_data.clamp_max);
+    KernelMatmulScaleResidualAddClampLogSumExpMish op;
+    op.Init(x, y, tiling_data.batchSize, tiling_data.hiddenSize,
+            tiling_data.scaleFactor, tiling_data.clampMin, tiling_data.clampMax);
     op.Process();
 }

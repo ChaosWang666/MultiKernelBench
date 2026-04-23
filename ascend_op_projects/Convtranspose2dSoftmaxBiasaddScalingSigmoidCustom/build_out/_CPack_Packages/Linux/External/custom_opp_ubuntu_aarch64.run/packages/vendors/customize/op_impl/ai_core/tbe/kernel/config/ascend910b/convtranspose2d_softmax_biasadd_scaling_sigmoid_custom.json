@@ -10,7 +10,7 @@
         "Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom/d=1,p=1/0,2/0,2/0,2",
         "Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom/d=1,p=0/0,2/0,2/0,2"
       ],
-      "staticKey": "55e84ffac41fa7325a9f15f74c4d444618458c8c02467f776f20e7d2933e345e,295935613b943d6a71aa3e5b596ee7da1f284cfde70cbf59960f8c546b5d4d30",
+      "staticKey": "5aacbf5c669e50b0cdaf51137a12b23cd521ea2e91d60aa997cfe43e0a0be9fc,f126c0ee3057ec4def2e340d56e977006e1e3b098c666baace8fe5750ac89dc3",
       "inputs": [
         {
           "name": "x",
@@ -37,7 +37,7 @@
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "dtype": "float32",
           "format": "ND",
@@ -48,12 +48,19 @@
           "format_match_mode": "FormatAgnostic"
         }
       ],
+      "attrs": [
+        {
+          "name": "scaling_factor",
+          "dtype": "float",
+          "value": 0.0
+        }
+      ],
       "opMode": "dynamic",
       "optionalInputMode": "gen_placeholder",
       "deterministic": "ignore",
       "optionalOutputMode": "gen_placeholder",
       "binInfo": {
-        "jsonFilePath": "ascend910b/convtranspose2d_softmax_biasadd_scaling_sigmoid_custom/Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom_04a88a845be0c34a9fbbde972f73fd48.json"
+        "jsonFilePath": "ascend910b/convtranspose2d_softmax_biasadd_scaling_sigmoid_custom/Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom_0311324548880484e6813b8431d0c723.json"
       }
     }
   ]

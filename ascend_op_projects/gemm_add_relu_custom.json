@@ -15,7 +15,7 @@
                 ]
             },
             {
-                "name": "w",
+                "name": "weight",
                 "param_type": "required",
                 "format": [
                     "ND"

@@ -28,19 +28,20 @@ typedef struct {
 } OpSupportList;
 enum SocType {
     SOC_VERSION_ASCEND910A = 1,
-    SOC_VERSION_ASCEND910B = 2,
-    SOC_VERSION_ASCEND910_93 = 3,
-    SOC_VERSION_ASCEND950 = 4,
-    SOC_VERSION_ASCEND310P = 5,
-    SOC_VERSION_ASCEND310B = 6,
-    SOC_VERSION_BS9SX1A = 7,
-    SOC_VERSION_ASCEND610Lite = 8,
-    SOC_VERSION_MC61AM21A = 10, // 9 is deprecated
-    SOC_VERSION_MC62CM12A = 11,
-    SOC_VERSION_BS9SX2A = 12,
-    SOC_VERSION_ASCEND910_96 = 13,
-    SOC_VERSION_KIRINX90 = 14,
-    SOC_VERSION_KIRIN9030 = 15
+    SOC_VERSION_ASCEND910B,
+    SOC_VERSION_ASCEND910_93,
+    SOC_VERSION_ASCEND910_95,
+    SOC_VERSION_ASCEND310P,
+    SOC_VERSION_ASCEND310B,
+    SOC_VERSION_BS9SX1A,
+    SOC_VERSION_ASCEND610Lite,
+    SOC_VERSION_ASCEND910_55,
+    SOC_VERSION_MC61AM21A,
+    SOC_VERSION_MC62CM12A,
+    SOC_VERSION_BS9SX2A,
+    SOC_VERSION_ASCEND910_96,
+    SOC_VERSION_KIRINX90,
+    SOC_VERSION_KIRIN9030
 };
 enum NnopbaseAttrDtype {
     kNnopbaseBool = 0U,
@@ -52,13 +53,11 @@ enum NnopbaseAttrDtype {
 uint32_t socSupportList[] = {SOC_VERSION_ASCEND910B};
 uint32_t socSupportListLen = 1;
 
-TensorDesc inputDesc0_0[3] =
-    {{ge::DT_FLOAT, ge::FORMAT_ND},
-     {ge::DT_FLOAT, ge::FORMAT_ND},
-     {ge::DT_FLOAT, ge::FORMAT_ND}};
+TensorDesc inputDesc0_0[1] =
+    {{ge::DT_FLOAT, ge::FORMAT_ND}};
 TensorDesc outputDesc0_0[1] =
     {{ge::DT_FLOAT, ge::FORMAT_ND}};
-SupportInfo list0_0 = {inputDesc0_0, 3, outputDesc0_0, 1};
+SupportInfo list0_0 = {inputDesc0_0, 1, outputDesc0_0, 1};
 SupportInfo supportInfo0[1] = {list0_0};
 OpSocSupportInfo socSupportInfo0= {supportInfo0, 1};
 
@@ -129,8 +128,6 @@ extern bool __attribute__((weak)) NnopbaseMatchArgs(void *executor, uint64_t *wo
 
 aclnnStatus aclnnGemmMultiplyLeakyreluCustomGetWorkspaceSize(
     const aclTensor *x,
-    const aclTensor *weight,
-    const aclTensor *bias,
     double multiplier,
     double negativeSlope,
     const aclTensor *out,
@@ -143,13 +140,11 @@ aclnnStatus aclnnGemmMultiplyLeakyreluCustomGetWorkspaceSize(
     void *nnopExecutor;
     static void *executorSpace = NULL;
     const char *opType = "GemmMultiplyLeakyreluCustom";
-    char inputDesc[] = {1, 1, 1};
+    char inputDesc[] = {1};
     char outputDesc[] = {1};
     char attrDesc[] = {1, 1};
 
     NNOPBASE_ASSERT_NOTNULL_RETVAL(x);
-    NNOPBASE_ASSERT_NOTNULL_RETVAL(weight);
-    NNOPBASE_ASSERT_NOTNULL_RETVAL(bias);
     NNOPBASE_ASSERT_NOTNULL_RETVAL(out);
 
     if (!executorSpace) {
@@ -165,8 +160,6 @@ aclnnStatus aclnnGemmMultiplyLeakyreluCustomGetWorkspaceSize(
         NnopbaseSetMatchArgsFlag(*executor);
     }
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddInput(*executor, x, 0));
-    NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddInput(*executor, weight, 1));
-    NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddInput(*executor, bias, 2));
     float tmp0 = static_cast<float>(multiplier);
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddAttrWithDtype(*executor, static_cast<void*>(&tmp0), sizeof(float), 0, kNnopbaseFloat));
     float tmp1 = static_cast<float>(negativeSlope);
@@ -180,8 +173,6 @@ aclnnStatus aclnnGemmMultiplyLeakyreluCustomGetWorkspaceSize(
     }
     if (NnopbaseAddParamName != NULL) {
         NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddParamName(*executor, 0, "x", true));
-        NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddParamName(*executor, 1, "weight", true));
-        NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddParamName(*executor, 2, "bias", true));
         NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddParamName(*executor, 0, "out", false));
     }
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddSupportList(*executor, &supportList, socSupportList, socSupportListLen));

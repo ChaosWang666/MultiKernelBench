@@ -2,7 +2,7 @@ op_host/CMakeFiles/cust_optiling.dir/bmm_instance_norm_sum_residual_add_multiply
  /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/BmmInstanceNormSumResidualAddMultiplyCustom/op_host/bmm_instance_norm_sum_residual_add_multiply_custom.cpp \
  /usr/include/stdc-predef.h \
  /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/BmmInstanceNormSumResidualAddMultiplyCustom/op_host/bmm_instance_norm_sum_residual_add_multiply_custom_tiling.h \
- /home/developer/Ascend/cann-9.0.0/include/register/tilingdata_base.h \
+ /home/developer/Ascend/cann-8.5.0/include/register/tilingdata_base.h \
  /usr/include/c++/9/vector /usr/include/c++/9/bits/stl_algobase.h \
  /usr/include/aarch64-linux-gnu/c++/9/bits/c++config.h \
  /usr/include/aarch64-linux-gnu/c++/9/bits/os_defines.h \
@@ -155,16 +155,16 @@ op_host/CMakeFiles/cust_optiling.dir/bmm_instance_norm_sum_residual_add_multiply
  /usr/include/string.h /usr/include/strings.h \
  /usr/include/aarch64-linux-gnu/bits/strings_fortified.h \
  /usr/include/aarch64-linux-gnu/bits/string_fortified.h \
- /home/developer/Ascend/cann-9.0.0/include/securec.h \
- /home/developer/Ascend/cann-9.0.0/include/securectype.h \
+ /home/developer/Ascend/cann-8.5.0/include/securec.h \
+ /home/developer/Ascend/cann-8.5.0/include/securectype.h \
  /usr/include/c++/9/stdlib.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/ascend_string.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/ascend_string.h \
  /usr/include/c++/9/functional /usr/include/c++/9/bits/std_function.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/types.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/types.h \
  /usr/include/c++/9/atomic \
- /home/developer/Ascend/cann-9.0.0/include/graph/c_types.h \
- /home/developer/Ascend/cann-9.0.0/include/register/op_def_registry.h \
- /home/developer/Ascend/cann-9.0.0/include/register/op_def.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/c_types.h \
+ /home/developer/Ascend/cann-8.5.0/include/register/op_def_registry.h \
+ /home/developer/Ascend/cann-8.5.0/include/register/op_def.h \
  /usr/include/c++/9/iostream /usr/include/c++/9/ostream \
  /usr/include/c++/9/ios /usr/include/c++/9/bits/ios_base.h \
  /usr/include/c++/9/bits/locale_classes.h \
@@ -182,75 +182,75 @@ op_host/CMakeFiles/cust_optiling.dir/bmm_instance_norm_sum_residual_add_multiply
  /usr/include/c++/9/bits/basic_ios.tcc \
  /usr/include/c++/9/bits/ostream.tcc /usr/include/c++/9/istream \
  /usr/include/c++/9/bits/istream.tcc \
- /home/developer/Ascend/cann-9.0.0/include/register/op_impl_registry.h \
+ /home/developer/Ascend/cann-8.5.0/include/register/op_impl_registry.h \
  /usr/include/c++/9/unordered_set /usr/include/c++/9/bits/hashtable.h \
  /usr/include/c++/9/bits/hashtable_policy.h /usr/include/c++/9/limits \
  /usr/include/c++/9/bits/unordered_set.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/compiler_def.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/base_type.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/infer_shape_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/shape.h \
- /home/developer/Ascend/cann-9.0.0/include/utils/extern_math_util.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tensor.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/ge_error_codes.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/storage_shape.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/storage_format.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/expand_dims_type.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/compiler_def.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/base_type.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/infer_shape_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/shape.h \
+ /home/developer/Ascend/cann-8.5.0/include/utils/extern_math_util.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tensor.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/ge_error_codes.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/storage_shape.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/storage_format.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/expand_dims_type.h \
  /usr/include/c++/9/cstddef \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tensor_data.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/stride.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/runtime_attrs.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/continuous_vector.h \
- /home/developer/Ascend/cann-9.0.0/include/external/ge_common/ge_api_error_codes.h \
- /home/developer/Ascend/cann-9.0.0/include/external/ge_common/ge_error_codes.h \
- /home/developer/Ascend/cann-9.0.0/include/external/ge_common/ge_api_types.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tensor_data.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/stride.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/runtime_attrs.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/continuous_vector.h \
+ /home/developer/Ascend/cann-8.5.0/include/external/ge_common/ge_api_error_codes.h \
+ /home/developer/Ascend/cann-8.5.0/include/external/ge_common/ge_error_codes.h \
+ /home/developer/Ascend/cann-8.5.0/include/external/ge_common/ge_api_types.h \
  /usr/include/c++/9/set /usr/include/c++/9/bits/stl_set.h \
  /usr/include/c++/9/bits/stl_multiset.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/tensor.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./ge_error_codes.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./types.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/ascend_string.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tensor.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/extended_kernel_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/kernel_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/kernel_run_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/context_extend.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/compute_node_info.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/infer_shape_range_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/range.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/infer_datatype_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tiling_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tiling_data.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/continuous_vector.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/runtime_attrs.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/tiling_parse_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/extended_kernel_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/op_execute_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/shape.h \
- /home/developer/Ascend/cann-9.0.0/include/ge/ge_allocator.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/op_execute_prepare_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/op_execute_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/op_execute_launch_context.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/infer_format_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/exe_res_generation_context.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/storage_shape.h \
- /home/developer/Ascend/cann-9.0.0/include/exe_graph/runtime/compute_node_info.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/operator_reg.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/operator.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./inference_context.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./tensor.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./types.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./ascend_string.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./resource_context.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./ge_error_codes.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./tensor.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/operator_factory.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./operator.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./ascend_string.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/graph.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/./gnode.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/././ge_error_codes.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/././types.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/././tensor.h \
- /home/developer/Ascend/cann-9.0.0/include/graph/././ascend_string.h \
- /home/developer/Ascend/cann-9.0.0/include/register/op_def_factory.h
+ /home/developer/Ascend/cann-8.5.0/include/graph/tensor.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./ge_error_codes.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./types.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/ascend_string.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tensor.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/extended_kernel_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/kernel_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/kernel_run_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/context_extend.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/compute_node_info.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/infer_shape_range_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/range.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/infer_datatype_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tiling_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tiling_data.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/continuous_vector.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/runtime_attrs.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/tiling_parse_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/extended_kernel_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/op_execute_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/shape.h \
+ /home/developer/Ascend/cann-8.5.0/include/ge/ge_allocator.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/op_execute_prepare_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/op_execute_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/op_execute_launch_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/infer_format_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/exe_res_generation_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/storage_shape.h \
+ /home/developer/Ascend/cann-8.5.0/include/exe_graph/runtime/compute_node_info.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/operator_reg.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/operator.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./inference_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./tensor.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./types.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./ascend_string.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./resource_context.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./ge_error_codes.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./tensor.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/operator_factory.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./operator.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./ascend_string.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/graph.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/./gnode.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/././ge_error_codes.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/././types.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/././tensor.h \
+ /home/developer/Ascend/cann-8.5.0/include/graph/././ascend_string.h \
+ /home/developer/Ascend/cann-8.5.0/include/register/op_def_factory.h

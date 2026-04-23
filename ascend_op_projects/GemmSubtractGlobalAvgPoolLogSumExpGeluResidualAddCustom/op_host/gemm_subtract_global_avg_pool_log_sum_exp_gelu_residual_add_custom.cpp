@@ -2,25 +2,31 @@
 #include "gemm_subtract_global_avg_pool_log_sum_exp_gelu_residual_add_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_SIZE = 2048;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     GemmSubtractGlobalAvgPoolLogSumExpGeluResidualAddCustomTilingData tiling;
-    
-    const gert::Shape* gemm_shape = context->GetInputShape(0);
-    const gert::Shape* orig_shape = context->GetInputShape(2);
-    
-    uint32_t batchSize = gemm_shape->GetDim(0);
-    uint32_t outFeatures = gemm_shape->GetDim(1);
-    uint32_t inFeatures = orig_shape->GetDim(1);
-    
+
+    auto yShape = context->GetInputShape(0)->GetOriginShape();
+    auto xShape = context->GetInputShape(1)->GetOriginShape();
+
+    uint32_t batchSize = yShape.GetDim(0);
+    uint32_t nLen = yShape.GetDim(1);
+    uint32_t mLen = xShape.GetDim(1);
+
+    uint32_t rowsPerBlock = (batchSize + BLOCK_DIM - 1) / BLOCK_DIM;
+
+    context->SetBlockDim(BLOCK_DIM);
     tiling.set_batchSize(batchSize);
-    tiling.set_outFeatures(outFeatures);
-    tiling.set_inFeatures(inFeatures);
-    
-    uint32_t blockDim = batchSize < 32 ? batchSize : 32;
-    context->SetBlockDim(blockDim);
-    
+    tiling.set_nLen(nLen);
+    tiling.set_mLen(mLen);
+    tiling.set_rowsPerBlock(rowsPerBlock);
+    tiling.set_tileSize(TILE_SIZE);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -29,12 +35,13 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
+
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* orig_shape = context->GetInputShape(2);
-    gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *orig_shape;
+    const gert::Shape* x_shape = context->GetInputShape(1);
+    gert::Shape* out_shape = context->GetOutputShape(0);
+    *out_shape = *x_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -45,27 +52,23 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 }
 }
 
+
 namespace ops {
 class GemmSubtractGlobalAvgPoolLogSumExpGeluResidualAddCustom : public OpDef {
 public:
     explicit GemmSubtractGlobalAvgPoolLogSumExpGeluResidualAddCustom(const char* name) : OpDef(name)
     {
-        this->Input("gemm_out")
+        this->Input("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("subtract_vec")
+        this->Input("x")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("original_x")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("output")
+        this->Output("z")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})

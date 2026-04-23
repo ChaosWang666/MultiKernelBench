@@ -13,7 +13,7 @@
           "formatMode": "static_nd_agnostic"
         },
         {
-          "name": "scaling_factor",
+          "name": "scale",
           "index": 1,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
@@ -27,7 +27,7 @@
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
@@ -43,8 +43,8 @@
           "Conv3dScalingTanhMultiplySigmoidCustom/d=1,p=1/0,2/0,2/0,2/0,2",
           "Conv3dScalingTanhMultiplySigmoidCustom/d=1,p=0/0,2/0,2/0,2/0,2"
         ],
-        "binPath": "ascend910b/conv3d_scaling_tanh_multiply_sigmoid_custom/Conv3dScalingTanhMultiplySigmoidCustom_9c51c84926a4817a59ab5a6acc1ed255.o",
-        "jsonPath": "ascend910b/conv3d_scaling_tanh_multiply_sigmoid_custom/Conv3dScalingTanhMultiplySigmoidCustom_9c51c84926a4817a59ab5a6acc1ed255.json"
+        "binPath": "ascend910b/conv3d_scaling_tanh_multiply_sigmoid_custom/Conv3dScalingTanhMultiplySigmoidCustom_1606bca779d2100624c2a31c22b51cf2.o",
+        "jsonPath": "ascend910b/conv3d_scaling_tanh_multiply_sigmoid_custom/Conv3dScalingTanhMultiplySigmoidCustom_1606bca779d2100624c2a31c22b51cf2.json"
       }
     ]
   }

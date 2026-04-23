@@ -3,28 +3,29 @@
 #include "register/op_def_registry.h"
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
+const uint32_t BLOCK_DIM = 20;
+const uint32_t TILE_LEN  = 2048;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv3dMaxLogSumExpReluCustomTilingData tiling;
-    const gert::Shape* inputShape = context->GetInputShape(0);
-    const std::vector<int64_t>& shape = inputShape->GetOriginShape().GetShapeVector();
-    tiling.set_batchSize(shape[0]);
-    tiling.set_inChannels(shape[1]);
-    tiling.set_depth(shape[2]);
-    tiling.set_height(shape[3]);
-    tiling.set_width(shape[4]);
-
-    // Set other parameters from attributes
-    tiling.set_outChannels(context->GetAttrInt("out_channels"));
-    tiling.set_kernelSize(context->GetAttrInt("kernel_size"));
-    tiling.set_stride(context->GetAttrInt("stride"));
-    tiling.set_padding(context->GetAttrInt("padding"));
+    const gert::Shape xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t dimNum = xShape.GetDimNum();
+    uint32_t B = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t spatial = 1;
+    for (uint32_t i = 2; i < dimNum; i++) {
+        spatial *= xShape.GetDim(i);
+    }
 
     context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batch(B);
+    tiling.set_channels(C);
+    tiling.set_spatial(spatial);
+    tiling.set_tileLen(TILE_LEN);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
-
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
     currentWorkspace[0] = 0;
     return ge::GRAPH_SUCCESS;
@@ -34,11 +35,17 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* inputShape = context->GetInputShape(0);
-    gert::Shape* outputShape = context->GetOutputShape(0);
-    const std::vector<int64_t>& inputVec = inputShape->GetOriginShape().GetShapeVector();
-    std::vector<int64_t> outputVec = {inputVec[0], inputVec[1], inputVec[2], inputVec[3], inputVec[4]};
-    *outputShape = gert::Shape(outputVec);
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    int dimNum = x_shape->GetDimNum();
+    y_shape->SetDimNum(dimNum);
+    for (int i = 0; i < dimNum; i++) {
+        if (i == 1) {
+            y_shape->SetDim(i, 1);
+        } else {
+            y_shape->SetDim(i, x_shape->GetDim(i));
+        }
+    }
     return GRAPH_SUCCESS;
 }
 
@@ -58,19 +65,13 @@ public:
         this->Input("x")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_NCDHW})
-            .UnknownShapeFormat({ge::FORMAT_NCDHW});
-        this->Output("z")
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_NCDHW})
-            .UnknownShapeFormat({ge::FORMAT_NCDHW});
-
-        this->Attr("in_channels").SetType(ATTR_TYPE_INT).SetParamType(REQUIRED);
-        this->Attr("out_channels").SetType(ATTR_TYPE_INT).SetParamType(REQUIRED);
-        this->Attr("kernel_size").SetType(ATTR_TYPE_INT).SetParamType(REQUIRED);
-        this->Attr("stride").SetType(ATTR_TYPE_INT).SetParamType(REQUIRED);
-        this->Attr("padding").SetType(ATTR_TYPE_INT).SetParamType(REQUIRED);
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 

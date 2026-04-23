@@ -3,30 +3,20 @@
 #include "register/op_def_registry.h"
 
 namespace optiling {
+const uint32_t BATCHES_PER_BLOCK_HOST = 4;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     MatmulMaxPoolSumScaleCustomTilingData tiling;
-    
-    const gert::Shape* x_shape = context->GetInputShape(0);
-    uint32_t batchSize = x_shape->GetDim(0);
-    uint32_t outFeatures = x_shape->GetDim(1);
-    
-    // These are passed via attrs
-    const uint32_t kernelSize = 2;
-    const float scaleFactor = 0.5f;
-    uint32_t pooledLen = outFeatures / kernelSize;
-    
-    uint32_t BLOCK_DIM = batchSize < 32 ? batchSize : 32;
-    uint32_t tileNum = 8;
-    
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_outFeatures(outFeatures);
-    tiling.set_kernelSize(kernelSize);
-    tiling.set_scaleFactor(scaleFactor);
-    tiling.set_pooledLen(pooledLen);
-    tiling.set_tileNum(tileNum);
-    
+    auto inputShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t totalBatches = inputShape.GetDim(0);
+    uint32_t features = inputShape.GetDim(1);
+
+    uint32_t blockDim = (totalBatches + BATCHES_PER_BLOCK_HOST - 1) / BATCHES_PER_BLOCK_HOST;
+    context->SetBlockDim(blockDim);
+
+    tiling.set_totalBatches(totalBatches);
+    tiling.set_features(features);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -40,11 +30,11 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    // Output shape is (batchSize,)
     y_shape->SetDimNum(1);
     y_shape->SetDim(0, x_shape->GetDim(0));
     return GRAPH_SUCCESS;
 }
+
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
     const auto inputDataType = context->GetInputDataType(0);

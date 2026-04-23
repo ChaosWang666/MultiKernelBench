@@ -8,9 +8,9 @@ namespace ge {
 
 REG_OP(ConvTranspose2dMishAddHardtanhScalingCustom)
     .INPUT(x, ge::TensorType::ALL())
-    .INPUT(add_value, ge::TensorType::ALL())
-    .INPUT(scale, ge::TensorType::ALL())
-    .OUTPUT(z, ge::TensorType::ALL())
+    .OUTPUT(y, ge::TensorType::ALL())
+    .REQUIRED_ATTR(add_value, Float)
+    .REQUIRED_ATTR(scale, Float)
     .OP_END_FACTORY_REG(ConvTranspose2dMishAddHardtanhScalingCustom);
 
 }

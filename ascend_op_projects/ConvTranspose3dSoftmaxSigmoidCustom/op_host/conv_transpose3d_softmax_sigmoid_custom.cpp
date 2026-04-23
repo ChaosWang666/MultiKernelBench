@@ -2,28 +2,34 @@
 #include "conv_transpose3d_softmax_sigmoid_custom_tiling.h"
 #include "register/op_def_registry.h"
 
-namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 8;
 
+namespace optiling {
+const uint32_t BLOCK_DIM = 20;
+const uint32_t ROWS_PER_TILE = 64;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose3dSoftmaxSigmoidCustomTilingData tiling;
-    const gert::StorageShape* xShape = context->GetInputShape(0);
-    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
-    uint32_t channels = xShape->GetStorageShape().GetDim(1);
-    uint32_t D = xShape->GetStorageShape().GetDim(2);
-    uint32_t H = xShape->GetStorageShape().GetDim(3);
-    uint32_t W = xShape->GetStorageShape().GetDim(4);
-    uint32_t spatialSize = D * H * W;
-    uint32_t totalLength = batchSize * channels * spatialSize;
 
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_totalLength(totalLength);
-    tiling.set_channels(channels);
-    tiling.set_spatialSize(spatialSize);
-    tiling.set_batchSize(batchSize);
-    tiling.set_tileNum(TILE_NUM);
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t dimNum = shape.GetDimNum();
+    uint32_t cols = static_cast<uint32_t>(shape.GetDim(dimNum - 1));
+    uint32_t totalRows = 1;
+    for (uint32_t i = 0; i < dimNum - 1; i++) {
+        totalRows *= static_cast<uint32_t>(shape.GetDim(i));
+    }
+
+    uint32_t numBlocks = BLOCK_DIM;
+    if (totalRows < numBlocks) {
+        numBlocks = totalRows == 0 ? 1 : totalRows;
+    }
+    uint32_t rowsPerCore = (totalRows + numBlocks - 1) / numBlocks;
+
+    context->SetBlockDim(numBlocks);
+    tiling.set_totalRows(totalRows);
+    tiling.set_cols(cols);
+    tiling.set_rowsPerCore(rowsPerCore);
+    tiling.set_rowsPerTile(ROWS_PER_TILE);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -31,6 +37,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -47,6 +54,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class ConvTranspose3dSoftmaxSigmoidCustom : public OpDef {

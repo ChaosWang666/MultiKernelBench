@@ -67,7 +67,7 @@ def add_dtype_fmt_option_single(x, x_n, is_ref: bool = False):
 
 def get_dtype_fmt_options(__inputs__, __outputs__):
     options = []
-    input_names = ['x', 'bias', 'scale']
+    input_names = ['x', 'bias', 'scale', 'gamma', 'beta']
     output_names = ['z']
     unique_param_name_set = set()
     for idx, x in enumerate(__inputs__):
@@ -129,9 +129,9 @@ def get_kernel_source(src_file, dir_snake, dir_ex):
         return src
     return src_ex
 
-def _build_args(x_in__, bias_in__, scale_in__, z_out_):
+def _build_args(x_in__, bias_in__, scale_in__, gamma_in__, beta_in__, z_out_, num_groups, eps):
     __inputs__ = []
-    for arg in [x_in__, bias_in__, scale_in__]:
+    for arg in [x_in__, bias_in__, scale_in__, gamma_in__, beta_in__]:
         if arg != None:
             if isinstance(arg, (list, tuple)):
                 if len(arg) == 0:
@@ -153,15 +153,27 @@ def _build_args(x_in__, bias_in__, scale_in__, z_out_):
         else:
             __outputs__.append(arg)
     __attrs__ = []
+    if num_groups != None:
+        attr = {}
+        attr["name"] = "num_groups"
+        attr["dtype"] = "int"
+        attr["value"] = num_groups
+        __attrs__.append(attr)
+    if eps != None:
+        attr = {}
+        attr["name"] = "eps"
+        attr["dtype"] = "float"
+        attr["value"] = eps
+        __attrs__.append(attr)
     return __inputs__, __outputs__, __attrs__
 
 @tbe_register.register_operator("Conv2dAddScaleSigmoidGroupNormCustom", trans_bool_to_s8=False)
-@para_check.check_op_params(para_check.REQUIRED_INPUT, para_check.REQUIRED_INPUT, para_check.REQUIRED_INPUT, para_check.REQUIRED_OUTPUT, para_check.KERNEL_NAME)
-def conv2d_add_scale_sigmoid_group_norm_custom(x_in__, bias_in__, scale_in__, z_out_, kernel_name="conv2d_add_scale_sigmoid_group_norm_custom", impl_mode = ""):
+@para_check.check_op_params(para_check.REQUIRED_INPUT, para_check.REQUIRED_INPUT, para_check.REQUIRED_INPUT, para_check.REQUIRED_INPUT, para_check.REQUIRED_INPUT, para_check.REQUIRED_OUTPUT, para_check.OPTION_ATTR_INT, para_check.OPTION_ATTR_FLOAT, para_check.KERNEL_NAME)
+def conv2d_add_scale_sigmoid_group_norm_custom(x_in__, bias_in__, scale_in__, gamma_in__, beta_in__, z_out_, num_groups, eps, kernel_name="conv2d_add_scale_sigmoid_group_norm_custom", impl_mode = ""):
     # do ascendc build step
     if get_current_build_config("enable_op_prebuild"):
         return
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, bias_in__, scale_in__, z_out_)
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, bias_in__, scale_in__, gamma_in__, beta_in__, z_out_, num_groups, eps)
     options = get_dtype_fmt_options(__inputs__, __outputs__)
     options += ["-x", "cce"]
     bisheng = os.environ.get('BISHENG_REAL_PATH')
@@ -217,17 +229,17 @@ def conv2d_add_scale_sigmoid_group_norm_custom(x_in__, bias_in__, scale_in__, z_
     op_type = "Conv2dAddScaleSigmoidGroupNormCustom"
     code_channel = get_code_channel(src, kernel_name, op_type, options)
     op_info = OpInfo(kernel_name = kernel_name, op_type = op_type, inputs = __inputs__, outputs = __outputs__,\
-        attrs = __attrs__ , impl_mode = impl_mode, origin_inputs=[x_in__, bias_in__, scale_in__], origin_outputs = [z_out_],\
-                param_type_dynamic = False, mc2_ctx = [], param_type_list = ['required', 'required', 'required', 'required'], init_value_list = [None],\
+        attrs = __attrs__ , impl_mode = impl_mode, origin_inputs=[x_in__, bias_in__, scale_in__, gamma_in__, beta_in__], origin_outputs = [z_out_],\
+                param_type_dynamic = False, mc2_ctx = [], param_type_list = ['required', 'required', 'required', 'required', 'required', 'required'], init_value_list = [None],\
                 output_shape_depend_on_compute = [])
     compile_op(src, origin_func_name, op_info, options, code_channel, '{}', {'valueDepend': {}})
 
-def op_select_format(x_in__, bias_in__, scale_in__, z_out_, impl_mode = ""):
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, bias_in__, scale_in__, z_out_)
+def op_select_format(x_in__, bias_in__, scale_in__, gamma_in__, beta_in__, z_out_, num_groups, eps, impl_mode = ""):
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, bias_in__, scale_in__, gamma_in__, beta_in__, z_out_, num_groups, eps)
     result = check_op_cap("op_select_format", "Conv2dAddScaleSigmoidGroupNormCustom", __inputs__, __outputs__, __attrs__)
     return result.decode("utf-8")
 
-def get_op_specific_info(x_in__, bias_in__, scale_in__, z_out_, impl_mode = ""):
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, bias_in__, scale_in__, z_out_)
+def get_op_specific_info(x_in__, bias_in__, scale_in__, gamma_in__, beta_in__, z_out_, num_groups, eps, impl_mode = ""):
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, bias_in__, scale_in__, gamma_in__, beta_in__, z_out_, num_groups, eps)
     result = check_op_cap("get_op_specific_info", "Conv2dAddScaleSigmoidGroupNormCustom", __inputs__, __outputs__, __attrs__)
     return result.decode("utf-8")

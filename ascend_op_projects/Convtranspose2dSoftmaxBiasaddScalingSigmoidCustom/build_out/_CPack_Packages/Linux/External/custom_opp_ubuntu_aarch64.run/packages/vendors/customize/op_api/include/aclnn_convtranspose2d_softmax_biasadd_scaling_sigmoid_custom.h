@@ -16,6 +16,7 @@ extern "C" {
  * parameters :
  * x : required
  * bias : required
+ * scalingFactor : optional
  * out : required
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
@@ -24,6 +25,7 @@ __attribute__((visibility("default")))
 aclnnStatus aclnnConvtranspose2dSoftmaxBiasaddScalingSigmoidCustomGetWorkspaceSize(
     const aclTensor *x,
     const aclTensor *bias,
+    double scalingFactor,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);

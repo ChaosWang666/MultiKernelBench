@@ -2,24 +2,19 @@
 #include "bmm_instance_norm_sum_residual_add_multiply_custom_tiling.h"
 #include "register/op_def_registry.h"
 
-
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 1024;
+const uint32_t BLOCK_DIM = 20;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
-
     BmmInstanceNormSumResidualAddMultiplyCustomTilingData tiling;
-    uint32_t batchSize = context->GetInputShape(0)->GetOriginShape().GetDim(0);
-    uint32_t inFeatures = context->GetInputShape(0)->GetOriginShape().GetDim(1);
-    uint32_t outFeatures = context->GetInputShape(1)->GetOriginShape().GetDim(1);
-    uint32_t totalLength = batchSize * outFeatures;
+    const gert::Shape& xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t totalRows = xShape.GetDim(0);
+    uint32_t rowLen = xShape.GetDim(1);
+
     context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_inFeatures(inFeatures);
-    tiling.set_outFeatures(outFeatures);
-    tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(TILE_NUM);
+    tiling.set_totalRows(totalRows);
+    tiling.set_rowLen(rowLen);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -28,24 +23,22 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
-
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x1_shape = context->GetInputShape(0);
-    const gert::Shape* y_shape = context->GetInputShape(1);
+    const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* z_shape = context->GetOutputShape(0);
-    *z_shape = *y_shape;
+    *z_shape = *x_shape;
     return GRAPH_SUCCESS;
 }
+
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-const auto inputDataType = context->GetInputDataType(0);
-context->SetOutputDataType(0, inputDataType);
-return ge::GRAPH_SUCCESS;
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
 }
 }
-
 
 namespace ops {
 class BmmInstanceNormSumResidualAddMultiplyCustom : public OpDef {
@@ -62,16 +55,6 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("weight")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("bias")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
         this->Output("z")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
@@ -80,10 +63,8 @@ public:
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
-        this->AICore()
-            .SetTiling(optiling::TilingFunc);
+        this->AICore().SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
-
     }
 };
 

@@ -1,5 +1,5 @@
 # Hashes of file build rules.
-2e0117df006a060d5c2782077624b082 CMakeFiles/gen_version_info
+993e0c06fb8449d2e9730aca2fa1e66f CMakeFiles/gen_version_info
 464f3fc83b0a89e962f746661ee80fcb CMakeFiles/modify_vendor
 dafac30a759155930f54278f443703d3 op_host/CMakeFiles/optiling_compat
 39e248cd38bedb60ac52d5916200b1ae op_kernel/CMakeFiles/Conv2dHardSwishReluCustom_ascend910b

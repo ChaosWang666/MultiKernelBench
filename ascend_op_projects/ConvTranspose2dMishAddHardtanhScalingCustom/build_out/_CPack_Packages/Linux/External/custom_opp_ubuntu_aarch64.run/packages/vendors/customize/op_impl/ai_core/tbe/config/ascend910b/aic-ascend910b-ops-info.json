@@ -1,5 +1,18 @@
 {
     "ConvTranspose2dMishAddHardtanhScalingCustom":{
+        "attr":{
+            "list":"add_value,scale"
+        },
+        "attr_add_value":{
+            "paramType":"required",
+            "type":"float",
+            "value":"all"
+        },
+        "attr_scale":{
+            "paramType":"required",
+            "type":"float",
+            "value":"all"
+        },
         "coreType":{
             "value":"AiCore"
         },
@@ -23,22 +36,6 @@
             "shape":"all",
             "unknownshape_format":"ND"
         },
-        "input1":{
-            "dtype":"float32",
-            "format":"ND",
-            "name":"add_value",
-            "paramType":"required",
-            "shape":"all",
-            "unknownshape_format":"ND"
-        },
-        "input2":{
-            "dtype":"float32",
-            "format":"ND",
-            "name":"scale",
-            "paramType":"required",
-            "shape":"all",
-            "unknownshape_format":"ND"
-        },
         "needCheckSupport":{
             "flag":"false"
         },
@@ -51,7 +48,7 @@
         "output0":{
             "dtype":"float32",
             "format":"ND",
-            "name":"z",
+            "name":"y",
             "paramType":"required",
             "shape":"all",
             "unknownshape_format":"ND"

@@ -24,8 +24,8 @@ extern "C" {
 __attribute__((visibility("default")))
 aclnnStatus aclnnConvTranspose2dMishAddHardtanhScalingCustomGetWorkspaceSize(
     const aclTensor *x,
-    const aclTensor *addValue,
-    const aclTensor *scale,
+    double addValue,
+    double scale,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);

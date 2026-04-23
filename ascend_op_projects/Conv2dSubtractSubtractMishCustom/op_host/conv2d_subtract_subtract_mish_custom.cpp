@@ -2,20 +2,28 @@
 #include "conv2d_subtract_subtract_mish_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 2048;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv2dSubtractSubtractMishCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
-    
-    const float* subtractValue = context->GetAttrs()->GetAttrPointer<float>(0);
-    
     context->SetBlockDim(BLOCK_DIM);
+
+    uint32_t blockLength = totalLength / BLOCK_DIM;
+
+    uint32_t targetDivisor = 1024;
+    while (targetDivisor > 16 && (blockLength % targetDivisor) != 0) {
+        targetDivisor /= 2;
+    }
+    uint32_t tileNum = blockLength / targetDivisor;
+    if (tileNum == 0) {
+        tileNum = 1;
+    }
+
     tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(TILE_NUM);
-    tiling.set_subtractValue(*subtractValue);
+    tiling.set_tileNum(tileNum);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -24,12 +32,13 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
+
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* x1_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x_shape;
+    *y_shape = *x1_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -39,6 +48,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class Conv2dSubtractSubtractMishCustom : public OpDef {
@@ -55,8 +65,6 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("subtract_value")
-            .Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 

@@ -15,26 +15,6 @@
                 ]
             },
             {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bias",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
                 "name": "gamma",
                 "param_type": "required",
                 "format": [
@@ -57,7 +37,7 @@
         ],
         "output_desc": [
             {
-                "name": "z",
+                "name": "y",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -65,38 +45,6 @@
                 "type": [
                     "float"
                 ]
-            }
-        ],
-        "attr_desc": [
-            {
-                "name": "batchSize",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "inputSize",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "hiddenSize",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "numGroups",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "eps",
-                "param_type": "required",
-                "type": "float"
-            },
-            {
-                "name": "negativeSlope",
-                "param_type": "required",
-                "type": "float"
             }
         ]
     }

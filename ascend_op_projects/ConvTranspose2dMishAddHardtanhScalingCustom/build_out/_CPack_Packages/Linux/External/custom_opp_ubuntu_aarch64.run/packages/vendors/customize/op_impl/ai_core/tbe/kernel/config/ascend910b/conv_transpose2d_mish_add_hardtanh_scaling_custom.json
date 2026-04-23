@@ -5,12 +5,12 @@
       "int64Mode": false,
       "simplifiedKeyMode": 0,
       "simplifiedKey": [
-        "ConvTranspose2dMishAddHardtanhScalingCustom/d=0,p=1/0,2/0,2/0,2/0,2",
-        "ConvTranspose2dMishAddHardtanhScalingCustom/d=0,p=0/0,2/0,2/0,2/0,2",
-        "ConvTranspose2dMishAddHardtanhScalingCustom/d=1,p=1/0,2/0,2/0,2/0,2",
-        "ConvTranspose2dMishAddHardtanhScalingCustom/d=1,p=0/0,2/0,2/0,2/0,2"
+        "ConvTranspose2dMishAddHardtanhScalingCustom/d=0,p=1/0,2/0,2",
+        "ConvTranspose2dMishAddHardtanhScalingCustom/d=0,p=0/0,2/0,2",
+        "ConvTranspose2dMishAddHardtanhScalingCustom/d=1,p=1/0,2/0,2",
+        "ConvTranspose2dMishAddHardtanhScalingCustom/d=1,p=0/0,2/0,2"
       ],
-      "staticKey": "e7ee671befb09f01a579e6b447052e4f8660d41790aaa0c02a813a8d991f88b7,10ece6b820443a55859e93e431b9869965527700534b902d054c8d6c436c9db4",
+      "staticKey": "253c9b1acc1568569e0970b09b98e22cd263746aa4ca9fd90277528145d5ea4c,c003cd8299fcbebbe79d29c760cadf468b97791575d331f792d53d37f0532a62",
       "inputs": [
         {
           "name": "x",
@@ -22,33 +22,11 @@
             -2
           ],
           "format_match_mode": "FormatAgnostic"
-        },
-        {
-          "name": "add_value",
-          "index": 1,
-          "dtype": "float32",
-          "format": "ND",
-          "paramType": "required",
-          "shape": [
-            -2
-          ],
-          "format_match_mode": "FormatAgnostic"
-        },
-        {
-          "name": "scale",
-          "index": 2,
-          "dtype": "float32",
-          "format": "ND",
-          "paramType": "required",
-          "shape": [
-            -2
-          ],
-          "format_match_mode": "FormatAgnostic"
         }
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "dtype": "float32",
           "format": "ND",
@@ -59,12 +37,24 @@
           "format_match_mode": "FormatAgnostic"
         }
       ],
+      "attrs": [
+        {
+          "name": "add_value",
+          "dtype": "float",
+          "value": 0.0
+        },
+        {
+          "name": "scale",
+          "dtype": "float",
+          "value": 0.0
+        }
+      ],
       "opMode": "dynamic",
       "optionalInputMode": "gen_placeholder",
       "deterministic": "ignore",
       "optionalOutputMode": "gen_placeholder",
       "binInfo": {
-        "jsonFilePath": "ascend910b/conv_transpose2d_mish_add_hardtanh_scaling_custom/ConvTranspose2dMishAddHardtanhScalingCustom_d0865063af16e746ea29dcf743e4574c.json"
+        "jsonFilePath": "ascend910b/conv_transpose2d_mish_add_hardtanh_scaling_custom/ConvTranspose2dMishAddHardtanhScalingCustom_6aab34b9cedd3b826ea944e39131aa3c.json"
       }
     }
   ]

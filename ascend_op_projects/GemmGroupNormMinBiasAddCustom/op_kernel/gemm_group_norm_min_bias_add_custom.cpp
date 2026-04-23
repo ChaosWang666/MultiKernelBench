@@ -1,92 +1,120 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
- 
 class KernelGemmGroupNormMinBiasAdd {
 public:
     __aicore__ inline KernelGemmGroupNormMinBiasAdd() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR weight, GM_ADDR bias, uint32_t batch_size, uint32_t in_features, uint32_t out_features, uint32_t num_groups, uint32_t bias_shape_0, uint32_t bias_shape_1, uint32_t bias_shape_2, uint32_t bias_shape_3)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR z,
+                                uint32_t totalRows, uint32_t totalCols)
     {
-        this->batch_size = batch_size;
-        this->in_features = in_features;
-        this->out_features = out_features;
-        this->num_groups = num_groups;
-        this->bias_shape_0 = bias_shape_0;
-        this->bias_shape_1 = bias_shape_1;
-        this->bias_shape_2 = bias_shape_2;
-        this->bias_shape_3 = bias_shape_3;
-        this->blockLength = batch_size * out_features / AscendC::GetBlockNum();
-        this->tileNum = 4096;
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->totalRows = totalRows;
+        this->totalCols = totalCols;
 
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(inQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        uint32_t baseColsPerBlock = totalCols / blockNum;
+        uint32_t remainder = totalCols % blockNum;
+        if (blockIdx < remainder) {
+            this->colsPerBlock = baseColsPerBlock + 1;
+            this->colStart = blockIdx * this->colsPerBlock;
+        } else {
+            this->colsPerBlock = baseColsPerBlock;
+            this->colStart = blockIdx * baseColsPerBlock + remainder;
+        }
+
+        if (this->colsPerBlock == 0) {
+            return;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float*)x, totalRows);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias + this->colStart, this->colsPerBlock);
+        zGm.SetGlobalBuffer((__gm__ float*)z + this->colStart * totalRows,
+                            this->colsPerBlock * totalRows);
+
+        uint32_t rowsAlign = ((totalRows * sizeof(float) + 31) / 32) * 32 / sizeof(float);
+        uint32_t biasAlign = ((this->colsPerBlock * sizeof(float) + 31) / 32) * 32 / sizeof(float);
+
+        pipe.InitBuffer(inQueueX, 1, rowsAlign * sizeof(float));
+        pipe.InitBuffer(inQueueBias, 1, biasAlign * sizeof(float));
+        pipe.InitBuffer(outQueueZ, 2, rowsAlign * sizeof(float));
     }
+
     __aicore__ inline void Process()
     {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
+        if (this->colsPerBlock == 0) {
+            return;
         }
-    }
 
-private:
-    __aicore__ inline void CopyIn(int32_t progress)
-    {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = inQueueY.AllocTensor<DTYPE_Y>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(yLocal, yGm[progress * this->tileLength], this->tileLength);
-        inQueueX.EnQue(xLocal);
-        inQueueY.EnQue(yLocal);
-    }
-    __aicore__ inline void Compute(int32_t progress)
-    {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = inQueueY.DeQue<DTYPE_Y>();
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::Add(zLocal, xLocal, yLocal, this->tileLength);
-        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        AscendC::LocalTensor<float> xAlloc = inQueueX.AllocTensor<float>();
+        AscendC::DataCopyExtParams xCopyParams;
+        xCopyParams.blockCount = 1;
+        xCopyParams.blockLen = this->totalRows * sizeof(float);
+        xCopyParams.srcStride = 0;
+        xCopyParams.dstStride = 0;
+        AscendC::DataCopyPadExtParams<float> xPadParams;
+        xPadParams.isPad = false;
+        xPadParams.leftPadding = 0;
+        xPadParams.rightPadding = 0;
+        xPadParams.paddingValue = 0;
+        AscendC::DataCopyPad(xAlloc, xGm, xCopyParams, xPadParams);
+        inQueueX.EnQue(xAlloc);
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+
+        AscendC::LocalTensor<float> biasAlloc = inQueueBias.AllocTensor<float>();
+        AscendC::DataCopyExtParams biasCopyParams;
+        biasCopyParams.blockCount = 1;
+        biasCopyParams.blockLen = this->colsPerBlock * sizeof(float);
+        biasCopyParams.srcStride = 0;
+        biasCopyParams.dstStride = 0;
+        AscendC::DataCopyPadExtParams<float> biasPadParams;
+        biasPadParams.isPad = false;
+        biasPadParams.leftPadding = 0;
+        biasPadParams.rightPadding = 0;
+        biasPadParams.paddingValue = 0;
+        AscendC::DataCopyPad(biasAlloc, biasGm, biasCopyParams, biasPadParams);
+        inQueueBias.EnQue(biasAlloc);
+        AscendC::LocalTensor<float> biasLocal = inQueueBias.DeQue<float>();
+
+        for (uint32_t j = 0; j < this->colsPerBlock; j++) {
+            float biasVal = biasLocal.GetValue(j);
+            AscendC::LocalTensor<float> outLocal = outQueueZ.AllocTensor<float>();
+            AscendC::Adds<float>(outLocal, xLocal, biasVal, this->totalRows);
+            outQueueZ.EnQue(outLocal);
+
+            AscendC::LocalTensor<float> outDeq = outQueueZ.DeQue<float>();
+            AscendC::DataCopyExtParams outCopyParams;
+            outCopyParams.blockCount = 1;
+            outCopyParams.blockLen = this->totalRows * sizeof(float);
+            outCopyParams.srcStride = 0;
+            outCopyParams.dstStride = 0;
+            AscendC::DataCopyPad(zGm[j * this->totalRows], outDeq, outCopyParams);
+            outQueueZ.FreeTensor(outDeq);
+        }
+
         inQueueX.FreeTensor(xLocal);
-        inQueueY.FreeTensor(yLocal);
-    }
-    __aicore__ inline void CopyOut(int32_t progress)
-    {
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
-        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
-        outQueueZ.FreeTensor(zLocal);
+        inQueueBias.FreeTensor(biasLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::GlobalTensor<DTYPE_X> xGm;
-    AscendC::GlobalTensor<DTYPE_Y> yGm;
-    AscendC::GlobalTensor<DTYPE_Z> zGm;
-    uint32_t batch_size;
-    uint32_t in_features;
-    uint32_t out_features;
-    uint32_t num_groups;
-    uint32_t bias_shape_0;
-    uint32_t bias_shape_1;
-    uint32_t bias_shape_2;
-    uint32_t bias_shape_3;
-    uint32_t blockLength;
-    uint32_t tileNum;
-    uint32_t tileLength;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueBias;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 2> outQueueZ;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t totalRows;
+    uint32_t totalCols;
+    uint32_t colsPerBlock;
+    uint32_t colStart;
 };
 
-extern "C" __global__ __aicore__ void gemm_group_norm_min_bias_add_custom(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void gemm_group_norm_min_bias_add_custom(
+    GM_ADDR x, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
     KernelGemmGroupNormMinBiasAdd op;
-    op.Init(x, y, z, 0, 0, tiling_data.batch_size, tiling_data.in_features, tiling_data.out_features, tiling_data.num_groups, tiling_data.bias_shape_0, tiling_data.bias_shape_1, tiling_data.bias_shape_2, tiling_data.bias_shape_3);
+    op.Init(x, bias, z, tiling_data.totalRows, tiling_data.totalCols);
     op.Process();
 }

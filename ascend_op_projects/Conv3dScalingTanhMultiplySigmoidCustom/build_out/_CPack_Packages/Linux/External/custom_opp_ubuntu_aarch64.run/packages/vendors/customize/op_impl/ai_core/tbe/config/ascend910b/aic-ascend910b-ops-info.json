@@ -26,7 +26,7 @@
         "input1":{
             "dtype":"float32",
             "format":"ND",
-            "name":"scaling_factor",
+            "name":"scale",
             "paramType":"required",
             "shape":"all",
             "unknownshape_format":"ND"
@@ -51,7 +51,7 @@
         "output0":{
             "dtype":"float32",
             "format":"ND",
-            "name":"z",
+            "name":"y",
             "paramType":"required",
             "shape":"all",
             "unknownshape_format":"ND"

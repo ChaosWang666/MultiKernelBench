@@ -23,9 +23,11 @@
                 "type": [
                     "float"
                 ]
-            },
+            }
+        ],
+        "output_desc": [
             {
-                "name": "divide_val",
+                "name": "y",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -35,16 +37,11 @@
                 ]
             }
         ],
-        "output_desc": [
+        "attr": [
             {
-                "name": "z",
+                "name": "divide_value",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "type": "float"
             }
         ]
     }

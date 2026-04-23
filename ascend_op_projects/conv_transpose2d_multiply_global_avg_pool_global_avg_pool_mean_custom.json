@@ -30,8 +30,8 @@
         "attr": [
             {
                 "name": "multiplier",
-                "type": "float",
-                "param_type": "required"
+                "param_type": "required",
+                "type": "float"
             }
         ]
     }

@@ -1,93 +1,126 @@
 
 #include "kernel_operator.h"
+#include "lib/matmul_intf.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
- 
+using namespace AscendC;
+using namespace matmul;
+
+constexpr uint32_t VECTOR_TILE_SIZE = 1024;
+
 class KernelGemmReluDivide {
 public:
     __aicore__ inline KernelGemmReluDivide() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR w, GM_ADDR bias, GM_ADDR z, uint32_t batchSize, uint32_t inFeatures, uint32_t outFeatures, uint32_t tileNum)
-    {
-        this->batchSize = batchSize;
-        this->inFeatures = inFeatures;
-        this->outFeatures = outFeatures;
-        this->tileNum = tileNum;
-        this->blockLength = outFeatures / AscendC::GetBlockNum();
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
 
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x, batchSize * inFeatures);
-        wGm.SetGlobalBuffer((__gm__ DTYPE_W *)w, inFeatures * outFeatures);
-        biasGm.SetGlobalBuffer((__gm__ DTYPE_BIAS *)bias, outFeatures);
-        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z, batchSize * outFeatures);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(inQueueW, BUFFER_NUM, this->tileLength * sizeof(DTYPE_W));
-        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(DTYPE_BIAS));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
+    __aicore__ inline void Init(GM_ADDR a, GM_ADDR b, GM_ADDR bias, GM_ADDR c,
+                                 const TCubeTiling& tiling_, float divisor_, TPipe* pipe_)
+    {
+        this->tiling = tiling_;
+        this->divisor = divisor_;
+        this->pipe = pipe_;
+        aGm.SetGlobalBuffer((__gm__ float*)a);
+        bGm.SetGlobalBuffer((__gm__ float*)b);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias);
+        cGm.SetGlobalBuffer((__gm__ float*)c);
+
+        pipe->InitBuffer(inQ, 2, VECTOR_TILE_SIZE * sizeof(float));
+        pipe->InitBuffer(outQ, 2, VECTOR_TILE_SIZE * sizeof(float));
     }
+
     __aicore__ inline void Process()
     {
-        for (uint32_t batch = 0; batch < batchSize; batch++) {
-            for (int32_t i = 0; i < tileNum * BUFFER_NUM; i++) {
-                CopyIn(i, batch);
-                Compute(i, batch);
-                CopyOut(i, batch);
+        int coreId = GetBlockIdx();
+        int64_t M = tiling.M;
+        int64_t N = tiling.N;
+        int64_t K = tiling.K;
+        int64_t singleCoreM = tiling.singleCoreM;
+        int64_t singleCoreN = tiling.singleCoreN;
+
+        int64_t nBlocks = (N + singleCoreN - 1) / singleCoreN;
+        int64_t mBlocks = (M + singleCoreM - 1) / singleCoreM;
+        int64_t totalBlocks = nBlocks * mBlocks;
+
+        if (coreId >= totalBlocks) {
+            return;
+        }
+
+        int64_t blockIdxM = coreId / nBlocks;
+        int64_t blockIdxN = coreId % nBlocks;
+
+        int64_t offsetM = blockIdxM * singleCoreM;
+        int64_t offsetN = blockIdxN * singleCoreN;
+        int64_t curM = (offsetM + singleCoreM > M) ? (M - offsetM) : singleCoreM;
+        int64_t curN = (offsetN + singleCoreN > N) ? (N - offsetN) : singleCoreN;
+
+        if (curM <= 0 || curN <= 0) {
+            return;
+        }
+
+        mm.SetTensorA(aGm[offsetM * K]);
+        mm.SetTensorB(bGm[offsetN * K]);
+        mm.SetBias(biasGm[offsetN]);
+        mm.SetTail(curM, curN);
+        mm.IterateAll(cGm[offsetM * N + offsetN]);
+        mm.End();
+
+        float invDivisor = 1.0f / divisor;
+
+        for (int64_t m = 0; m < curM; m++) {
+            int64_t globalRow = offsetM + m;
+            for (int64_t colStart = 0; colStart < curN; colStart += VECTOR_TILE_SIZE) {
+                int64_t tileLen = (colStart + (int64_t)VECTOR_TILE_SIZE > curN) ? (curN - colStart) : (int64_t)VECTOR_TILE_SIZE;
+                int64_t gmOffset = globalRow * N + offsetN + colStart;
+
+                LocalTensor<float> inLocal = inQ.AllocTensor<float>();
+                DataCopyExtParams copyParams;
+                copyParams.blockCount = 1;
+                copyParams.blockLen = (uint32_t)(tileLen * sizeof(float));
+                copyParams.srcStride = 0;
+                copyParams.dstStride = 0;
+                copyParams.rsv = 0;
+                DataCopyPadExtParams<float> padParams;
+                padParams.isPad = false;
+                padParams.leftPadding = 0;
+                padParams.rightPadding = 0;
+                padParams.paddingValue = 0.0f;
+                DataCopyPad(inLocal, cGm[gmOffset], copyParams, padParams);
+                inQ.EnQue(inLocal);
+
+                LocalTensor<float> inData = inQ.DeQue<float>();
+                LocalTensor<float> outLocal = outQ.AllocTensor<float>();
+                Relu(outLocal, inData, (int32_t)tileLen);
+                Muls(outLocal, outLocal, invDivisor, (int32_t)tileLen);
+                outQ.EnQue(outLocal);
+                inQ.FreeTensor(inData);
+
+                LocalTensor<float> outData = outQ.DeQue<float>();
+                DataCopyPad(cGm[gmOffset], outData, copyParams);
+                outQ.FreeTensor(outData);
             }
         }
     }
 
-private:
-    __aicore__ inline void CopyIn(int32_t progress, uint32_t batch)
-    {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_W> wLocal = inQueueW.AllocTensor<DTYPE_W>();
-        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.AllocTensor<DTYPE_BIAS>();
-        AscendC::DataCopy(xLocal, xGm[batch * inFeatures], inFeatures);
-        AscendC::DataCopy(wLocal, wGm[progress * this->tileLength], inFeatures);
-        AscendC::DataCopy(biasLocal, biasGm[progress * this->tileLength], this->tileLength);
-        inQueueX.EnQue(xLocal);
-        inQueueW.EnQue(wLocal);
-        inQueueBias.EnQue(biasLocal);
-    }
-    __aicore__ inline void Compute(int32_t progress, uint32_t batch)
-    {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_W> wLocal = inQueueW.DeQue<DTYPE_W>();
-        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.DeQue<DTYPE_BIAS>();
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::MatMul(zLocal, xLocal, wLocal, biasLocal, inFeatures, this->tileLength);
-        AscendC::ReLU(zLocal, zLocal, this->tileLength);
-        AscendC::Div(zLocal, zLocal, 2.0f, this->tileLength); // Assuming divisor is 2.0
-        outQueueZ.EnQue<DTYPE_Z>(zLocal);
-        inQueueX.FreeTensor(xLocal);
-        inQueueW.FreeTensor(wLocal);
-        inQueueBias.FreeTensor(biasLocal);
-    }
-    __aicore__ inline void CopyOut(int32_t progress, uint32_t batch)
-    {
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
-        AscendC::DataCopy(zGm[batch * outFeatures + progress * this->tileLength], zLocal, this->tileLength);
-        outQueueZ.FreeTensor(zLocal);
-    }
+    Matmul<MatmulType<TPosition::GM, CubeFormat::ND, float>,
+           MatmulType<TPosition::GM, CubeFormat::ND, float, true>,
+           MatmulType<TPosition::GM, CubeFormat::ND, float>,
+           MatmulType<TPosition::GM, CubeFormat::ND, float>> mm;
 
 private:
-    AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueW, inQueueBias;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::GlobalTensor<DTYPE_X> xGm;
-    AscendC::GlobalTensor<DTYPE_W> wGm;
-    AscendC::GlobalTensor<DTYPE_BIAS> biasGm;
-    AscendC::GlobalTensor<DTYPE_Z> zGm;
-    uint32_t batchSize;
-    uint32_t inFeatures;
-    uint32_t outFeatures;
-    uint32_t tileNum;
-    uint32_t blockLength;
-    uint32_t tileLength;
+    TQue<TPosition::VECIN, 2> inQ;
+    TQue<TPosition::VECOUT, 2> outQ;
+    GlobalTensor<float> aGm;
+    GlobalTensor<float> bGm;
+    GlobalTensor<float> biasGm;
+    GlobalTensor<float> cGm;
+    TCubeTiling tiling;
+    float divisor;
+    TPipe* pipe;
 };
 
-extern "C" __global__ __aicore__ void gemm_relu_divide_custom(GM_ADDR x, GM_ADDR w, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
-    GET_TILING_DATA(tiling_data, tiling);
+extern "C" __global__ __aicore__ void gemm_relu_divide_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tilingData, tiling);
+    TPipe pipe;
     KernelGemmReluDivide op;
-    op.Init(x, w, bias, z, tiling_data.batchSize, tiling_data.inFeatures, tiling_data.outFeatures, tiling_data.tileNum);
+    op.Init(x, weight, bias, y, tilingData.cubeTilingData, tilingData.divisor, &pipe);
+    REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), op.mm, &tilingData.cubeTilingData);
     op.Process();
 }

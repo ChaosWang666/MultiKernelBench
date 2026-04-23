@@ -1,29 +1,33 @@
 
 #include "gemm_sigmoid_sum_log_sum_exp_custom_tiling.h"
 #include "register/op_def_registry.h"
+#include "tiling/platform/platform_ascendc.h"
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 8;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     GemmSigmoidSumLogSumExpCustomTilingData tiling;
-    
-    const gert::Shape* x_shape = context->GetInputShape(0);
-    const gert::Shape* w1_shape = context->GetInputShape(1);
-    const gert::Shape* w2_shape = context->GetInputShape(3);
-    
-    uint32_t batchSize = x_shape->GetDim(0);
-    uint32_t inputSize = x_shape->GetDim(1);
-    uint32_t hiddenSize = w1_shape->GetDim(0);
-    uint32_t outputSize = w2_shape->GetDim(0);
-    
-    context->SetBlockDim(BLOCK_DIM);
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = shape.GetDim(0);
+    uint32_t featureSize = shape.GetDim(1);
+
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    uint32_t coreNum = ascendcPlatform.GetCoreNumAiv();
+    if (coreNum == 0) {
+        coreNum = 40;
+    }
+    if (batchSize < coreNum) {
+        coreNum = batchSize;
+    }
+    if (coreNum == 0) {
+        coreNum = 1;
+    }
+
+    context->SetBlockDim(coreNum);
     tiling.set_batchSize(batchSize);
-    tiling.set_inputSize(inputSize);
-    tiling.set_hiddenSize(hiddenSize);
-    tiling.set_outputSize(outputSize);
-    tiling.set_tileNum(TILE_NUM);
+    tiling.set_featureSize(featureSize);
+    tiling.set_coreNum(coreNum);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -32,12 +36,12 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
+
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    // Output shape: [batchSize]
     y_shape->SetDimNum(1);
     y_shape->SetDim(0, x_shape->GetDim(0));
     return GRAPH_SUCCESS;
@@ -50,6 +54,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 }
 }
 
+
 namespace ops {
 class GemmSigmoidSumLogSumExpCustom : public OpDef {
 public:
@@ -60,27 +65,7 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("weight1")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("bias1")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("weight2")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("bias2")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})

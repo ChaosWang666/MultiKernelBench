@@ -1,124 +1,101 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConv2dAvgPoolSigmoidSum {
+class KernelSigmoidSum {
 public:
-    __aicore__ inline KernelConv2dAvgPoolSigmoidSum() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
-                                uint32_t batchSize, uint32_t inChannels, uint32_t outChannels,
-                                uint32_t height, uint32_t width, uint32_t kernelH, uint32_t kernelW,
-                                uint32_t poolH, uint32_t poolW, uint32_t padH, uint32_t padW,
-                                uint32_t strideH, uint32_t strideW, uint32_t outputHeight, uint32_t outputWidth)
+    __aicore__ inline KernelSigmoidSum() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                 uint32_t batchElements,
+                                 uint32_t tileLength)
     {
-        this->batchSize = batchSize;
-        this->inChannels = inChannels;
-        this->outChannels = outChannels;
-        this->height = height;
-        this->width = width;
-        this->kernelH = kernelH;
-        this->kernelW = kernelW;
-        this->poolH = poolH;
-        this->poolW = poolW;
-        this->padH = padH;
-        this->padW = padW;
-        this->strideH = strideH;
-        this->strideW = strideW;
-        this->outputHeight = outputHeight;
-        this->outputWidth = outputWidth;
+        this->batchElements = batchElements;
+        this->tileLength = tileLength;
+        uint32_t batchIdx = AscendC::GetBlockIdx();
 
-        this->blockLength = batchSize * outChannels * outputHeight * outputWidth;
-        this->tileLength = this->blockLength / AscendC::GetBlockNum();
-
-        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inChannels * height * width);
-        weightGm.SetGlobalBuffer((__gm__ float *)weight, outChannels * inChannels * kernelH * kernelW);
-        if (bias != 0) {
-            biasGm.SetGlobalBuffer((__gm__ float *)bias, outChannels);
-        } else {
-            biasGm.SetGlobalBuffer(nullptr, 0);
-        }
-        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * outChannels);
+        xGm.SetGlobalBuffer((__gm__ float*)x + batchIdx * batchElements, batchElements);
+        yGm.SetGlobalBuffer((__gm__ float*)y + batchIdx, 1);
 
         pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueZ, 1, 32);
+        pipe.InitBuffer(reduceBuf, 8192);
+        pipe.InitBuffer(resultBuf, 32);
     }
 
     __aicore__ inline void Process()
     {
-        // Convolution
-        Conv2d();
-        // Average Pooling
-        AvgPool2d();
-        // Sigmoid
-        Sigmoid();
-        // Sum
-        Sum();
+        uint32_t tileNum = (batchElements + tileLength - 1) / tileLength;
+        float totalSum = 0.0f;
+
+        for (uint32_t i = 0; i < tileNum; i++) {
+            uint32_t curTileLen = (i == tileNum - 1)
+                ? (batchElements - i * tileLength)
+                : tileLength;
+            CopyIn(i, curTileLen);
+            totalSum += Compute(curTileLen);
+        }
+
+        WriteResult(totalSum);
     }
 
 private:
-    __aicore__ inline void Conv2d()
+    __aicore__ inline void CopyIn(uint32_t progress, uint32_t curTileLen)
     {
-        // Placeholder for actual convolution implementation
-        // This would involve loading data from global memory, performing convolution,
-        // and storing results back to global memory
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopyExtParams copyParams{1, static_cast<uint32_t>(curTileLen * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<float> padParams{false, 0, 0, 0};
+        AscendC::DataCopyPad(xLocal, xGm[progress * this->tileLength], copyParams, padParams);
+        inQueueX.EnQue(xLocal);
     }
 
-    __aicore__ inline void AvgPool2d()
+    __aicore__ inline float Compute(uint32_t curTileLen)
     {
-        // Placeholder for actual average pooling implementation
-        // This would involve sliding window averaging over spatial dimensions
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> reduceTmp = reduceBuf.Get<float>();
+        AscendC::LocalTensor<float> resultLocal = resultBuf.Get<float>();
+
+        // sigmoid(x) = 1 / (1 + exp(-x))
+        AscendC::Muls<float>(xLocal, xLocal, -1.0f, static_cast<int32_t>(curTileLen));
+        AscendC::Exp<float>(xLocal, xLocal, static_cast<int32_t>(curTileLen));
+        AscendC::Adds<float>(xLocal, xLocal, 1.0f, static_cast<int32_t>(curTileLen));
+        AscendC::Reciprocal<float>(xLocal, xLocal, static_cast<int32_t>(curTileLen));
+
+        AscendC::ReduceSum<float, true>(resultLocal, xLocal, reduceTmp, static_cast<int32_t>(curTileLen));
+        float partialSum = resultLocal.GetValue(0);
+
+        inQueueX.FreeTensor(xLocal);
+        return partialSum;
     }
 
-    __aicore__ inline void Sigmoid()
+    __aicore__ inline void WriteResult(float totalSum)
     {
-        // Placeholder for actual sigmoid implementation
-        // This would apply element-wise sigmoid activation
-    }
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        zLocal.SetValue(0, totalSum);
+        outQueueZ.EnQue(zLocal);
 
-    __aicore__ inline void Sum()
-    {
-        // Placeholder for actual sum implementation
-        // This would reduce along specified dimensions
+        AscendC::LocalTensor<float> zOut = outQueueZ.DeQue<float>();
+        AscendC::DataCopyExtParams copyOutParams{1, static_cast<uint32_t>(sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPad(yGm, zOut, copyOutParams);
+        outQueueZ.FreeTensor(zOut);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueWeight, inQueueBias;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> resultBuf;
     AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> weightGm;
-    AscendC::GlobalTensor<float> biasGm;
     AscendC::GlobalTensor<float> yGm;
-    uint32_t batchSize;
-    uint32_t inChannels;
-    uint32_t outChannels;
-    uint32_t height;
-    uint32_t width;
-    uint32_t kernelH;
-    uint32_t kernelW;
-    uint32_t poolH;
-    uint32_t poolW;
-    uint32_t padH;
-    uint32_t padW;
-    uint32_t strideH;
-    uint32_t strideW;
-    uint32_t outputHeight;
-    uint32_t outputWidth;
-    uint32_t blockLength;
+    uint32_t batchElements;
     uint32_t tileLength;
 };
 
 extern "C" __global__ __aicore__ void conv2d_avg_pool_sigmoid_sum_custom(
-    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConv2dAvgPoolSigmoidSum op;
-    op.Init(x, weight, bias, y,
-            tiling_data.batchSize, tiling_data.inChannels, tiling_data.outChannels,
-            tiling_data.height, tiling_data.width, tiling_data.kernelH, tiling_data.kernelW,
-            tiling_data.poolH, tiling_data.poolW, tiling_data.padH, tiling_data.padW,
-            tiling_data.strideH, tiling_data.strideW, tiling_data.outputHeight, tiling_data.outputWidth);
+    KernelSigmoidSum op;
+    op.Init(x, y, tiling_data.batchElements, tiling_data.tileLength);
     op.Process();
 }

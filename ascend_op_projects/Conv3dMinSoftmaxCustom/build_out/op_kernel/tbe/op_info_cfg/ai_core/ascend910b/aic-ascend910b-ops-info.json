@@ -1,33 +1,5 @@
 {
     "Conv3dMinSoftmaxCustom":{
-        "attr":{
-            "list":"dimD,channels,height,width,batchSize"
-        },
-        "attr_batchSize":{
-            "paramType":"required",
-            "type":"int",
-            "value":"all"
-        },
-        "attr_channels":{
-            "paramType":"required",
-            "type":"int",
-            "value":"all"
-        },
-        "attr_dimD":{
-            "paramType":"required",
-            "type":"int",
-            "value":"all"
-        },
-        "attr_height":{
-            "paramType":"required",
-            "type":"int",
-            "value":"all"
-        },
-        "attr_width":{
-            "paramType":"required",
-            "type":"int",
-            "value":"all"
-        },
         "coreType":{
             "value":"AiCore"
         },

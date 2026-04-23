@@ -15,7 +15,7 @@
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
@@ -31,8 +31,8 @@
           "MatmulSigmoidSumCustom/d=1,p=1/0,2/0,2",
           "MatmulSigmoidSumCustom/d=1,p=0/0,2/0,2"
         ],
-        "binPath": "ascend910b/matmul_sigmoid_sum_custom/MatmulSigmoidSumCustom_ee20ba1b26ef2fc727dec4a041451089.o",
-        "jsonPath": "ascend910b/matmul_sigmoid_sum_custom/MatmulSigmoidSumCustom_ee20ba1b26ef2fc727dec4a041451089.json"
+        "binPath": "ascend910b/matmul_sigmoid_sum_custom/MatmulSigmoidSumCustom_25cfa50c4f815b9855828cd7840eab9f.o",
+        "jsonPath": "ascend910b/matmul_sigmoid_sum_custom/MatmulSigmoidSumCustom_25cfa50c4f815b9855828cd7840eab9f.json"
       }
     ]
   }

@@ -7,49 +7,59 @@
             {
                 "name": "x",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             },
             {
-                "name": "w",
+                "name": "weight",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             },
             {
-                "name": "cb",
+                "name": "conv_bias",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             },
             {
-                "name": "b",
+                "name": "bias",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             }
         ],
         "output_desc": [
             {
                 "name": "y",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             }
         ],
         "attr": [
             {
-                "name": "scaling_factor",
-                "param_type": "required",
-                "type": "float"
-            },
-            {
-                "name": "pool_size",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "batch",
+                "name": "batch_size",
                 "param_type": "required",
                 "type": "int"
             },
@@ -64,19 +74,29 @@
                 "type": "int"
             },
             {
-                "name": "height",
+                "name": "in_height",
                 "param_type": "required",
                 "type": "int"
             },
             {
-                "name": "width",
+                "name": "in_width",
                 "param_type": "required",
                 "type": "int"
             },
             {
-                "name": "ksize",
+                "name": "kernel_size",
                 "param_type": "required",
                 "type": "int"
+            },
+            {
+                "name": "pool_kernel_size",
+                "param_type": "required",
+                "type": "int"
+            },
+            {
+                "name": "scaling_factor",
+                "param_type": "required",
+                "type": "float"
             }
         ]
     }

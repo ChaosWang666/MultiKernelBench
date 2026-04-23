@@ -9,7 +9,8 @@ namespace ge {
 REG_OP(Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom)
     .INPUT(x, ge::TensorType::ALL())
     .INPUT(bias, ge::TensorType::ALL())
-    .OUTPUT(z, ge::TensorType::ALL())
+    .OUTPUT(y, ge::TensorType::ALL())
+    .ATTR(scaling_factor, Float, 1)
     .OP_END_FACTORY_REG(Convtranspose2dSoftmaxBiasaddScalingSigmoidCustom);
 
 }

@@ -23,6 +23,22 @@
             "shape":"all",
             "unknownshape_format":"ND"
         },
+        "input1":{
+            "dtype":"float32",
+            "format":"ND",
+            "name":"weight",
+            "paramType":"required",
+            "shape":"all",
+            "unknownshape_format":"ND"
+        },
+        "input2":{
+            "dtype":"float32",
+            "format":"ND",
+            "name":"bias",
+            "paramType":"required",
+            "shape":"all",
+            "unknownshape_format":"ND"
+        },
         "needCheckSupport":{
             "flag":"false"
         },
@@ -35,7 +51,7 @@
         "output0":{
             "dtype":"float32",
             "format":"ND",
-            "name":"z",
+            "name":"y",
             "paramType":"required",
             "shape":"all",
             "unknownshape_format":"ND"

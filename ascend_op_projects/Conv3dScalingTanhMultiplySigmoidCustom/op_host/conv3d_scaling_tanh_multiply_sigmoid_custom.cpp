@@ -3,26 +3,41 @@
 #include "register/op_def_registry.h"
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 2048;
+static const uint32_t MAX_BLOCK_DIM = 40;
+static const uint32_t DEFAULT_TILE_LENGTH = 8192;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv3dScalingTanhMultiplySigmoidCustomTilingData tiling;
-    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t B = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t D = xShape.GetDim(2);
+    uint32_t H = xShape.GetDim(3);
+    uint32_t W = xShape.GetDim(4);
 
-    // Get shape info: input x is [N, C, D, H, W]
-    auto shape = context->GetInputShape(0)->GetOriginShape();
-    uint32_t outChannels = shape.GetDim(1);
-    uint32_t spatialSize = 1;
-    for (int i = 2; i < shape.GetDimNum(); i++) {
-        spatialSize *= shape.GetDim(i);
+    uint32_t totalChannels = B * C;
+    uint32_t perChannelSize = D * H * W;
+
+    uint32_t blockDim = (totalChannels < MAX_BLOCK_DIM) ? totalChannels : MAX_BLOCK_DIM;
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+    uint32_t channelsPerCore = totalChannels / blockDim;
+    uint32_t tailChannels = totalChannels % blockDim;
+    uint32_t tileLength = DEFAULT_TILE_LENGTH;
+    if (tileLength > perChannelSize) {
+        tileLength = perChannelSize;
     }
 
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(TILE_NUM);
-    tiling.set_outChannels(outChannels);
-    tiling.set_spatialSize(spatialSize);
+    context->SetBlockDim(blockDim);
+    tiling.set_totalChannels(totalChannels);
+    tiling.set_perChannelSize(perChannelSize);
+    tiling.set_channels(C);
+    tiling.set_channelsPerCore(channelsPerCore);
+    tiling.set_tailChannels(tailChannels);
+    tiling.set_tileLength(tileLength);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -39,6 +54,7 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
     *y_shape = *x1_shape;
     return GRAPH_SUCCESS;
 }
+
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
     const auto inputDataType = context->GetInputDataType(0);
@@ -57,7 +73,7 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("scaling_factor")
+        this->Input("scale")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
@@ -67,7 +83,7 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})

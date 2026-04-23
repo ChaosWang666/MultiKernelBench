@@ -9,7 +9,7 @@ namespace ge {
 REG_OP(MatmulAddSwishTanhGeluHardtanhCustom)
     .INPUT(x, ge::TensorType::ALL())
     .INPUT(add_value, ge::TensorType::ALL())
-    .OUTPUT(z, ge::TensorType::ALL())
+    .OUTPUT(y, ge::TensorType::ALL())
     .OP_END_FACTORY_REG(MatmulAddSwishTanhGeluHardtanhCustom);
 
 }

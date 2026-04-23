@@ -4,7 +4,7 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = -D_FORTIFY_SOURCE=2 -D_GLIBCXX_USE_CXX11_ABI=0 -Dcust_opapi_EXPORTS
 
-CXX_INCLUDES = -I/home/developer/Ascend/cann-9.0.0/include -I/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/Conv2dAddScaleSigmoidGroupNormCustom/op_kernel
+CXX_INCLUDES = -I/home/developer/Ascend/cann-8.5.0/include -I/mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/Conv2dAddScaleSigmoidGroupNormCustom/op_kernel
 
 CXX_FLAGS = -fPIC -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -O2 -std=c++11 -fstack-protector-strong
 

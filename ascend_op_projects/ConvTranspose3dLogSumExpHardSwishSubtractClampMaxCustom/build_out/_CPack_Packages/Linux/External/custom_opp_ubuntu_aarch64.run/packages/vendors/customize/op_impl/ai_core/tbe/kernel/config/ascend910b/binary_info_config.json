@@ -21,7 +21,7 @@
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
@@ -37,8 +37,8 @@
           "ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom/d=1,p=1/0,2/0,2/0,2",
           "ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom/d=1,p=0/0,2/0,2/0,2"
         ],
-        "binPath": "ascend910b/conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom/ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom_2447004d60e272985d2c486a695604d8.o",
-        "jsonPath": "ascend910b/conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom/ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom_2447004d60e272985d2c486a695604d8.json"
+        "binPath": "ascend910b/conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom/ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom_cc9e48277bc4eb7dd542fa473166f611.o",
+        "jsonPath": "ascend910b/conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom/ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom_cc9e48277bc4eb7dd542fa473166f611.json"
       }
     ]
   }

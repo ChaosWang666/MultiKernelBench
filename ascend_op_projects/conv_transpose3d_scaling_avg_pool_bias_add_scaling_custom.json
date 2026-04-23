@@ -13,11 +13,29 @@
                 "type": [
                     "float"
                 ]
-            }
-        ],
-        "output_desc": [
+            },
             {
-                "name": "z",
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "scale1",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "scale2",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -27,46 +45,16 @@
                 ]
             }
         ],
-        "attr": [
+        "output_desc": [
             {
-                "name": "in_channels",
+                "name": "y",
                 "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "out_channels",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "kernel_size",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "stride",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "padding",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "scale1",
-                "param_type": "required",
-                "type": "float"
-            },
-            {
-                "name": "scale2",
-                "param_type": "required",
-                "type": "float"
-            },
-            {
-                "name": "bias_shape",
-                "param_type": "required",
-                "type": "int_array"
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             }
         ]
     }

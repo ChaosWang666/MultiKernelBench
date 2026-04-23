@@ -16,8 +16,6 @@ extern "C" {
  * parameters :
  * x : required
  * y : required
- * weight : required
- * bias : required
  * out : required
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
@@ -26,8 +24,6 @@ __attribute__((visibility("default")))
 aclnnStatus aclnnBmmInstanceNormSumResidualAddMultiplyCustomGetWorkspaceSize(
     const aclTensor *x,
     const aclTensor *y,
-    const aclTensor *weight,
-    const aclTensor *bias,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);

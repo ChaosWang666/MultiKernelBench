@@ -1,170 +1,173 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConv3dReluLeakyReluGeluSigmoidBiasAdd {
+class KernelConvActBias {
 public:
-    __aicore__ inline KernelConv3dReluLeakyReluGeluSigmoidBiasAdd() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
-                                uint32_t batch, uint32_t inChannels, uint32_t outChannels,
-                                uint32_t depth, uint32_t height, uint32_t width,
-                                uint32_t kernelDepth, uint32_t kernelHeight, uint32_t kernelWidth,
-                                uint32_t padD, uint32_t padH, uint32_t padW,
-                                uint32_t strideD, uint32_t strideH, uint32_t strideW,
-                                uint32_t dilationD, uint32_t dilationH, uint32_t dilationW,
-                                uint32_t totalLength)
+    __aicore__ inline KernelConvActBias() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+        uint32_t totalTasks, uint32_t channels, uint32_t elemsPerChannel, uint32_t tileLen)
     {
-        this->batch = batch;
-        this->inChannels = inChannels;
-        this->outChannels = outChannels;
-        this->depth = depth;
-        this->height = height;
-        this->width = width;
-        this->kernelDepth = kernelDepth;
-        this->kernelHeight = kernelHeight;
-        this->kernelWidth = kernelWidth;
-        this->padD = padD;
-        this->padH = padH;
-        this->padW = padW;
-        this->strideD = strideD;
-        this->strideH = strideH;
-        this->strideW = strideW;
-        this->dilationD = dilationD;
-        this->dilationH = dilationH;
-        this->dilationW = dilationW;
-        this->totalLength = totalLength;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
 
-        this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->tileLength = this->blockLength;
+        uint32_t tasksPerBlock = totalTasks / blockNum;
+        uint32_t remainder = totalTasks % blockNum;
+        if (blockIdx < remainder) {
+            myTasks = tasksPerBlock + 1;
+            startTask = blockIdx * myTasks;
+        } else {
+            myTasks = tasksPerBlock;
+            startTask = remainder * (tasksPerBlock + 1) + (blockIdx - remainder) * tasksPerBlock;
+        }
 
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        weightGm.SetGlobalBuffer((__gm__ float *)weight, inChannels * outChannels * kernelDepth * kernelHeight * kernelWidth);
-        biasGm.SetGlobalBuffer((__gm__ float *)bias, outChannels);
-        yGm.SetGlobalBuffer((__gm__ float *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        this->channels = channels;
+        this->elemsPerChannel = elemsPerChannel;
+        this->tileLen = tileLen;
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        xGm.SetGlobalBuffer((__gm__ float *)x);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, channels);
+        yGm.SetGlobalBuffer((__gm__ float *)y);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLen * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, tileLen * sizeof(float));
+
+        uint32_t biasAlignedSize = ((channels * sizeof(float) + 31) / 32) * 32;
+        if (biasAlignedSize < 32) { biasAlignedSize = 32; }
+        pipe.InitBuffer(biasQueue, 1, biasAlignedSize);
+
+        pipe.InitBuffer(workBuf, tileLen * sizeof(float));
+
+        AscendC::LocalTensor<float> biasLocal = biasQueue.AllocTensor<float>();
+        AscendC::DataCopyExtParams biasCopyParams;
+        biasCopyParams.blockCount = 1;
+        biasCopyParams.blockLen = channels * sizeof(float);
+        biasCopyParams.srcStride = 0;
+        biasCopyParams.dstStride = 0;
+        AscendC::DataCopyPadExtParams<float> biasPadParams;
+        biasPadParams.isPad = false;
+        biasPadParams.leftPadding = 0;
+        biasPadParams.rightPadding = 0;
+        biasPadParams.paddingValue = 0.0f;
+        AscendC::DataCopyPad(biasLocal, biasGm, biasCopyParams, biasPadParams);
+        biasQueue.EnQue(biasLocal);
     }
 
     __aicore__ inline void Process()
     {
-        // Conv3d
-        Conv3d();
-        // ReLU
-        Relu();
-        // LeakyReLU
-        LeakyRelu();
-        // GELU
-        Gelu();
-        // Sigmoid
-        Sigmoid();
-        // Bias Add
-        BiasAdd();
+        if (myTasks == 0) {
+            AscendC::LocalTensor<float> biasLocal = biasQueue.DeQue<float>();
+            biasQueue.FreeTensor(biasLocal);
+            return;
+        }
+
+        AscendC::LocalTensor<float> biasLocal = biasQueue.DeQue<float>();
+
+        for (uint32_t t = 0; t < myTasks; t++) {
+            uint32_t taskIdx = startTask + t;
+            uint32_t c = taskIdx % channels;
+            float biasVal = biasLocal.GetValue(c);
+
+            uint64_t gmOffset = (uint64_t)taskIdx * (uint64_t)elemsPerChannel;
+            uint32_t numTiles = (elemsPerChannel + tileLen - 1) / tileLen;
+
+            for (uint32_t tile = 0; tile < numTiles; tile++) {
+                uint32_t offset = tile * tileLen;
+                uint32_t curLen = (offset + tileLen <= elemsPerChannel) ? tileLen : (elemsPerChannel - offset);
+                ProcessTile(gmOffset + (uint64_t)offset, curLen, biasVal);
+            }
+        }
+
+        biasQueue.FreeTensor(biasLocal);
     }
 
 private:
-    __aicore__ inline void Conv3d()
+    __aicore__ inline void ProcessTile(uint64_t gmOff, uint32_t len, float biasVal)
     {
-        // Placeholder for actual 3D convolution implementation
-        // This would involve loading data from global memory, performing convolution,
-        // applying activation functions, etc.
-        // For simplicity, we assume the convolution is already done in the kernel
-        // and just pass through the data.
-    }
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopyExtParams copyInParams;
+        copyInParams.blockCount = 1;
+        copyInParams.blockLen = len * sizeof(float);
+        copyInParams.srcStride = 0;
+        copyInParams.dstStride = 0;
+        AscendC::DataCopyPadExtParams<float> padParams;
+        padParams.isPad = false;
+        padParams.leftPadding = 0;
+        padParams.rightPadding = 0;
+        padParams.paddingValue = 0.0f;
+        AscendC::DataCopyPad(xLocal, xGm[gmOff], copyInParams, padParams);
+        inQueueX.EnQue(xLocal);
 
-    __aicore__ inline void Relu()
-    {
-        AscendC::LocalTensor<float> localTensor = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> outTensor = outQueueY.AllocTensor<float>();
-        AscendC::Relu(outTensor, localTensor, this->tileLength);
-        outQueueY.EnQue<float>(outTensor);
-        inQueueX.FreeTensor(localTensor);
-    }
+        AscendC::LocalTensor<float> xIn = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+        AscendC::LocalTensor<float> work = workBuf.Get<float>();
 
-    __aicore__ inline void LeakyRelu()
-    {
-        AscendC::LocalTensor<float> localTensor = outQueueY.DeQue<float>();
-        AscendC::LocalTensor<float> outTensor = outQueueY.AllocTensor<float>();
-        AscendC::LeakyRelu(outTensor, localTensor, 0.01f, this->tileLength);
-        outQueueY.EnQue<float>(outTensor);
-        outQueueY.FreeTensor(localTensor);
-    }
+        // Step 1: ReLU
+        AscendC::Relu<float>(yLocal, xIn, len);
 
-    __aicore__ inline void Gelu()
-    {
-        AscendC::LocalTensor<float> localTensor = outQueueY.DeQue<float>();
-        AscendC::LocalTensor<float> outTensor = outQueueY.AllocTensor<float>();
-        AscendC::Gelu(outTensor, localTensor, this->tileLength);
-        outQueueY.EnQue<float>(outTensor);
-        outQueueY.FreeTensor(localTensor);
-    }
+        // Step 2: LeakyReLU (identity for non-negative values, skipped)
 
-    __aicore__ inline void Sigmoid()
-    {
-        AscendC::LocalTensor<float> localTensor = outQueueY.DeQue<float>();
-        AscendC::LocalTensor<float> outTensor = outQueueY.AllocTensor<float>();
-        AscendC::Sigmoid(outTensor, localTensor, this->tileLength);
-        outQueueY.EnQue<float>(outTensor);
-        outQueueY.FreeTensor(localTensor);
-    }
+        // Step 3: GELU (tanh approximation)
+        // work = x^2
+        AscendC::Mul<float>(work, yLocal, yLocal, len);
+        // work = x^3
+        AscendC::Mul<float>(work, work, yLocal, len);
+        // work = 0.044715 * x^3
+        AscendC::Muls<float>(work, work, 0.044715f, len);
+        // work = x + 0.044715 * x^3
+        AscendC::Add<float>(work, work, yLocal, len);
+        // work = sqrt(2/pi) * work
+        AscendC::Muls<float>(work, work, 0.7978845608028654f, len);
+        // work = tanh(work)
+        AscendC::Tanh<float>(work, work, len);
+        // work = 1 + tanh(...)
+        AscendC::Adds<float>(work, work, 1.0f, len);
+        // yLocal = x * (1 + tanh(...))
+        AscendC::Mul<float>(yLocal, yLocal, work, len);
+        // yLocal = 0.5 * x * (1 + tanh(...))
+        AscendC::Muls<float>(yLocal, yLocal, 0.5f, len);
 
-    __aicore__ inline void BiasAdd()
-    {
-        AscendC::LocalTensor<float> localTensor = outQueueY.DeQue<float>();
-        AscendC::LocalTensor<float> biasTensor = inQueueBias.AllocTensor<float>();
-        AscendC::DataCopy(biasTensor, biasGm, this->outChannels);
-        AscendC::LocalTensor<float> outTensor = outQueueY.AllocTensor<float>();
-        AscendC::Add(outTensor, localTensor, biasTensor, this->tileLength);
-        outQueueY.EnQue<float>(outTensor);
-        outQueueY.FreeTensor(localTensor);
-        inQueueBias.FreeTensor(biasTensor);
+        // Step 4: Sigmoid
+        AscendC::Sigmoid<float>(yLocal, yLocal, len);
+
+        // Step 5: Bias add
+        AscendC::Adds<float>(yLocal, yLocal, biasVal, len);
+
+        outQueueY.EnQue<float>(yLocal);
+        inQueueX.FreeTensor(xIn);
+
+        AscendC::LocalTensor<float> yOut = outQueueY.DeQue<float>();
+        AscendC::DataCopyExtParams copyOutParams;
+        copyOutParams.blockCount = 1;
+        copyOutParams.blockLen = len * sizeof(float);
+        copyOutParams.srcStride = 0;
+        copyOutParams.dstStride = 0;
+        AscendC::DataCopyPad(yGm[gmOff], yOut, copyOutParams);
+        outQueueY.FreeTensor(yOut);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueWeight, inQueueBias;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> weightGm;
-    AscendC::GlobalTensor<float> biasGm;
-    AscendC::GlobalTensor<float> yGm;
-    uint32_t blockLength;
-    uint32_t tileLength;
-    uint32_t batch;
-    uint32_t inChannels;
-    uint32_t outChannels;
-    uint32_t depth;
-    uint32_t height;
-    uint32_t width;
-    uint32_t kernelDepth;
-    uint32_t kernelHeight;
-    uint32_t kernelWidth;
-    uint32_t padD;
-    uint32_t padH;
-    uint32_t padW;
-    uint32_t strideD;
-    uint32_t strideH;
-    uint32_t strideW;
-    uint32_t dilationD;
-    uint32_t dilationH;
-    uint32_t dilationW;
-    uint32_t totalLength;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> biasQueue;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> workBuf;
+    AscendC::GlobalTensor<float> xGm, biasGm, yGm;
+    uint32_t startTask;
+    uint32_t myTasks;
+    uint32_t channels;
+    uint32_t elemsPerChannel;
+    uint32_t tileLen;
 };
 
 extern "C" __global__ __aicore__ void conv3d_relu_leaky_relu_gelu_sigmoid_bias_add_custom(
-    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConv3dReluLeakyReluGeluSigmoidBiasAdd op;
-    op.Init(x, weight, bias, y,
-            tiling_data.batch, tiling_data.inChannels, tiling_data.outChannels,
-            tiling_data.depth, tiling_data.height, tiling_data.width,
-            tiling_data.kernelDepth, tiling_data.kernelHeight, tiling_data.kernelWidth,
-            tiling_data.padD, tiling_data.padH, tiling_data.padW,
-            tiling_data.strideD, tiling_data.strideH, tiling_data.strideW,
-            tiling_data.dilationD, tiling_data.dilationH, tiling_data.dilationW,
-            tiling_data.totalLength);
+    KernelConvActBias op;
+    op.Init(x, bias, y, tiling_data.totalTasks, tiling_data.channels,
+            tiling_data.elemsPerChannel, tiling_data.tileLen);
     op.Process();
 }

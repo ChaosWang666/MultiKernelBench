@@ -2,35 +2,31 @@
 #include "conv_transpose3d_batch_norm_subtract_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
+const uint32_t BLOCK_DIM = 20;
+const uint32_t TILE_LENGTH = 8192;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose3dBatchNormSubtractCustomTilingData tiling;
-    const gert::Shape* inputShape = context->GetInputShape(0);
-    const std::vector<int64_t>& shape = inputShape->GetOriginShape().GetDims();
-    uint32_t batchSize = static_cast<uint32_t>(shape[0]);
-    uint32_t inChannels = static_cast<uint32_t>(shape[1]);
-    uint32_t depth = static_cast<uint32_t>(shape[2]);
-    uint32_t height = static_cast<uint32_t>(shape[3]);
-    uint32_t width = static_cast<uint32_t>(shape[4]);
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = static_cast<uint32_t>(shape.GetDim(0));
+    uint32_t C = static_cast<uint32_t>(shape.GetDim(1));
+    uint32_t D = static_cast<uint32_t>(shape.GetDim(2));
+    uint32_t H = static_cast<uint32_t>(shape.GetDim(3));
+    uint32_t W = static_cast<uint32_t>(shape.GetDim(4));
+    uint32_t totalRows = N * C;
+    uint32_t rowLength = D * H * W;
 
-    uint32_t outDepth = (depth - 1) * context->GetAttrInt("stride") + context->GetAttrInt("kernel_size") - 2 * context->GetAttrInt("padding");
-    uint32_t outHeight = (height - 1) * context->GetAttrInt("stride") + context->GetAttrInt("kernel_size") - 2 * context->GetAttrInt("padding");
-    uint32_t outWidth = (width - 1) * context->GetAttrInt("stride") + context->GetAttrInt("kernel_size") - 2 * context->GetAttrInt("padding");
-
-    uint32_t totalElements = batchSize * context->GetAttrInt("out_channels") * outDepth * outHeight * outWidth;
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_inChannels(inChannels);
-    tiling.set_outChannels(context->GetAttrInt("out_channels"));
-    tiling.set_depth(depth);
-    tiling.set_height(height);
-    tiling.set_width(width);
-    tiling.set_kernelSize(context->GetAttrInt("kernel_size"));
-    tiling.set_stride(context->GetAttrInt("stride"));
-    tiling.set_padding(context->GetAttrInt("padding"));
-    tiling.set_totalElements(totalElements);
+    uint32_t blockDim = (totalRows < BLOCK_DIM) ? totalRows : BLOCK_DIM;
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+    context->SetBlockDim(blockDim);
+    tiling.set_totalRows(totalRows);
+    tiling.set_rowLength(rowLength);
+    tiling.set_tileLength(TILE_LENGTH);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -39,19 +35,15 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
+
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x1_shape = context->GetInputShape(0);
-    const std::vector<int64_t>& inputDims = x1_shape->GetOriginShape().GetDims();
+    const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    int64_t outDepth = (inputDims[2] - 1) * context->GetAttrInt("stride") + context->GetAttrInt("kernel_size") - 2 * context->GetAttrInt("padding");
-    int64_t outHeight = (inputDims[3] - 1) * context->GetAttrInt("stride") + context->GetAttrInt("kernel_size") - 2 * context->GetAttrInt("padding");
-    int64_t outWidth = (inputDims[4] - 1) * context->GetAttrInt("stride") + context->GetAttrInt("kernel_size") - 2 * context->GetAttrInt("padding");
-    y_shape->GetOriginShape().SetDims({inputDims[0], context->GetAttrInt("out_channels"), outDepth, outHeight, outWidth});
+    *y_shape = *x_shape;
     return GRAPH_SUCCESS;
 }
-
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
     const auto inputDataType = context->GetInputDataType(0);
@@ -59,6 +51,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class ConvTranspose3dBatchNormSubtractCustom : public OpDef {
@@ -68,19 +61,16 @@ public:
         this->Input("x")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_NCDHW})
-            .UnknownShapeFormat({ge::FORMAT_NCDHW});
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
         this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_NCDHW})
-            .UnknownShapeFormat({ge::FORMAT_NCDHW});
-        this->Attr("in_channels").SetType(INT).SetDefault(0);
-        this->Attr("out_channels").SetType(INT).SetDefault(0);
-        this->Attr("kernel_size").SetType(INT).SetDefault(0);
-        this->Attr("stride").SetType(INT).SetDefault(0);
-        this->Attr("padding").SetType(INT).SetDefault(0);
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");

@@ -67,7 +67,7 @@ include CMakeFiles/gen_version_info.dir/compiler_depend.make
 include CMakeFiles/gen_version_info.dir/progress.make
 
 CMakeFiles/gen_version_info:
-	bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom/cmake/util/gen_version_info.sh /home/developer/Ascend/cann-9.0.0 /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom/build_out
+	bash /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom/cmake/util/gen_version_info.sh /home/developer/Ascend/cann-8.5.0 /mnt/workspace/claude_code/MultiKernelBench/ascend_op_projects/ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom/build_out
 
 gen_version_info: CMakeFiles/gen_version_info
 gen_version_info: CMakeFiles/gen_version_info.dir/build.make

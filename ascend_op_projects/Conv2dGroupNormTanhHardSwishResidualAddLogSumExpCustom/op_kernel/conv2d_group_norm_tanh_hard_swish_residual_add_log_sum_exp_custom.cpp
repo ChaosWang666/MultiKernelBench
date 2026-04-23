@@ -1,145 +1,173 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t CHANNELS = 64;
+constexpr int32_t ROWS_PER_TILE = 32;
 
-class KernelConv2dGroupNormTanhHardSwishResidualAddLogSumExp {
+class KernelFused {
 public:
-    __aicore__ inline KernelConv2dGroupNormTanhHardSwishResidualAddLogSumExp() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR convWeight, GM_ADDR convBias, GM_ADDR groupNormWeight, GM_ADDR groupNormBias, GM_ADDR z,
-                                uint32_t batch, uint32_t inChannels, uint32_t outChannels, uint32_t height, uint32_t width,
-                                uint32_t kernelH, uint32_t kernelW, uint32_t groups, uint32_t padH, uint32_t padW,
-                                uint32_t strideH, uint32_t strideW, uint32_t dilationH, uint32_t dilationW)
+    __aicore__ inline KernelFused() {}
+
+    __aicore__ inline void Init(GM_ADDR xNorm, GM_ADDR xConv, GM_ADDR out,
+                                uint32_t totalPositions)
     {
-        this->batch = batch;
-        this->inChannels = inChannels;
-        this->outChannels = outChannels;
-        this->height = height;
-        this->width = width;
-        this->kernelH = kernelH;
-        this->kernelW = kernelW;
-        this->groups = groups;
-        this->padH = padH;
-        this->padW = padW;
-        this->strideH = strideH;
-        this->strideW = strideW;
-        this->dilationH = dilationH;
-        this->dilationW = dilationW;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
 
-        this->blockLength = batch * outChannels * height * width / AscendC::GetBlockNum();
+        uint32_t base = totalPositions / blockNum;
+        uint32_t rem  = totalPositions % blockNum;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x, batch * inChannels * height * width);
-        convWeightGm.SetGlobalBuffer((__gm__ float *)convWeight, outChannels * inChannels / groups * kernelH * kernelW);
-        if (convBias != 0) {
-            convBiasGm.SetGlobalBuffer((__gm__ float *)convBias, outChannels);
+        uint32_t startPos;
+        uint32_t myPositions;
+        if (blockIdx < rem) {
+            myPositions = base + 1;
+            startPos = blockIdx * myPositions;
+        } else {
+            myPositions = base;
+            startPos = rem * (base + 1) + (blockIdx - rem) * base;
         }
-        groupNormWeightGm.SetGlobalBuffer((__gm__ float *)groupNormWeight, outChannels);
-        groupNormBiasGm.SetGlobalBuffer((__gm__ float *)groupNormBias, outChannels);
-        zGm.SetGlobalBuffer((__gm__ float *)z, batch * outChannels * height * width);
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->blockLength * sizeof(float));
-        pipe.InitBuffer(inQueueConvWeight, BUFFER_NUM, this->blockLength * sizeof(float));
-        pipe.InitBuffer(inQueueConvBias, BUFFER_NUM, this->blockLength * sizeof(float));
-        pipe.InitBuffer(inQueueGroupNormWeight, BUFFER_NUM, this->blockLength * sizeof(float));
-        pipe.InitBuffer(inQueueGroupNormBias, BUFFER_NUM, this->blockLength * sizeof(float));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->blockLength * sizeof(float));
+        this->myPositions = myPositions;
+        this->tileCount = (myPositions + ROWS_PER_TILE - 1) / ROWS_PER_TILE;
+
+        xNormGm.SetGlobalBuffer((__gm__ float *)xNorm + startPos * CHANNELS, myPositions * CHANNELS);
+        xConvGm.SetGlobalBuffer((__gm__ float *)xConv + startPos * CHANNELS, myPositions * CHANNELS);
+        outGm.SetGlobalBuffer((__gm__ float *)out + startPos, myPositions);
+
+        pipe.InitBuffer(inQueueXNorm, BUFFER_NUM, ROWS_PER_TILE * CHANNELS * sizeof(float));
+        pipe.InitBuffer(inQueueXConv, BUFFER_NUM, ROWS_PER_TILE * CHANNELS * sizeof(float));
+        pipe.InitBuffer(outQueueOut, BUFFER_NUM, ROWS_PER_TILE * sizeof(float));
+        pipe.InitBuffer(tmpBufA, ROWS_PER_TILE * CHANNELS * sizeof(float));
+        pipe.InitBuffer(tmpBufB, ROWS_PER_TILE * CHANNELS * sizeof(float));
+        pipe.InitBuffer(reduceBuf, 1024);
+        pipe.InitBuffer(scalarBuf, 32);
     }
 
     __aicore__ inline void Process()
     {
-        // Convolution
-        Conv2d();
-        // Group Norm
-        GroupNorm();
-        // Tanh
-        Tanh();
-        // HardSwish
-        HardSwish();
-        // Residual Add
-        ResidualAdd();
-        // LogSumExp
-        LogSumExp();
+        if (this->myPositions == 0) {
+            return;
+        }
+        for (uint32_t t = 0; t < this->tileCount; t++) {
+            uint32_t startRow = t * ROWS_PER_TILE;
+            uint32_t rowsThisTile = ROWS_PER_TILE;
+            if (startRow + ROWS_PER_TILE > this->myPositions) {
+                rowsThisTile = this->myPositions - startRow;
+            }
+            CopyIn(t, rowsThisTile);
+            Compute(t, rowsThisTile);
+            CopyOut(t, rowsThisTile);
+        }
     }
 
 private:
-    __aicore__ inline void Conv2d()
+    __aicore__ inline void CopyIn(int32_t progress, uint32_t rows)
     {
-        // Placeholder for actual convolution implementation
-        // This would involve implementing a 2D convolution operation
-        // For brevity, we assume it's done here
+        AscendC::LocalTensor<float> xNormLocal = inQueueXNorm.AllocTensor<float>();
+        AscendC::LocalTensor<float> xConvLocal = inQueueXConv.AllocTensor<float>();
+
+        uint32_t gmOffset = progress * ROWS_PER_TILE * CHANNELS;
+        uint32_t count = rows * CHANNELS;
+
+        AscendC::DataCopy(xNormLocal, xNormGm[gmOffset], count);
+        AscendC::DataCopy(xConvLocal, xConvGm[gmOffset], count);
+
+        inQueueXNorm.EnQue(xNormLocal);
+        inQueueXConv.EnQue(xConvLocal);
     }
 
-    __aicore__ inline void GroupNorm()
+    __aicore__ inline void Compute(int32_t progress, uint32_t rows)
     {
-        // Placeholder for actual group normalization implementation
-        // This would involve implementing group normalization
-        // For brevity, we assume it's done here
+        AscendC::LocalTensor<float> xNormLocal = inQueueXNorm.DeQue<float>();
+        AscendC::LocalTensor<float> xConvLocal = inQueueXConv.DeQue<float>();
+        AscendC::LocalTensor<float> outLocal  = outQueueOut.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmpA = tmpBufA.Get<float>();
+        AscendC::LocalTensor<float> tmpB = tmpBufB.Get<float>();
+        AscendC::LocalTensor<float> reduceTmp = reduceBuf.Get<float>();
+        AscendC::LocalTensor<float> scalarLocal = scalarBuf.Get<float>();
+
+        uint32_t count = rows * CHANNELS;
+
+        // 1. tanh(x_norm) -> tmpA
+        AscendC::Tanh<float>(tmpA, xNormLocal, count);
+
+        // 2. HardSwish(tanh):
+        //    tanh in [-1, 1]  => (tanh + 3) in [2, 4] => relu6(tanh + 3) = tanh + 3
+        //    hardswish(tanh) = tanh * (tanh + 3) / 6
+        AscendC::Adds<float>(tmpB, tmpA, 3.0f, count);
+        AscendC::Mul<float>(tmpB, tmpB, tmpA, count);
+        AscendC::Muls<float>(tmpB, tmpB, 1.0f / 6.0f, count);
+
+        // 3. residual = x_conv + hardswish -> tmpA
+        AscendC::Add<float>(tmpA, xConvLocal, tmpB, count);
+
+        // 4. LogSumExp per row (reduce along CHANNELS)
+        for (uint32_t r = 0; r < rows; r++) {
+            uint32_t rowOff = r * CHANNELS;
+
+            AscendC::ReduceMax<float>(scalarLocal, tmpA[rowOff], reduceTmp,
+                                       static_cast<int32_t>(CHANNELS), false);
+            float maxVal = scalarLocal.GetValue(0);
+
+            AscendC::Adds<float>(tmpB[rowOff], tmpA[rowOff], -maxVal,
+                                  static_cast<int32_t>(CHANNELS));
+
+            AscendC::Exp<float>(tmpB[rowOff], tmpB[rowOff],
+                                 static_cast<int32_t>(CHANNELS));
+
+            AscendC::ReduceSum<float, true>(scalarLocal, tmpB[rowOff], reduceTmp,
+                                             static_cast<int32_t>(CHANNELS));
+            float sumVal = scalarLocal.GetValue(0);
+
+            AscendC::Duplicate<float>(scalarLocal, sumVal, 8);
+            AscendC::Ln<float>(scalarLocal, scalarLocal, 8);
+            float logSum = scalarLocal.GetValue(0);
+
+            outLocal.SetValue(r, maxVal + logSum);
+        }
+
+        outQueueOut.EnQue<float>(outLocal);
+        inQueueXNorm.FreeTensor(xNormLocal);
+        inQueueXConv.FreeTensor(xConvLocal);
     }
 
-    __aicore__ inline void Tanh()
+    __aicore__ inline void CopyOut(int32_t progress, uint32_t rows)
     {
-        // Placeholder for actual tanh implementation
-        // This would involve applying tanh activation
-        // For brevity, we assume it's done here
-    }
+        AscendC::LocalTensor<float> outLocal = outQueueOut.DeQue<float>();
+        uint32_t gmOffset = progress * ROWS_PER_TILE;
 
-    __aicore__ inline void HardSwish()
-    {
-        // Placeholder for actual hard swish implementation
-        // This would involve applying hard swish activation
-        // For brevity, we assume it's done here
-    }
+        AscendC::DataCopyExtParams copyParams;
+        copyParams.blockCount = 1;
+        copyParams.blockLen = rows * sizeof(float);
+        copyParams.srcStride = 0;
+        copyParams.dstStride = 0;
 
-    __aicore__ inline void ResidualAdd()
-    {
-        // Placeholder for residual addition
-        // This would involve adding the original conv output to the processed one
-        // For brevity, we assume it's done here
-    }
+        AscendC::DataCopyPad(outGm[gmOffset], outLocal, copyParams);
 
-    __aicore__ inline void LogSumExp()
-    {
-        // Placeholder for log sum exp
-        // This would involve computing log(sum(exp(x))) along dimension 1
-        // For brevity, we assume it's done here
+        outQueueOut.FreeTensor(outLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueConvWeight, inQueueConvBias, inQueueGroupNormWeight, inQueueGroupNormBias;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> convWeightGm;
-    AscendC::GlobalTensor<float> convBiasGm;
-    AscendC::GlobalTensor<float> groupNormWeightGm;
-    AscendC::GlobalTensor<float> groupNormBiasGm;
-    AscendC::GlobalTensor<float> zGm;
-    uint32_t batch;
-    uint32_t inChannels;
-    uint32_t outChannels;
-    uint32_t height;
-    uint32_t width;
-    uint32_t kernelH;
-    uint32_t kernelW;
-    uint32_t groups;
-    uint32_t padH;
-    uint32_t padW;
-    uint32_t strideH;
-    uint32_t strideW;
-    uint32_t dilationH;
-    uint32_t dilationW;
-    uint32_t blockLength;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueXNorm;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueXConv;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueOut;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBufA;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBufB;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> scalarBuf;
+    AscendC::GlobalTensor<float> xNormGm;
+    AscendC::GlobalTensor<float> xConvGm;
+    AscendC::GlobalTensor<float> outGm;
+    uint32_t myPositions;
+    uint32_t tileCount;
 };
 
 extern "C" __global__ __aicore__ void conv2d_group_norm_tanh_hard_swish_residual_add_log_sum_exp_custom(
-    GM_ADDR x, GM_ADDR convWeight, GM_ADDR convBias, GM_ADDR groupNormWeight, GM_ADDR groupNormBias, GM_ADDR z,
-    GM_ADDR workspace, GM_ADDR tiling) {
+    GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConv2dGroupNormTanhHardSwishResidualAddLogSumExp op;
-    op.Init(x, convWeight, convBias, groupNormWeight, groupNormBias, z,
-            tiling_data.batch, tiling_data.inChannels, tiling_data.outChannels,
-            tiling_data.height, tiling_data.width, tiling_data.kernelH, tiling_data.kernelW,
-            tiling_data.groups, tiling_data.padH, tiling_data.padW, tiling_data.strideH, tiling_data.strideW,
-            tiling_data.dilationH, tiling_data.dilationW);
+    KernelFused op;
+    op.Init(x, y, z, tiling_data.totalPositions);
     op.Process();
 }

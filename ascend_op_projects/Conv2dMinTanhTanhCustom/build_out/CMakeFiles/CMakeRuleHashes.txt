@@ -1,5 +1,5 @@
 # Hashes of file build rules.
-aafd9b98c09de12b0790be21eed6f583 CMakeFiles/gen_version_info
+0e420efd3dab52e6dcecc6f20b872981 CMakeFiles/gen_version_info
 897aa3a978f7e9d8b4cbc22a675a553b CMakeFiles/modify_vendor
 e5fe1d2976217ab532db632e7d5e1c6f op_host/CMakeFiles/optiling_compat
 c1a43963ba3de118e4a5cd2240b88a68 op_kernel/CMakeFiles/Conv2dMinTanhTanhCustom_ascend910b

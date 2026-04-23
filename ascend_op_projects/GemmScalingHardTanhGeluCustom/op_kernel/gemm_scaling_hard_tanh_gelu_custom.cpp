@@ -1,32 +1,28 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
- 
+constexpr int32_t BUFFER_NUM = 2;
+
 class KernelGemmScalingHardTanhGelu {
 public:
     __aicore__ inline KernelGemmScalingHardTanhGelu() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z, uint32_t batch, uint32_t inFeatures, uint32_t outFeatures, float scalingFactor, float hardTanhMin, float hardTanhMax)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t tileNum,
+                                  float scalingFactor, float hardtanhMin, float hardtanhMax)
     {
-        this->batch = batch;
-        this->inFeatures = inFeatures;
-        this->outFeatures = outFeatures;
-        this->scalingFactor = scalingFactor;
-        this->hardTanhMin = hardTanhMin;
-        this->hardTanhMax = hardTanhMax;
-        this->blockLength = inFeatures * outFeatures / AscendC::GetBlockNum();
-        this->tileNum = 4096;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
         this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->scalingFactor = scalingFactor;
+        this->hardtanhMin = hardtanhMin;
+        this->hardtanhMax = hardtanhMax;
 
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x, batch * inFeatures);
-        weightGm.SetGlobalBuffer((__gm__ DTYPE_WEIGHT *)weight, inFeatures * outFeatures);
-        biasGm.SetGlobalBuffer((__gm__ DTYPE_BIAS *)bias, outFeatures);
-        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z, batch * outFeatures);
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->tileLength * sizeof(DTYPE_WEIGHT));
-        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(DTYPE_BIAS));
         pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
     }
+
     __aicore__ inline void Process()
     {
         int32_t loopCount = this->tileNum * BUFFER_NUM;
@@ -41,30 +37,37 @@ private:
     __aicore__ inline void CopyIn(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_WEIGHT> weightLocal = inQueueWeight.AllocTensor<DTYPE_WEIGHT>();
-        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.AllocTensor<DTYPE_BIAS>();
         AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(weightLocal, weightGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(biasLocal, biasGm[progress * this->tileLength], this->tileLength);
         inQueueX.EnQue(xLocal);
-        inQueueWeight.EnQue(weightLocal);
-        inQueueBias.EnQue(biasLocal);
     }
+
     __aicore__ inline void Compute(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_WEIGHT> weightLocal = inQueueWeight.DeQue<DTYPE_WEIGHT>();
-        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.DeQue<DTYPE_BIAS>();
         AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::MatMul(zLocal, xLocal, weightLocal, biasLocal, this->tileLength, this->tileLength, this->tileLength);
-        AscendC::Scale(zLocal, zLocal, this->scalingFactor, this->tileLength);
-        AscendC::HardTanh(zLocal, zLocal, this->hardTanhMin, this->hardTanhMax, this->tileLength);
-        AscendC::Gelu(zLocal, zLocal, this->tileLength);
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+
+        // Step 1: Scaling - x = x * scalingFactor
+        AscendC::Muls(xLocal, xLocal, this->scalingFactor, this->tileLength);
+
+        // Step 2: Hardtanh - x = clamp(x, hardtanhMin, hardtanhMax)
+        AscendC::Duplicate(tmpLocal, this->hardtanhMin, this->tileLength);
+        AscendC::Max(xLocal, xLocal, tmpLocal, this->tileLength);
+        AscendC::Duplicate(tmpLocal, this->hardtanhMax, this->tileLength);
+        AscendC::Min(xLocal, xLocal, tmpLocal, this->tileLength);
+
+        // Step 3: GELU - 0.5 * x * (1 + erf(x / sqrt(2)))
+        const float INV_SQRT_2 = 0.7071067811865475f;
+        AscendC::Muls(tmpLocal, xLocal, INV_SQRT_2, this->tileLength);
+        AscendC::Erf(tmpLocal, tmpLocal, this->tileLength);
+        AscendC::Adds(tmpLocal, tmpLocal, 1.0f, this->tileLength);
+        AscendC::Mul(tmpLocal, xLocal, tmpLocal, this->tileLength);
+        AscendC::Muls(zLocal, tmpLocal, 0.5f, this->tileLength);
+
         outQueueZ.EnQue<DTYPE_Z>(zLocal);
         inQueueX.FreeTensor(xLocal);
-        inQueueWeight.FreeTensor(weightLocal);
-        inQueueBias.FreeTensor(biasLocal);
     }
+
     __aicore__ inline void CopyOut(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
@@ -74,26 +77,24 @@ private:
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueWeight, inQueueBias;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
     AscendC::GlobalTensor<DTYPE_X> xGm;
-    AscendC::GlobalTensor<DTYPE_WEIGHT> weightGm;
-    AscendC::GlobalTensor<DTYPE_BIAS> biasGm;
     AscendC::GlobalTensor<DTYPE_Z> zGm;
-    uint32_t batch;
-    uint32_t inFeatures;
-    uint32_t outFeatures;
-    float scalingFactor;
-    float hardTanhMin;
-    float hardTanhMax;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
+    float scalingFactor;
+    float hardtanhMin;
+    float hardtanhMax;
 };
 
-extern "C" __global__ __aicore__ void gemm_scaling_hard_tanh_gelu_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void gemm_scaling_hard_tanh_gelu_custom(
+    GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelGemmScalingHardTanhGelu op;
-    op.Init(x, weight, bias, z, tiling_data.batch, tiling_data.inFeatures, tiling_data.outFeatures, tiling_data.scalingFactor, tiling_data.hardTanhMin, tiling_data.hardTanhMax);
+    op.Init(x, z, tiling_data.totalLength, tiling_data.tileNum,
+            tiling_data.scalingFactor, tiling_data.hardtanhMin, tiling_data.hardtanhMax);
     op.Process();
 }

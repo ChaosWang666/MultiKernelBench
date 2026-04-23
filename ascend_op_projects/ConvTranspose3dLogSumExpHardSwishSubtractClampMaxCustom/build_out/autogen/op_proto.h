@@ -9,7 +9,7 @@ namespace ge {
 REG_OP(ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom)
     .INPUT(x, ge::TensorType::ALL())
     .INPUT(bias, ge::TensorType::ALL())
-    .OUTPUT(z, ge::TensorType::ALL())
+    .OUTPUT(y, ge::TensorType::ALL())
     .OP_END_FACTORY_REG(ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom);
 
 }

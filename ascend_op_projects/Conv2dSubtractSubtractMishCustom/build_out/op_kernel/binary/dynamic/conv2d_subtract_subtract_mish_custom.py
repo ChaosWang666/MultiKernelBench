@@ -129,7 +129,7 @@ def get_kernel_source(src_file, dir_snake, dir_ex):
         return src
     return src_ex
 
-def _build_args(x_in__, z_out_, subtract_value):
+def _build_args(x_in__, z_out_):
     __inputs__ = []
     for arg in [x_in__]:
         if arg != None:
@@ -153,21 +153,15 @@ def _build_args(x_in__, z_out_, subtract_value):
         else:
             __outputs__.append(arg)
     __attrs__ = []
-    if subtract_value != None:
-        attr = {}
-        attr["name"] = "subtract_value"
-        attr["dtype"] = "float"
-        attr["value"] = subtract_value
-        __attrs__.append(attr)
     return __inputs__, __outputs__, __attrs__
 
 @tbe_register.register_operator("Conv2dSubtractSubtractMishCustom", trans_bool_to_s8=False)
-@para_check.check_op_params(para_check.REQUIRED_INPUT, para_check.REQUIRED_OUTPUT, para_check.OPTION_ATTR_FLOAT, para_check.KERNEL_NAME)
-def conv2d_subtract_subtract_mish_custom(x_in__, z_out_, subtract_value, kernel_name="conv2d_subtract_subtract_mish_custom", impl_mode = ""):
+@para_check.check_op_params(para_check.REQUIRED_INPUT, para_check.REQUIRED_OUTPUT, para_check.KERNEL_NAME)
+def conv2d_subtract_subtract_mish_custom(x_in__, z_out_, kernel_name="conv2d_subtract_subtract_mish_custom", impl_mode = ""):
     # do ascendc build step
     if get_current_build_config("enable_op_prebuild"):
         return
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, z_out_, subtract_value)
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, z_out_)
     options = get_dtype_fmt_options(__inputs__, __outputs__)
     options += ["-x", "cce"]
     bisheng = os.environ.get('BISHENG_REAL_PATH')
@@ -228,12 +222,12 @@ def conv2d_subtract_subtract_mish_custom(x_in__, z_out_, subtract_value, kernel_
                 output_shape_depend_on_compute = [])
     compile_op(src, origin_func_name, op_info, options, code_channel, '{}', {'valueDepend': {}})
 
-def op_select_format(x_in__, z_out_, subtract_value, impl_mode = ""):
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, z_out_, subtract_value)
+def op_select_format(x_in__, z_out_, impl_mode = ""):
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, z_out_)
     result = check_op_cap("op_select_format", "Conv2dSubtractSubtractMishCustom", __inputs__, __outputs__, __attrs__)
     return result.decode("utf-8")
 
-def get_op_specific_info(x_in__, z_out_, subtract_value, impl_mode = ""):
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, z_out_, subtract_value)
+def get_op_specific_info(x_in__, z_out_, impl_mode = ""):
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, z_out_)
     result = check_op_cap("get_op_specific_info", "Conv2dSubtractSubtractMishCustom", __inputs__, __outputs__, __attrs__)
     return result.decode("utf-8")

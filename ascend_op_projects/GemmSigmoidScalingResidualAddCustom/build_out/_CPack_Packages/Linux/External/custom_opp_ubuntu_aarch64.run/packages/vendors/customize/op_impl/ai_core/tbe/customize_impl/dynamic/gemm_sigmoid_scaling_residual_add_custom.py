@@ -68,7 +68,7 @@ def add_dtype_fmt_option_single(x, x_n, is_ref: bool = False):
 def get_dtype_fmt_options(__inputs__, __outputs__):
     options = []
     input_names = ['x', 'weight', 'bias']
-    output_names = ['z']
+    output_names = ['y']
     unique_param_name_set = set()
     for idx, x in enumerate(__inputs__):
         if x is None:
@@ -129,7 +129,7 @@ def get_kernel_source(src_file, dir_snake, dir_ex):
         return src
     return src_ex
 
-def _build_args(x_in__, weight_in__, bias_in__, z_out_, scalingFactor):
+def _build_args(x_in__, weight_in__, bias_in__, y_out_, scaling_factor):
     __inputs__ = []
     for arg in [x_in__, weight_in__, bias_in__]:
         if arg != None:
@@ -142,7 +142,7 @@ def _build_args(x_in__, weight_in__, bias_in__, z_out_, scalingFactor):
         else:
             __inputs__.append(arg)
     __outputs__ = []
-    for arg in [z_out_]:
+    for arg in [y_out_]:
         if arg != None:
             if isinstance(arg, (list, tuple)):
                 if len(arg) == 0:
@@ -153,21 +153,21 @@ def _build_args(x_in__, weight_in__, bias_in__, z_out_, scalingFactor):
         else:
             __outputs__.append(arg)
     __attrs__ = []
-    if scalingFactor != None:
+    if scaling_factor != None:
         attr = {}
-        attr["name"] = "scalingFactor"
+        attr["name"] = "scaling_factor"
         attr["dtype"] = "float"
-        attr["value"] = scalingFactor
+        attr["value"] = scaling_factor
         __attrs__.append(attr)
     return __inputs__, __outputs__, __attrs__
 
 @tbe_register.register_operator("GemmSigmoidScalingResidualAddCustom", trans_bool_to_s8=False)
 @para_check.check_op_params(para_check.REQUIRED_INPUT, para_check.REQUIRED_INPUT, para_check.REQUIRED_INPUT, para_check.REQUIRED_OUTPUT, para_check.OPTION_ATTR_FLOAT, para_check.KERNEL_NAME)
-def gemm_sigmoid_scaling_residual_add_custom(x_in__, weight_in__, bias_in__, z_out_, scalingFactor, kernel_name="gemm_sigmoid_scaling_residual_add_custom", impl_mode = ""):
+def gemm_sigmoid_scaling_residual_add_custom(x_in__, weight_in__, bias_in__, y_out_, scaling_factor, kernel_name="gemm_sigmoid_scaling_residual_add_custom", impl_mode = ""):
     # do ascendc build step
     if get_current_build_config("enable_op_prebuild"):
         return
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, weight_in__, bias_in__, z_out_, scalingFactor)
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, weight_in__, bias_in__, y_out_, scaling_factor)
     options = get_dtype_fmt_options(__inputs__, __outputs__)
     options += ["-x", "cce"]
     bisheng = os.environ.get('BISHENG_REAL_PATH')
@@ -223,17 +223,17 @@ def gemm_sigmoid_scaling_residual_add_custom(x_in__, weight_in__, bias_in__, z_o
     op_type = "GemmSigmoidScalingResidualAddCustom"
     code_channel = get_code_channel(src, kernel_name, op_type, options)
     op_info = OpInfo(kernel_name = kernel_name, op_type = op_type, inputs = __inputs__, outputs = __outputs__,\
-        attrs = __attrs__ , impl_mode = impl_mode, origin_inputs=[x_in__, weight_in__, bias_in__], origin_outputs = [z_out_],\
+        attrs = __attrs__ , impl_mode = impl_mode, origin_inputs=[x_in__, weight_in__, bias_in__], origin_outputs = [y_out_],\
                 param_type_dynamic = False, mc2_ctx = [], param_type_list = ['required', 'required', 'required', 'required'], init_value_list = [None],\
                 output_shape_depend_on_compute = [])
     compile_op(src, origin_func_name, op_info, options, code_channel, '{}', {'valueDepend': {}})
 
-def op_select_format(x_in__, weight_in__, bias_in__, z_out_, scalingFactor, impl_mode = ""):
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, weight_in__, bias_in__, z_out_, scalingFactor)
+def op_select_format(x_in__, weight_in__, bias_in__, y_out_, scaling_factor, impl_mode = ""):
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, weight_in__, bias_in__, y_out_, scaling_factor)
     result = check_op_cap("op_select_format", "GemmSigmoidScalingResidualAddCustom", __inputs__, __outputs__, __attrs__)
     return result.decode("utf-8")
 
-def get_op_specific_info(x_in__, weight_in__, bias_in__, z_out_, scalingFactor, impl_mode = ""):
-    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, weight_in__, bias_in__, z_out_, scalingFactor)
+def get_op_specific_info(x_in__, weight_in__, bias_in__, y_out_, scaling_factor, impl_mode = ""):
+    __inputs__, __outputs__, __attrs__ = _build_args(x_in__, weight_in__, bias_in__, y_out_, scaling_factor)
     result = check_op_cap("get_op_specific_info", "GemmSigmoidScalingResidualAddCustom", __inputs__, __outputs__, __attrs__)
     return result.decode("utf-8")

@@ -11,11 +11,23 @@
           "index": 0,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "weight",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "bias",
+          "index": 2,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
         }
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "paramType": "required",
           "formatMode": "static_nd_agnostic"
@@ -26,13 +38,13 @@
       {
         "coreType": 2,
         "simplifiedKey": [
-          "Conv2dHardSwishReluCustom/d=0,p=1/0,2/0,2",
-          "Conv2dHardSwishReluCustom/d=0,p=0/0,2/0,2",
-          "Conv2dHardSwishReluCustom/d=1,p=1/0,2/0,2",
-          "Conv2dHardSwishReluCustom/d=1,p=0/0,2/0,2"
+          "Conv2dHardSwishReluCustom/d=0,p=1/0,2/0,2/0,2/0,2",
+          "Conv2dHardSwishReluCustom/d=0,p=0/0,2/0,2/0,2/0,2",
+          "Conv2dHardSwishReluCustom/d=1,p=1/0,2/0,2/0,2/0,2",
+          "Conv2dHardSwishReluCustom/d=1,p=0/0,2/0,2/0,2/0,2"
         ],
-        "binPath": "ascend910b/conv2d_hard_swish_relu_custom/Conv2dHardSwishReluCustom_99d98277330c41d2dafa87a3b336416f.o",
-        "jsonPath": "ascend910b/conv2d_hard_swish_relu_custom/Conv2dHardSwishReluCustom_99d98277330c41d2dafa87a3b336416f.json"
+        "binPath": "ascend910b/conv2d_hard_swish_relu_custom/Conv2dHardSwishReluCustom_6712481d773ed7b1cfc8d0a761adc216.o",
+        "jsonPath": "ascend910b/conv2d_hard_swish_relu_custom/Conv2dHardSwishReluCustom_6712481d773ed7b1cfc8d0a761adc216.json"
       }
     ]
   }

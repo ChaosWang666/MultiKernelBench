@@ -11,25 +11,13 @@
                 "type": ["float"]
             },
             {
-                "name": "weight",
+                "name": "gamma",
                 "param_type": "required",
                 "format": ["ND"],
                 "type": ["float"]
             },
             {
-                "name": "bias",
-                "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
-            },
-            {
-                "name": "gn_weight",
-                "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
-            },
-            {
-                "name": "gn_bias",
+                "name": "beta",
                 "param_type": "required",
                 "format": ["ND"],
                 "type": ["float"]
@@ -37,7 +25,7 @@
         ],
         "output_desc": [
             {
-                "name": "y",
+                "name": "z",
                 "param_type": "required",
                 "format": ["ND"],
                 "type": ["float"]

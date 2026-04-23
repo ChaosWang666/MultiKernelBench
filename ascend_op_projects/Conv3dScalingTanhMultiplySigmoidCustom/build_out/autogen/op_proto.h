@@ -8,9 +8,9 @@ namespace ge {
 
 REG_OP(Conv3dScalingTanhMultiplySigmoidCustom)
     .INPUT(x, ge::TensorType::ALL())
-    .INPUT(scaling_factor, ge::TensorType::ALL())
+    .INPUT(scale, ge::TensorType::ALL())
     .INPUT(bias, ge::TensorType::ALL())
-    .OUTPUT(z, ge::TensorType::ALL())
+    .OUTPUT(y, ge::TensorType::ALL())
     .OP_END_FACTORY_REG(Conv3dScalingTanhMultiplySigmoidCustom);
 
 }

@@ -26,39 +26,7 @@
         "input1":{
             "dtype":"float32",
             "format":"ND",
-            "name":"weight",
-            "paramType":"required",
-            "shape":"all",
-            "unknownshape_format":"ND"
-        },
-        "input2":{
-            "dtype":"float32",
-            "format":"ND",
-            "name":"bias",
-            "paramType":"required",
-            "shape":"all",
-            "unknownshape_format":"ND"
-        },
-        "input3":{
-            "dtype":"float32",
-            "format":"ND",
             "name":"scale",
-            "paramType":"required",
-            "shape":"all",
-            "unknownshape_format":"ND"
-        },
-        "input4":{
-            "dtype":"float32",
-            "format":"ND",
-            "name":"mean",
-            "paramType":"required",
-            "shape":"all",
-            "unknownshape_format":"ND"
-        },
-        "input5":{
-            "dtype":"float32",
-            "format":"ND",
-            "name":"variance",
             "paramType":"required",
             "shape":"all",
             "unknownshape_format":"ND"
@@ -75,7 +43,7 @@
         "output0":{
             "dtype":"float32",
             "format":"ND",
-            "name":"y",
+            "name":"z",
             "paramType":"required",
             "shape":"all",
             "unknownshape_format":"ND"

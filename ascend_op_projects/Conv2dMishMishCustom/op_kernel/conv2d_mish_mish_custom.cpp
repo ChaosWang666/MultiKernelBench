@@ -1,44 +1,24 @@
 
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2; // tensor num for each queue
+constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConv2dMishMish {
+class KernelMishMish {
 public:
-    __aicore__ inline KernelConv2dMishMish() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
-                                uint32_t batchSize, uint32_t inChannels, uint32_t outChannels,
-                                uint32_t height, uint32_t width, uint32_t kernelH, uint32_t kernelW,
-                                uint32_t padH, uint32_t padW, uint32_t strideH, uint32_t strideW,
-                                uint32_t dilationH, uint32_t dilationW)
+    __aicore__ inline KernelMishMish() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
     {
-        this->batchSize = batchSize;
-        this->inChannels = inChannels;
-        this->outChannels = outChannels;
-        this->height = height;
-        this->width = width;
-        this->kernelH = kernelH;
-        this->kernelW = kernelW;
-        this->padH = padH;
-        this->padW = padW;
-        this->strideH = strideH;
-        this->strideW = strideW;
-        this->dilationH = dilationH;
-        this->dilationW = dilationW;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
 
-        this->blockLength = batchSize * outChannels * height * width / AscendC::GetBlockNum();
-        this->tileNum = 4096;
-        this->tileLength = this->blockLength / this->tileNum / BUFFER_NUM;
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
 
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        weightGm.SetGlobalBuffer((__gm__ float *)weight, inChannels * outChannels * kernelH * kernelW);
-        biasGm.SetGlobalBuffer((__gm__ float *)bias, outChannels);
-        yGm.SetGlobalBuffer((__gm__ float *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueWeight, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(DTYPE_X));
     }
 
     __aicore__ inline void Process()
@@ -54,77 +34,59 @@ public:
 private:
     __aicore__ inline void CopyIn(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::LocalTensor<float> weightLocal = inQueueWeight.AllocTensor<float>();
-        AscendC::LocalTensor<float> biasLocal = inQueueBias.AllocTensor<float>();
-
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
         AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(weightLocal, weightGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(biasLocal, biasGm[progress * this->tileLength], this->tileLength);
-
         inQueueX.EnQue(xLocal);
-        inQueueWeight.EnQue(weightLocal);
-        inQueueBias.EnQue(biasLocal);
     }
 
     __aicore__ inline void Compute(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> weightLocal = inQueueWeight.DeQue<float>();
-        AscendC::LocalTensor<float> biasLocal = inQueueBias.DeQue<float>();
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<DTYPE_X> tmp1 = tmpBuf1.Get<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_X> tmp2 = tmpBuf2.Get<DTYPE_X>();
 
-        // Simplified computation - actual implementation would be more complex
-        AscendC::Add(yLocal, xLocal, weightLocal, this->tileLength);
-        AscendC::Add(yLocal, yLocal, biasLocal, this->tileLength);
+        // First Mish: tmp2 = x * tanh(ln(1 + exp(x)))
+        AscendC::Exp(tmp1, xLocal, this->tileLength);
+        AscendC::Adds(tmp1, tmp1, (DTYPE_X)1.0f, this->tileLength);
+        AscendC::Ln(tmp1, tmp1, this->tileLength);
+        AscendC::Tanh(tmp1, tmp1, this->tileLength);
+        AscendC::Mul(tmp2, xLocal, tmp1, this->tileLength);
 
-        outQueueY.EnQue<float>(yLocal);
+        // Second Mish: y = tmp2 * tanh(ln(1 + exp(tmp2)))
+        AscendC::Exp(tmp1, tmp2, this->tileLength);
+        AscendC::Adds(tmp1, tmp1, (DTYPE_X)1.0f, this->tileLength);
+        AscendC::Ln(tmp1, tmp1, this->tileLength);
+        AscendC::Tanh(tmp1, tmp1, this->tileLength);
+        AscendC::Mul(yLocal, tmp2, tmp1, this->tileLength);
+
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
-        inQueueWeight.FreeTensor(weightLocal);
-        inQueueBias.FreeTensor(biasLocal);
     }
 
     __aicore__ inline void CopyOut(int32_t progress)
     {
-        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
         AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
         outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueWeight, inQueueBias;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> weightGm;
-    AscendC::GlobalTensor<float> biasGm;
-    AscendC::GlobalTensor<float> yGm;
-    uint32_t batchSize;
-    uint32_t inChannels;
-    uint32_t outChannels;
-    uint32_t height;
-    uint32_t width;
-    uint32_t kernelH;
-    uint32_t kernelW;
-    uint32_t padH;
-    uint32_t padW;
-    uint32_t strideH;
-    uint32_t strideW;
-    uint32_t dilationH;
-    uint32_t dilationW;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf2;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
 };
 
-extern "C" __global__ __aicore__ void conv2d_mish_mish_custom(
-    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv2d_mish_mish_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConv2dMishMish op;
-    op.Init(x, weight, bias, y,
-            tiling_data.batchSize, tiling_data.inChannels, tiling_data.outChannels,
-            tiling_data.height, tiling_data.width, tiling_data.kernelH, tiling_data.kernelW,
-            tiling_data.padH, tiling_data.padW, tiling_data.strideH, tiling_data.strideW,
-            tiling_data.dilationH, tiling_data.dilationW);
+    KernelMishMish op;
+    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum);
     op.Process();
 }

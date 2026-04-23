@@ -2,22 +2,29 @@
 #include "conv3d_group_norm_mean_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 8;
-
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv3dGroupNormMeanCustomTilingData tiling;
-    const gert::Shape* x_shape = context->GetInputShape(0);
-    uint32_t batchSize = x_shape->GetDim(0);
-    uint32_t totalElements = x_shape->GetOriginShape().GetShapeSize();
-    uint32_t elementsPerBatch = totalElements / batchSize;
+    auto inputShape = context->GetInputShape(0)->GetOriginShape();
 
-    context->SetBlockDim(BLOCK_DIM);
+    uint32_t batchSize = (uint32_t)inputShape.GetDim(0);
+    uint32_t elementsPerBatch = 1;
+    for (size_t i = 1; i < inputShape.GetDimNum(); i++) {
+        elementsPerBatch *= (uint32_t)inputShape.GetDim(i);
+    }
+
+    uint32_t blockDim = (batchSize < BLOCK_DIM) ? batchSize : BLOCK_DIM;
+    if (blockDim == 0) blockDim = 1;
+    context->SetBlockDim(blockDim);
+
     tiling.set_batchSize(batchSize);
     tiling.set_elementsPerBatch(elementsPerBatch);
-    tiling.set_tileNum(TILE_NUM);
+    float invEpb = (elementsPerBatch > 0) ? (1.0f / (float)elementsPerBatch) : 0.0f;
+    tiling.set_invElementsPerBatch(invEpb);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -26,13 +33,14 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
+
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    // Output shape is (batchSize,)
-    *y_shape = gert::Shape({x_shape->GetDim(0)});
+    y_shape->SetDimNum(1);
+    y_shape->SetDim(0, x_shape->GetDim(0));
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -42,6 +50,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class Conv3dGroupNormMeanCustom : public OpDef {

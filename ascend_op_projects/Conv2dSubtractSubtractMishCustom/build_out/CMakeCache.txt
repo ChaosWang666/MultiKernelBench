@@ -15,7 +15,7 @@
 ########################
 
 //No help, variable specified on the command line.
-ASCEND_CANN_PACKAGE_PATH:PATH=/home/developer/Ascend/cann-9.0.0
+ASCEND_CANN_PACKAGE_PATH:PATH=/home/developer/Ascend/cann-8.5.0
 
 //No help, variable specified on the command line.
 ASCEND_COMPUTE_UNIT:STRING=ascend910b

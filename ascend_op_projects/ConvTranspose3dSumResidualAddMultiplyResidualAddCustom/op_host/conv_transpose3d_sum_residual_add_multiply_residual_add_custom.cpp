@@ -3,37 +3,36 @@
 #include "register/op_def_registry.h"
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 4096;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose3dSumResidualAddMultiplyResidualAddCustomTilingData tiling;
-    const gert::Shape* input_shape = context->GetInputShape(0);
-    const gert::Shape* weight_shape = context->GetInputShape(1);
-    const gert::Shape* bias_shape = context->GetInputShape(2);
-    const gert::Shape* output_shape = context->GetOutputShape(0);
 
-    tiling.set_batch(input_shape->GetOriginShape().GetDim(0));
-    tiling.set_inChannels(input_shape->GetOriginShape().GetDim(1));
-    tiling.set_outChannels(output_shape->GetOriginShape().GetDim(1));
-    tiling.set_depth(output_shape->GetOriginShape().GetDim(2));
-    tiling.set_height(output_shape->GetOriginShape().GetDim(3));
-    tiling.set_width(output_shape->GetOriginShape().GetDim(4));
-    tiling.set_kernelDepth(weight_shape->GetOriginShape().GetDim(2));
-    tiling.set_kernelHeight(weight_shape->GetOriginShape().GetDim(3));
-    tiling.set_kernelWidth(weight_shape->GetOriginShape().GetDim(4));
-    tiling.set_strideDepth(2);
-    tiling.set_strideHeight(2);
-    tiling.set_strideWidth(2);
-    tiling.set_padDepth(1);
-    tiling.set_padHeight(1);
-    tiling.set_padWidth(1);
-    tiling.set_outputPadDepth(1);
-    tiling.set_outputPadHeight(1);
-    tiling.set_outputPadWidth(1);
-    uint32_t totalLength = output_shape->GetOriginShape().GetShapeSize();
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_totalLength(totalLength);
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = static_cast<uint32_t>(shape.GetDim(0));
+    uint32_t C = static_cast<uint32_t>(shape.GetDim(1));
+    uint32_t D = static_cast<uint32_t>(shape.GetDim(2));
+    uint32_t H = static_cast<uint32_t>(shape.GetDim(3));
+    uint32_t W = static_cast<uint32_t>(shape.GetDim(4));
+
+    uint32_t totalFeatureMaps = N * C;
+    uint32_t featureMapSize = D * H * W;
+    uint32_t channels = C;
+    uint32_t tileLength = 8192;
+    if (tileLength > featureMapSize) {
+        tileLength = featureMapSize;
+    }
+
+    uint32_t blockDim = 40;
+    if (totalFeatureMaps < blockDim) {
+        blockDim = totalFeatureMaps;
+    }
+    if (blockDim == 0) blockDim = 1;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_totalFeatureMaps(totalFeatureMaps);
+    tiling.set_featureMapSize(featureMapSize);
+    tiling.set_channels(channels);
+    tiling.set_tileLength(tileLength);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -46,8 +45,6 @@ namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x1_shape = context->GetInputShape(0);
-    const gert::Shape* weight_shape = context->GetInputShape(1);
-    const gert::Shape* bias_shape = context->GetInputShape(2);
     gert::Shape* y_shape = context->GetOutputShape(0);
     *y_shape = *x1_shape;
     return GRAPH_SUCCESS;
@@ -70,17 +67,12 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("weight")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
         this->Input("bias")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})

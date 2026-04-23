@@ -4,12 +4,7 @@
 namespace optiling {
 BEGIN_TILING_DATA_DEF(Convtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, batchSize);
-  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
-  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
-  TILING_DATA_FIELD_DEF(uint32_t, height);
-  TILING_DATA_FIELD_DEF(uint32_t, width);
-  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
-  TILING_DATA_FIELD_DEF(uint32_t, totalElements);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Convtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustom, Convtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustomTilingData)

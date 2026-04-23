@@ -15,11 +15,7 @@ extern "C" {
 /* funtion: aclnnGemmScaleBatchNormCustomGetWorkspaceSize
  * parameters :
  * x : required
- * weight : required
- * bias : required
  * scale : required
- * mean : required
- * variance : required
  * out : required
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).
@@ -27,11 +23,7 @@ extern "C" {
 __attribute__((visibility("default")))
 aclnnStatus aclnnGemmScaleBatchNormCustomGetWorkspaceSize(
     const aclTensor *x,
-    const aclTensor *weight,
-    const aclTensor *bias,
     const aclTensor *scale,
-    const aclTensor *mean,
-    const aclTensor *variance,
     const aclTensor *out,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);

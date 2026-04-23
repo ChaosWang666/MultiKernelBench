@@ -26,6 +26,20 @@
                     "float"
                 ]
             }
+        ],
+        "attr": [
+            {
+                "name": "subtract1_value",
+                "type": "float",
+                "param_type": "required",
+                "default_value": 0.0
+            },
+            {
+                "name": "subtract2_value",
+                "type": "float",
+                "param_type": "required",
+                "default_value": 0.0
+            }
         ]
     }
 ]

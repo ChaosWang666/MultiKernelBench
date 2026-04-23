@@ -5,32 +5,40 @@
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 4096;
+const uint32_t BUFFER_NUM_H = 2;
+const uint32_t MAX_TILE_LENGTH = 8192;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
-
     Conv2dDivideLeakyReluCustomTilingData tiling;
-    const gert::Shape* input_shape = context->GetInputShape(0);
-    const gert::Shape* weight_shape = context->GetInputShape(1);
-    const gert::Shape* bias_shape = context->GetInputShape(2);
-    
-    uint32_t batchSize = input_shape->GetOriginShape().GetDim(0);
-    uint32_t inChannels = input_shape->GetOriginShape().GetDim(1);
-    uint32_t outChannels = weight_shape->GetOriginShape().GetDim(0);
-    uint32_t height = input_shape->GetOriginShape().GetDim(2);
-    uint32_t width = input_shape->GetOriginShape().GetDim(3);
-    uint32_t kernelH = weight_shape->GetOriginShape().GetDim(2);
-    uint32_t kernelW = weight_shape->GetOriginShape().GetDim(3);
-    float divisor = 2.0f; // Assuming fixed divisor from model
-    
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_inChannels(inChannels);
-    tiling.set_outChannels(outChannels);
-    tiling.set_height(height);
-    tiling.set_width(width);
-    tiling.set_kernelH(kernelH);
-    tiling.set_kernelW(kernelW);
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+
+    uint32_t blockDim = BLOCK_DIM;
+    while (blockDim > 1 && totalLength % blockDim != 0) {
+        blockDim--;
+    }
+    context->SetBlockDim(blockDim);
+
+    uint32_t blockLength = totalLength / blockDim;
+    uint32_t minTileNum = (blockLength + MAX_TILE_LENGTH * BUFFER_NUM_H - 1) / (MAX_TILE_LENGTH * BUFFER_NUM_H);
+    if (minTileNum == 0) {
+        minTileNum = 1;
+    }
+
+    uint32_t tileNum = minTileNum;
+    while (tileNum * BUFFER_NUM_H <= blockLength && blockLength % (tileNum * BUFFER_NUM_H) != 0) {
+        tileNum++;
+    }
+    if (tileNum * BUFFER_NUM_H > blockLength) {
+        tileNum = 1;
+    }
+
+    auto attrs = context->GetAttrs();
+    const float* divisorPtr = attrs->GetAttrPointer<float>(0);
+    float divisor = (divisorPtr != nullptr) ? *divisorPtr : 1.0f;
+
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(tileNum);
     tiling.set_divisor(divisor);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
@@ -45,20 +53,15 @@ namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x1_shape = context->GetInputShape(0);
-    const gert::Shape* weight_shape = context->GetInputShape(1);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    uint32_t batch = x1_shape->GetOriginShape().GetDim(0);
-    uint32_t outChannels = weight_shape->GetOriginShape().GetDim(0);
-    uint32_t height = x1_shape->GetOriginShape().GetDim(2);
-    uint32_t width = x1_shape->GetOriginShape().GetDim(3);
-    y_shape->SetOriginShape({batch, outChannels, height, width});
+    *y_shape = *x1_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-const auto inputDataType = context->GetInputDataType(0);
-context->SetOutputDataType(0, inputDataType);
-return ge::GRAPH_SUCCESS;
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
 }
 }
 
@@ -71,30 +74,20 @@ public:
         this->Input("x")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_NCHW})
-            .UnknownShapeFormat({ge::FORMAT_NCHW});
-        this->Input("weight")
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_NCHW})
-            .UnknownShapeFormat({ge::FORMAT_NCHW});
-        this->Input("bias")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_NCHW})
-            .UnknownShapeFormat({ge::FORMAT_NCHW});
-        this->Output("y")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_NCHW})
-            .UnknownShapeFormat({ge::FORMAT_NCHW});
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("divisor").AttrType(REQUIRED).Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
-
     }
 };
 

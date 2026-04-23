@@ -24,7 +24,7 @@
           "format_match_mode": "FormatAgnostic"
         },
         {
-          "name": "scaling_factor",
+          "name": "scale",
           "index": 1,
           "dtype": "float32",
           "format": "ND",
@@ -48,7 +48,7 @@
       ],
       "outputs": [
         {
-          "name": "z",
+          "name": "y",
           "index": 0,
           "dtype": "float32",
           "format": "ND",
@@ -64,7 +64,7 @@
       "deterministic": "ignore",
       "optionalOutputMode": "gen_placeholder",
       "binInfo": {
-        "jsonFilePath": "ascend910b/conv3d_scaling_tanh_multiply_sigmoid_custom/Conv3dScalingTanhMultiplySigmoidCustom_9c51c84926a4817a59ab5a6acc1ed255.json"
+        "jsonFilePath": "ascend910b/conv3d_scaling_tanh_multiply_sigmoid_custom/Conv3dScalingTanhMultiplySigmoidCustom_1606bca779d2100624c2a31c22b51cf2.json"
       }
     }
   ]

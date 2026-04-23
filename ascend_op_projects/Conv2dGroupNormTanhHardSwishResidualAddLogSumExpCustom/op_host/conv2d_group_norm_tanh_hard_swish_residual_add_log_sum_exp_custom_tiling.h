@@ -3,20 +3,7 @@
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv2dGroupNormTanhHardSwishResidualAddLogSumExpCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, batch);
-  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
-  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
-  TILING_DATA_FIELD_DEF(uint32_t, height);
-  TILING_DATA_FIELD_DEF(uint32_t, width);
-  TILING_DATA_FIELD_DEF(uint32_t, kernelH);
-  TILING_DATA_FIELD_DEF(uint32_t, kernelW);
-  TILING_DATA_FIELD_DEF(uint32_t, groups);
-  TILING_DATA_FIELD_DEF(uint32_t, padH);
-  TILING_DATA_FIELD_DEF(uint32_t, padW);
-  TILING_DATA_FIELD_DEF(uint32_t, strideH);
-  TILING_DATA_FIELD_DEF(uint32_t, strideW);
-  TILING_DATA_FIELD_DEF(uint32_t, dilationH);
-  TILING_DATA_FIELD_DEF(uint32_t, dilationW);
+  TILING_DATA_FIELD_DEF(uint32_t, totalPositions);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv2dGroupNormTanhHardSwishResidualAddLogSumExpCustom, Conv2dGroupNormTanhHardSwishResidualAddLogSumExpCustomTilingData)

@@ -1,5 +1,13 @@
 {
     "MatmulBatchNormBiasAddDivideSwishCustom":{
+        "attr":{
+            "list":"divide_value"
+        },
+        "attr_divide_value":{
+            "paramType":"required",
+            "type":"float",
+            "value":"all"
+        },
         "coreType":{
             "value":"AiCore"
         },
@@ -31,14 +39,6 @@
             "shape":"all",
             "unknownshape_format":"ND"
         },
-        "input2":{
-            "dtype":"float32",
-            "format":"ND",
-            "name":"divide_val",
-            "paramType":"required",
-            "shape":"all",
-            "unknownshape_format":"ND"
-        },
         "needCheckSupport":{
             "flag":"false"
         },
@@ -51,7 +51,7 @@
         "output0":{
             "dtype":"float32",
             "format":"ND",
-            "name":"z",
+            "name":"y",
             "paramType":"required",
             "shape":"all",
             "unknownshape_format":"ND"
