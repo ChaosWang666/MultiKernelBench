@@ -1,3 +1,5 @@
+Now I have all the context needed. Let me generate the complete implementation. The approach: keep Conv3d and GroupNorm as PyTorch ops, fuse the min + clamp into a custom AscendC kernel (dropout is a no-op during eval).
+
 project_json_src='''
 [
     {

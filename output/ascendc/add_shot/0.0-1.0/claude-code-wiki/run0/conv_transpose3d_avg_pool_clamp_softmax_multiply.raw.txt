@@ -1,3 +1,5 @@
+Now I have all the information I need. Let me generate the complete solution. The approach: the custom AscendC kernel fuses **clamp + softmax (over spatial dims) + scale multiply**, while avg_pool3d and conv_transpose3d remain as standard PyTorch/torch_npu operations.
+
 project_json_src='''
 [
     {

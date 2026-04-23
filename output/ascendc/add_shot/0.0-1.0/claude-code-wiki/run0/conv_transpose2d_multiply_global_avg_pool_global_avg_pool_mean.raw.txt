@@ -1,3 +1,5 @@
+I now have all the reference material I need. The strategy is to keep `ConvTranspose2d` as PyTorch builtin and create a custom kernel that fuses `multiply × scalar + global_avg_pool + global_avg_pool` (the second GAP is a no-op). The kernel computes `scale = multiplier / spatialSize` and does a per-channel ReduceSum * scale.
+
 project_json_src='''
 [
     {

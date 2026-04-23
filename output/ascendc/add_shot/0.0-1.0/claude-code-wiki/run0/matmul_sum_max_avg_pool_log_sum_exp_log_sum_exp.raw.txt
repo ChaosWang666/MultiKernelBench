@@ -1,3 +1,9 @@
+I have all the reference information needed. Let me analyze the architecture:
+
+**Key insight**: After `torch.sum(x, dim=1, keepdim=True)` produces shape `(batch_size, 1)`, all subsequent operations (`max`, `mean`, `logsumexp`, `logsumexp`) on dim=1 with size 1 are identity operations. So the custom kernel only needs to do a row-wise sum reduction on the linear layer output.
+
+I'll follow the existing pattern from the codebase where the custom kernel handles the post-linear operations.
+
 project_json_src='''
 [
     {

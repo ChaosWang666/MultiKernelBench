@@ -1,3 +1,5 @@
+I now have enough context from the Wiki and existing operator examples. Let me generate the complete fused operator code. The custom kernel will fuse multiply + InstanceNorm3D + clamp + multiply + max(dim=1), keeping only Conv3D in PyTorch.
+
 project_json_src='''
 [
     {

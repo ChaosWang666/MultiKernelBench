@@ -1,3 +1,5 @@
+Now I have everything I need. Let me generate the complete implementation.
+
 project_json_src='''
 [
     {

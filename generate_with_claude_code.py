@@ -14,6 +14,7 @@ A constraint block is always appended to tell Claude Code:
 """
 
 import os
+import re
 import sys
 import subprocess
 import argparse
@@ -74,14 +75,40 @@ Wiki 查询协议（请严格按此步骤检索知识）：
 注意：请仅使用 Read、Glob、Grep 工具查阅上述 Wiki 目录中的文件，不要修改任何文件或执行其他工具操作。
 """
 
-CONSTRAINT_SUFFIX = """
+OUTPUT_FORMAT_RULES = """
+输出格式（最终答复必须严格遵守）：
+- 最终答复的第一个非空字符必须是 `project_json_src` 的 `p`。换言之，第一行就是 `project_json_src='''` 开头。
+- 禁止在代码之前写任何开场白/总结句，尤其不要以以下任一方式开头：
+  "I found...", "Now I have...", "Let me...", "I've gathered...", "Here's the...",
+  "I now have...", "好的", "让我", "现在我已经", "根据", "基于".
+- 禁止在代码之后追加任何说明、注释、总结或后记。
+- 禁止使用 markdown 代码块包裹整段输出（不要输出 ``` 或 ```python）。
+- 输出必须且只能包含 6 个变量的顺序赋值：project_json_src、host_tiling_src、host_operator_src、kernel_src、python_bind_src、model_src。
+"""
+
+ASCENDC_PITFALLS = """
+AscendC 内核常见坑位（必须规避，否则编译失败或运行出错）：
+- aicore 函数里禁止 float 与 unsigned 整型之间直接 `static_cast`，例如不要写
+  `static_cast<float>(uint32_val)` 或 `static_cast<uint32_t>(float_val)`。
+  需要互转时先绕一层 int32_t，例如：
+    `static_cast<float>(static_cast<int32_t>(uintVal))`。
+- tiling 结构体里如果某个 `uint32_t` 字段要参与浮点运算（例如作为归一化除数），
+  建议在 host 侧预先算成 `float` 并放进独立字段，kernel 里直接读 float，避免
+  在 aicore 函数里做整浮互转。
+- `uint32_t` 循环计数器不要直接当浮点除数或乘数，也先转成 int32_t 再转 float。
+- 所有从 tiling 传进来的标量，kernel 侧声明的类型必须与 tiling 结构体里的一致，
+  否则会出现 "cast between floating and unsigned integer" 之类的错误。
+"""
+
+CONSTRAINT_SUFFIX = f"""
 
 ---
 重要约束（必须严格遵守）：
 1. 你只能单次直接生成完整答案，不能多次调用任何工具、检索或重新查询。
 2. 你不能进行上板/编译测试，只能依赖自身的 LLM 能力和上下文进行推理。
 3. 请将完整生成内容直接输出到 stdout，不要保存或写入任何文件。
-4. 你的输出必须只包含纯代码（即 project_json_src、host_tiling_src、host_operator_src、kernel_src、python_bind_src、model_src 这些变量赋值），不要输出任何解释性文字、设计总结、思路分析或注释说明。不要使用 markdown 代码块包裹（不要输出```）。直接输出原始代码文本。
+{OUTPUT_FORMAT_RULES}
+{ASCENDC_PITFALLS}
 """
 
 CONSTRAINT_SUFFIX_WIKI = f"""
@@ -91,8 +118,55 @@ CONSTRAINT_SUFFIX_WIKI = f"""
 1. 你可以使用 Read、Glob、Grep 工具查阅本地 AscendC Kernel Wiki（{WIKI_DIR}）中的参考资料，但不能调用其他任何工具。查阅完成后，必须一次性生成完整答案，不能多轮迭代修改。
 2. 你不能进行上板/编译测试，只能依赖自身的 LLM 能力、上下文和 Wiki 参考信息进行推理。
 3. 请将完整生成内容直接输出到 stdout，不要保存或写入任何文件。
-4. 你的输出必须只包含纯代码（即 project_json_src、host_tiling_src、host_operator_src、kernel_src、python_bind_src、model_src 这些变量赋值），不要输出任何解释性文字、设计总结、思路分析或注释说明。不要使用 markdown 代码块包裹（不要输出```）。直接输出原始代码文本。
+{OUTPUT_FORMAT_RULES}
+{ASCENDC_PITFALLS}
 """
+
+
+EXPECTED_VARS = (
+    'project_json_src',
+    'host_tiling_src',
+    'host_operator_src',
+    'kernel_src',
+    'python_bind_src',
+    'model_src',
+)
+
+_VAR_ASSIGN_RE = re.compile(
+    r'^(' + '|'.join(EXPECTED_VARS) + r')\s*=',
+    re.MULTILINE,
+)
+
+
+def _extract_kernel_code(raw):
+    """Strip preamble prose and markdown fences from Claude CLI output.
+
+    Returns the cleaned source text, or None if the six required variable
+    assignments aren't all present (likely a rate-limit / error response).
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+
+    # Unwrap a surrounding fenced code block, e.g. ```python\n...\n```
+    fence_match = re.match(
+        r'^```(?:python|py|cpp|c\+\+)?\s*\n(.*)\n```\s*$',
+        text,
+        re.DOTALL,
+    )
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    first_assign = _VAR_ASSIGN_RE.search(text)
+    if first_assign is None:
+        return None
+    text = text[first_assign.start():]
+
+    present = {m.group(1) for m in _VAR_ASSIGN_RE.finditer(text)}
+    if not set(EXPECTED_VARS).issubset(present):
+        return None
+
+    return text.rstrip() + '\n'
 
 
 def load_best_practices():
@@ -129,9 +203,12 @@ def generate_with_claude_code(prompt, out_dir, op, timeout=300, disable_skills=F
         "--output-format", "text",
     ]
     if with_wiki:
-        cmd.extend(["--tools", "Read,Glob,Grep"])
+        cmd.extend(["--allowed-tools", "Read Glob Grep"])
     else:
-        cmd.extend(["--tools", ""])
+        cmd.extend([
+            "--disallowed-tools",
+            "Read Glob Grep Write Edit Bash Task WebFetch WebSearch NotebookEdit",
+        ])
     if disable_skills:
         cmd.append("--disable-slash-commands")
 
@@ -168,8 +245,22 @@ def generate_with_claude_code(prompt, out_dir, op, timeout=300, disable_skills=F
         print(f"[SKIP] {op}: output looks like rate-limit/error ({len(out)} bytes): {out[:80]}")
         return
 
+    cleaned = _extract_kernel_code(out)
+    if cleaned is None:
+        raw_path = os.path.join(out_dir, f'{op}.raw.txt')
+        with open(raw_path, 'w') as f:
+            f.write(out)
+        print(f"[SKIP] {op}: could not locate all six required variables; raw output saved to {raw_path}")
+        return
+
+    if cleaned != out:
+        raw_path = os.path.join(out_dir, f'{op}.raw.txt')
+        with open(raw_path, 'w') as f:
+            f.write(out)
+        print(f"[INFO] {op}: stripped {len(out) - len(cleaned)} bytes of preamble/fence; raw saved to {raw_path}")
+
     with open(out_path, 'w') as f:
-        f.write(out)
+        f.write(cleaned)
 
 
 def resolve_ops(args):

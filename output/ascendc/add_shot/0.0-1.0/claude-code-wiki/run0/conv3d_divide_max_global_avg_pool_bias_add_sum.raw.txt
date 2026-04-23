@@ -1,3 +1,7 @@
+I have all the Wiki reference material I need. Let me now generate the complete AscendC kernel code.
+
+The strategy: keep Conv3d, division, and MaxPool3d in PyTorch, then fuse `AdaptiveAvgPool3d((1,1,1)) + bias_add + sum(dim=1)` into a single custom kernel. This is a reduction pattern: for each batch, sum all elements across channels and spatial dims, divide by spatial size, then add the bias sum.
+
 project_json_src='''
 [
     {

@@ -1,5 +1,3 @@
-I have enough context. Based on the wiki reference (ReLU + HardSwish fusion pattern) and a verified existing implementation, I'll output the full kernel.
-
 project_json_src='''
 [
     {
@@ -19,7 +17,7 @@ project_json_src='''
         ],
         "output_desc": [
             {
-                "name": "y",
+                "name": "z",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -40,6 +38,7 @@ namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv2dReluHardSwishCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, totalLength);
   TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv2dReluHardSwishCustom, Conv2dReluHardSwishCustomTilingData)
@@ -50,17 +49,38 @@ host_operator_src="""
 #include "conv2d_relu_hard_swish_custom_tiling.h"
 #include "register/op_def_registry.h"
 
-
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 504;
+const uint32_t BUFFER_NUM_HOST = 2;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv2dReluHardSwishCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
-    context->SetBlockDim(BLOCK_DIM);
+
+    uint32_t blockDim = BLOCK_DIM;
+    while (blockDim > 1 && (totalLength % blockDim != 0)) {
+        blockDim /= 2;
+    }
+    uint32_t blockLength = totalLength / blockDim;
+
+    uint32_t tileLength = 4032;
+    if (tileLength > blockLength / BUFFER_NUM_HOST) {
+        tileLength = blockLength / BUFFER_NUM_HOST;
+        tileLength = (tileLength / 8) * 8;
+        if (tileLength == 0) tileLength = 8;
+    }
+    while (tileLength >= 8 && (blockLength % (tileLength * BUFFER_NUM_HOST) != 0)) {
+        tileLength -= 8;
+    }
+    if (tileLength < 8) tileLength = 8;
+    uint32_t tileNum = blockLength / (tileLength * BUFFER_NUM_HOST);
+    if (tileNum == 0) tileNum = 1;
+
+    context->SetBlockDim(blockDim);
     tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(TILE_NUM);
+    tiling.set_tileNum(tileNum);
+    tiling.set_tileLength(tileLength);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -69,13 +89,12 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
-
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* x1_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x_shape;
+    *y_shape = *x1_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -85,7 +104,6 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
-
 
 namespace ops {
 class Conv2dReluHardSwishCustom : public OpDef {
@@ -97,7 +115,7 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("y")
+        this->Output("z")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
@@ -123,16 +141,16 @@ constexpr int32_t BUFFER_NUM = 2;
 class KernelConv2dReluHardSwish {
 public:
     __aicore__ inline KernelConv2dReluHardSwish() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t tileNum, uint32_t tileLength)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->tileLength = tileLength;
 
         xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
         pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(DTYPE_X));
     }
     __aicore__ inline void Process()
@@ -155,42 +173,42 @@ private:
     __aicore__ inline void Compute(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
-        AscendC::LocalTensor<DTYPE_X> tmpLocal = tmpBuf.Get<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        AscendC::LocalTensor<DTYPE_X> t = tmpBuf.Get<DTYPE_X>();
 
-        AscendC::Maxs(xLocal, xLocal, (DTYPE_X)0, this->tileLength);
-        AscendC::Adds(tmpLocal, xLocal, (DTYPE_X)3, this->tileLength);
-        AscendC::Muls(tmpLocal, tmpLocal, (DTYPE_X)(1.0f / 6.0f), this->tileLength);
-        AscendC::Mins(tmpLocal, tmpLocal, (DTYPE_X)1, this->tileLength);
-        AscendC::Maxs(tmpLocal, tmpLocal, (DTYPE_X)0, this->tileLength);
-        AscendC::Mul(yLocal, xLocal, tmpLocal, this->tileLength);
+        AscendC::Maxs(zLocal, xLocal, (DTYPE_X)0.0f, this->tileLength);
+        AscendC::Adds(t, zLocal, (DTYPE_X)3.0f, this->tileLength);
+        AscendC::Maxs(t, t, (DTYPE_X)0.0f, this->tileLength);
+        AscendC::Mins(t, t, (DTYPE_X)6.0f, this->tileLength);
+        AscendC::Muls(t, t, (DTYPE_X)(1.0f / 6.0f), this->tileLength);
+        AscendC::Mul(zLocal, zLocal, t, this->tileLength);
 
-        outQueueY.EnQue<DTYPE_Y>(yLocal);
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
         inQueueX.FreeTensor(xLocal);
     }
     __aicore__ inline void CopyOut(int32_t progress)
     {
-        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
-        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
-        outQueueY.FreeTensor(yLocal);
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
+        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
+        outQueueZ.FreeTensor(zLocal);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
     AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
     AscendC::GlobalTensor<DTYPE_X> xGm;
-    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
 };
 
-extern "C" __global__ __aicore__ void conv2d_relu_hard_swish_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv2d_relu_hard_swish_custom(GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelConv2dReluHardSwish op;
-    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum);
+    op.Init(x, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.tileLength);
     op.Process();
 }
 """
@@ -212,23 +230,21 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv2d_relu_hard_swish_custom", &conv2d_relu_hard_swish_custom_impl_npu, "relu + hardswish fused");
+    m.def("conv2d_relu_hard_swish_custom", &conv2d_relu_hard_swish_custom_impl_npu, "fused ReLU + HardSwish");
 }
 """
 
 model_src='''
 import torch
 import torch_npu
-import torch.nn as nn
 import custom_ops_lib
-
-class ModelNew(nn.Module):
+class ModelNew(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size):
         super(ModelNew, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+        self.conv = torch.nn.Conv2d(in_channels, out_channels, kernel_size)
 
     def forward(self, x):
         x = self.conv(x)
-        x = x.contiguous()
-        return custom_ops_lib.conv2d_relu_hard_swish_custom(x)
+        x = custom_ops_lib.conv2d_relu_hard_swish_custom(x)
+        return x
 '''

@@ -1,3 +1,5 @@
+I found the key issue: the existing implementation fails to compile because AscendC forbids casting between floating and unsigned integer variables (`(float)(outH * outW)` where both are `uint32_t`). I'll fix this and generate the complete kernel.
+
 project_json_src='''
 [
     {

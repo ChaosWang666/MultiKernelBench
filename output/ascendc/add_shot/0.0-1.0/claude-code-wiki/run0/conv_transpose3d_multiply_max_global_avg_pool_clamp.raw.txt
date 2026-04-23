@@ -1,3 +1,5 @@
+Now I have all the context needed. Let me generate the complete kernel implementation.
+
 project_json_src='''
 [
     {

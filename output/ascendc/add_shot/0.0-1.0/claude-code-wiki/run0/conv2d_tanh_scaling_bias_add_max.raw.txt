@@ -1,3 +1,5 @@
+Now I have all the context I need. The existing project at `ascend_op_projects/Conv2dTanhScalingBiasAddMaxCustom/` provides a working reference. Let me generate the complete solution.
+
 project_json_src='''
 [
     {

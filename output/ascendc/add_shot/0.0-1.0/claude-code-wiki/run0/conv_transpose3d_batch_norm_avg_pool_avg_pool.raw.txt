@@ -1,3 +1,5 @@
+Now I have all the information needed. The approach is to keep ConvTranspose3d and BatchNorm3d in PyTorch (too complex for custom kernel) and fuse the two consecutive AvgPool3d(kernel_size=2) into a single 4×4×4 average pooling custom kernel. Two consecutive AvgPool3d(2) is mathematically equivalent to averaging over a 4×4×4 window with stride 4 (divisor = 64).
+
 project_json_src='''
 [
     {

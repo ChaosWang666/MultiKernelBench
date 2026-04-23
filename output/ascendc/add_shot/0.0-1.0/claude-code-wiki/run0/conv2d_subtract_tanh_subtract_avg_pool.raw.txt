@@ -1,3 +1,5 @@
+I've gathered enough reference information from the Wiki. Here's the complete implementation — fusing the subtract-tanh-subtract operations into a single element-wise custom kernel while keeping Conv2d and AvgPool2d as native PyTorch ops.
+
 project_json_src='''
 [
     {

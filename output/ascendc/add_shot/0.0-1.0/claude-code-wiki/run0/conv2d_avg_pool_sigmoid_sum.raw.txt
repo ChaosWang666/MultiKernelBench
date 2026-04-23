@@ -1,3 +1,5 @@
+Now I have all the information I need. The approach is to keep Conv2d and AvgPool2d as PyTorch operations (they're already highly optimized) and create a custom AscendC kernel that fuses sigmoid + sum over dims [1,2,3]. This matches the existing project structure.
+
 project_json_src='''
 [
     {

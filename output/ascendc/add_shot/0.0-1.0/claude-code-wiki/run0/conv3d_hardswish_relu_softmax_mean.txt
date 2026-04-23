@@ -38,6 +38,7 @@ namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv3dHardswishReluSoftmaxMeanCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, totalLength);
   TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv3dHardswishReluSoftmaxMeanCustom, Conv3dHardswishReluSoftmaxMeanCustomTilingData)
@@ -48,23 +49,38 @@ host_operator_src="""
 #include "conv3d_hardswish_relu_softmax_mean_custom_tiling.h"
 #include "register/op_def_registry.h"
 
-
 namespace optiling {
-const uint32_t BLOCK_DIM = 8;
-const uint32_t BUFFER_NUM = 2;
-const uint32_t TILE_LENGTH = 1024;
+const uint32_t BLOCK_DIM = 32;
+const uint32_t BUFFER_NUM_HOST = 2;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv3dHardswishReluSoftmaxMeanCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
-    uint32_t blockLength = totalLength / BLOCK_DIM;
-    uint32_t tileNum = blockLength / TILE_LENGTH / BUFFER_NUM;
-    if (tileNum == 0) {
-        tileNum = 1;
+
+    uint32_t blockDim = BLOCK_DIM;
+    while (blockDim > 1 && (totalLength % blockDim != 0)) {
+        blockDim /= 2;
     }
-    context->SetBlockDim(BLOCK_DIM);
+    uint32_t blockLength = totalLength / blockDim;
+
+    uint32_t tileLength = 4032;
+    if (tileLength > blockLength / BUFFER_NUM_HOST) {
+        tileLength = blockLength / BUFFER_NUM_HOST;
+        tileLength = (tileLength / 8) * 8;
+        if (tileLength == 0) tileLength = 8;
+    }
+    while (tileLength >= 8 && (blockLength % (tileLength * BUFFER_NUM_HOST) != 0)) {
+        tileLength -= 8;
+    }
+    if (tileLength < 8) tileLength = 8;
+    uint32_t tileNum = blockLength / (tileLength * BUFFER_NUM_HOST);
+    if (tileNum == 0) tileNum = 1;
+
+    context->SetBlockDim(blockDim);
     tiling.set_totalLength(totalLength);
     tiling.set_tileNum(tileNum);
+    tiling.set_tileLength(tileLength);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -72,7 +88,6 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 }
-
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -89,7 +104,6 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
-
 
 namespace ops {
 class Conv3dHardswishReluSoftmaxMeanCustom : public OpDef {
@@ -127,11 +141,11 @@ constexpr int32_t BUFFER_NUM = 2;
 class KernelHardSwish {
 public:
     __aicore__ inline KernelHardSwish() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t tileNum)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t tileNum, uint32_t tileLength)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->tileLength = tileLength;
 
         xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
@@ -160,12 +174,14 @@ private:
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
         AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::LocalTensor<DTYPE_X> tmp = tmpBuf.Get<DTYPE_X>();
-        AscendC::Muls(tmp, xLocal, (DTYPE_X)(1.0f / 6.0f), this->tileLength);
-        AscendC::Adds(tmp, tmp, (DTYPE_X)0.5f, this->tileLength);
-        AscendC::Mins(tmp, tmp, (DTYPE_X)1.0f, this->tileLength);
-        AscendC::Maxs(tmp, tmp, (DTYPE_X)0.0f, this->tileLength);
-        AscendC::Mul(zLocal, xLocal, tmp, this->tileLength);
+        AscendC::LocalTensor<DTYPE_X> t = tmpBuf.Get<DTYPE_X>();
+
+        AscendC::Adds(t, xLocal, (DTYPE_X)3.0f, this->tileLength);
+        AscendC::Maxs(t, t, (DTYPE_X)0.0f, this->tileLength);
+        AscendC::Mins(t, t, (DTYPE_X)6.0f, this->tileLength);
+        AscendC::Muls(t, t, (DTYPE_X)(1.0f / 6.0f), this->tileLength);
+        AscendC::Mul(zLocal, xLocal, t, this->tileLength);
+
         outQueueZ.EnQue<DTYPE_Z>(zLocal);
         inQueueX.FreeTensor(xLocal);
     }
@@ -191,7 +207,7 @@ private:
 extern "C" __global__ __aicore__ void conv3d_hardswish_relu_softmax_mean_custom(GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelHardSwish op;
-    op.Init(x, z, tiling_data.totalLength, tiling_data.tileNum);
+    op.Init(x, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.tileLength);
     op.Process();
 }
 """
@@ -203,9 +219,8 @@ python_bind_src="""
 #include <torch/extension.h>
 
 at::Tensor conv3d_hardswish_relu_softmax_mean_custom_impl_npu(const at::Tensor& self) {
-    at::Tensor contiguous_self = self.contiguous();
-    at::Tensor result = at::empty_like(contiguous_self);
-    EXEC_NPU_CMD(aclnnConv3dHardswishReluSoftmaxMeanCustom, contiguous_self, result);
+    at::Tensor result = at::empty_like(self);
+    EXEC_NPU_CMD(aclnnConv3dHardswishReluSoftmaxMeanCustom, self, result);
     return result;
 }
 
@@ -214,22 +229,19 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv3d_hardswish_relu_softmax_mean_custom", &conv3d_hardswish_relu_softmax_mean_custom_impl_npu, "fused hardswish on conv3d output");
+    m.def("conv3d_hardswish_relu_softmax_mean_custom", &conv3d_hardswish_relu_softmax_mean_custom_impl_npu, "hardswish");
 }
 """
 
 model_src='''
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import torch_npu
 import custom_ops_lib
-
-class ModelNew(nn.Module):
+class ModelNew(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, num_groups=4, bias=True):
-        super(ModelNew, self).__init__()
-        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size, bias=bias)
-        self.group_norm = nn.GroupNorm(num_groups, out_channels)
+        super().__init__()
+        self.conv = torch.nn.Conv3d(in_channels, out_channels, kernel_size, bias=bias)
+        self.group_norm = torch.nn.GroupNorm(num_groups, out_channels)
 
     def forward(self, x):
         x = self.conv(x)

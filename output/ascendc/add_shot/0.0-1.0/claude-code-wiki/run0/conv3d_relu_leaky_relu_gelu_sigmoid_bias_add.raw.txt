@@ -1,3 +1,5 @@
+I've gathered enough reference material from the Wiki and compiled projects. Now I'll generate the complete kernel code. The strategy is to fuse ReLU → GELU → Sigmoid → bias-add into a single custom kernel (LeakyReLU after ReLU is identity since all values are ≥ 0), keeping Conv3d in PyTorch. I'll base the implementation on verified patterns from successfully compiled projects in this repo.
+
 project_json_src='''
 [
     {

@@ -1,3 +1,32 @@
+Now I have all the context needed. Let me also verify the TILE_NUM calculation for the specific input shape.
+
+The input to the custom kernel after Conv2d is shape `(128, 128, 126, 126)`:
+- Conv2d with kernel_size=3 on 128x128 input gives 126x126 output
+- totalLength = 128 * 128 * 126 * 126 = 259,661,824
+- blockLength = 259,661,824 / 32 = 8,114,432
+- With TILE_NUM=504 and BUFFER_NUM=2: tileLength = 8,114,432 / 504 / 2 = 8,054 (not perfectly divisible)
+
+Let me recalculate for a better TILE_NUM. Actually 128*128*126*126 = 259,661,824. 259,661,824 / 32 = 8,114,432. We need 8,114,432 / (TILE_NUM * 2) to be an integer. 8,114,432 = 2^10 * 7927... Let me check: 8,114,432 / 2 = 4,057,216. Let me factor: 259,661,824 = 128 * 128 * 126 * 126. 128 = 2^7, 126 = 2 * 63 = 2 * 7 * 9. So 259,661,824 = 2^7 * 2^7 * (2*63) * (2*63) = 2^16 * 63^2 = 2^16 * 3969. So 259,661,824 / 32 = 2^16 * 3969 / 32 = 2^11 * 3969 = 2048 * 3969 = 8,128,512... wait let me just compute directly.
+
+128 * 128 = 16384
+126 * 126 = 15876
+16384 * 15876 = ?
+
+16384 * 15000 = 245,760,000
+16384 * 876 = 14,352,384
+Total = 260,112,384
+
+260,112,384 / 32 = 8,128,512
+8,128,512 / 2 = 4,064,256
+
+We need TILE_NUM such that 4,064,256 / TILE_NUM is an integer. 4,064,256 = 2^? Let me factor: 4,064,256 / 2 = 2,032,128; / 2 = 1,016,064; / 2 = 508,032; / 2 = 254,016; / 2 = 127,008; / 2 = 63,504; / 2 = 31,752; / 2 = 15,876; / 2 = 7,938; / 2 = 3,969. So 4,064,256 = 2^10 * 3969. 3969 = 63^2 = (7*9)^2 = 7^2 * 9^2 = 49 * 81.
+
+So 4,064,256 = 2^10 * 49 * 81. TILE_NUM=504 = 8 * 63 = 8 * 7 * 9. 4,064,256 / 504 = 2^10 * 49 * 81 / (8 * 7 * 9) = 2^7 * 7 * 9 = 128 * 63 = 8064. That works!
+
+So tileLength = 8064 floats = 32,256 bytes ~= 31.5 KB per buffer. With BUFFER_NUM=2 for each queue, we need 2 input queues + 1 output queue, each with 2 buffers of 31.5KB = ~189 KB. This fits in the 256KB UB.
+
+The existing implementation with TILE_NUM=504 works. Let me produce the final output.
+
 project_json_src='''
 [
     {
