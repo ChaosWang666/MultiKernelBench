@@ -1,0 +1,91 @@
+{
+ "binFileName": "Conv2dMinAddMultiplyCustom_9599e8239983f15667507a1f91165afc",
+ "binFileSuffix": ".o",
+ "blockDim": -1,
+ "coreType": "VectorCore",
+ "core_type": "AIV",
+ "intercoreSync": 0,
+ "kernelName": "Conv2dMinAddMultiplyCustom_9599e8239983f15667507a1f91165afc",
+ "magic": "RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+ "memoryStamping": [],
+ "opParaSize": 24,
+ "parameters": [
+  null,
+  null,
+  null,
+  null
+ ],
+ "sha256": "8c0822242655aa2639c12f4f66bff43ba102af388ca66e31ce6ed5a413d86ca5",
+ "workspace": {
+  "num": 1,
+  "size": [
+   -1
+  ],
+  "type": [
+   0
+  ]
+ },
+ "kernelList": [
+  {
+   "kernelName": "Conv2dMinAddMultiplyCustom_9599e8239983f15667507a1f91165afc_0"
+  }
+ ],
+ "optionalInputMode": "gen_placeholder",
+ "optionalOutputMode": "gen_placeholder",
+ "supportSuperKernel": 1,
+ "compileInfo": {},
+ "supportInfo": {
+  "implMode": "high_performance",
+  "int64Mode": false,
+  "simplifiedKeyMode": 0,
+  "simplifiedKey": [
+   "Conv2dMinAddMultiplyCustom/d=0,p=1/0,2/0,2/0,2",
+   "Conv2dMinAddMultiplyCustom/d=0,p=0/0,2/0,2/0,2",
+   "Conv2dMinAddMultiplyCustom/d=1,p=1/0,2/0,2/0,2",
+   "Conv2dMinAddMultiplyCustom/d=1,p=0/0,2/0,2/0,2"
+  ],
+  "optionalInputMode": "gen_placeholder",
+  "optionalOutputMode": "gen_placeholder",
+  "staticKey": "55e84ffac41fa7325a9f15f74c4d444618458c8c02467f776f20e7d2933e345e,295935613b943d6a71aa3e5b596ee7da1f284cfde70cbf59960f8c546b5d4d30",
+  "inputs": [
+   {
+    "name": "x",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   },
+   {
+    "name": "y",
+    "index": 1,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "z",
+    "index": 0,
+    "dtype": "float32",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "opMode": "dynamic",
+  "deterministic": "ignore"
+ },
+ "filePath": "ascend910b/conv2d_min_add_multiply_custom/Conv2dMinAddMultiplyCustom_9599e8239983f15667507a1f91165afc.json"
+}

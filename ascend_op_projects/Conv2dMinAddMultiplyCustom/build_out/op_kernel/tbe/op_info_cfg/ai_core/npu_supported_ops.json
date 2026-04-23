@@ -1,0 +1,6 @@
+{
+  "Conv2dMinAddMultiplyCustom": {
+    "isGray": false,
+    "isHeavy": false
+  }
+}

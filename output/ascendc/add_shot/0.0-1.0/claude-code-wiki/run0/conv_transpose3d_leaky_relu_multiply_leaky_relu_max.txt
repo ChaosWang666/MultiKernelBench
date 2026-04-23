@@ -1,0 +1,322 @@
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "multiplier",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, channelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLen);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom, ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose3d_leaky_relu_multiply_leaky_relu_max_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 20;
+const uint32_t TILE_LEN = 4096;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t D = xShape.GetDim(2);
+    uint32_t H = xShape.GetDim(3);
+    uint32_t W = xShape.GetDim(4);
+
+    uint32_t totalChannels = N * C;
+    uint32_t channelSize = D * H * W;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalChannels(totalChannels);
+    tiling.set_channelSize(channelSize);
+    tiling.set_channels(C);
+    tiling.set_tileLen(TILE_LEN);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom : public OpDef {
+public:
+    explicit ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("multiplier")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelFusedLeakyMulLeaky {
+public:
+    __aicore__ inline KernelFusedLeakyMulLeaky() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR mul, GM_ADDR y,
+                                uint32_t totalChannels, uint32_t channelSize,
+                                uint32_t channels, uint32_t tileLen)
+    {
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+
+        uint32_t channelsPerCore = (totalChannels + blockNum - 1) / blockNum;
+        uint32_t startCh = blockIdx * channelsPerCore;
+        uint32_t endCh = startCh + channelsPerCore;
+        if (endCh > totalChannels) endCh = totalChannels;
+
+        this->myChannels = (endCh > startCh) ? (endCh - startCh) : 0;
+        this->startChannel = startCh;
+        this->channels = channels;
+        this->channelSize = channelSize;
+        this->tileLen = tileLen;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + (uint64_t)startCh * channelSize,
+                            (uint64_t)this->myChannels * channelSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y + (uint64_t)startCh * channelSize,
+                            (uint64_t)this->myChannels * channelSize);
+        mGm.SetGlobalBuffer((__gm__ float *)mul, channels);
+
+        pipe.InitBuffer(inQueue, BUFFER_NUM, tileLen * sizeof(float));
+        pipe.InitBuffer(outQueue, BUFFER_NUM, tileLen * sizeof(float));
+
+        uint32_t alignedC = (channels + 7) / 8 * 8;
+        if (alignedC < 8) alignedC = 8;
+        pipe.InitBuffer(mulQue, 1, alignedC * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (myChannels == 0) return;
+
+        AscendC::LocalTensor<float> mulLocal = mulQue.AllocTensor<float>();
+        AscendC::DataCopyExtParams copyMul{1, (uint32_t)(channels * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<float> padMul{false, 0, 0, 0.0f};
+        AscendC::DataCopyPad(mulLocal, mGm, copyMul, padMul);
+        mulQue.EnQue(mulLocal);
+        mulLocal = mulQue.DeQue<float>();
+
+        const float negSlope = 0.2f;
+
+        for (uint32_t c = 0; c < myChannels; c++) {
+            uint32_t globalCh = startChannel + c;
+            uint32_t mulIdx = globalCh % channels;
+            float m = mulLocal.GetValue(mulIdx);
+
+            uint64_t baseOffset = (uint64_t)c * channelSize;
+            uint32_t numTiles = (channelSize + tileLen - 1) / tileLen;
+
+            for (uint32_t t = 0; t < numTiles; t++) {
+                uint32_t tileOffset = t * tileLen;
+                uint32_t curLen = (tileOffset + tileLen <= channelSize) ?
+                                  tileLen : (channelSize - tileOffset);
+                ProcessTile(baseOffset + tileOffset, curLen, m, negSlope);
+            }
+        }
+
+        mulQue.FreeTensor(mulLocal);
+    }
+
+private:
+    __aicore__ inline void ProcessTile(uint64_t offset, uint32_t len, float m, float negSlope)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueue.AllocTensor<float>();
+        AscendC::DataCopyExtParams copyIn{1, (uint32_t)(len * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<float> padIn{false, 0, 0, 0.0f};
+        AscendC::DataCopyPad(xLocal, xGm[offset], copyIn, padIn);
+        inQueue.EnQue(xLocal);
+
+        xLocal = inQueue.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueue.AllocTensor<float>();
+
+        AscendC::LeakyRelu<float>(yLocal, xLocal, negSlope, len);
+        AscendC::Muls<float>(yLocal, yLocal, m, len);
+        AscendC::LeakyRelu<float>(yLocal, yLocal, negSlope, len);
+
+        outQueue.EnQue(yLocal);
+        inQueue.FreeTensor(xLocal);
+
+        yLocal = outQueue.DeQue<float>();
+        AscendC::DataCopyExtParams copyOut{1, (uint32_t)(len * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPad(yGm[offset], yLocal, copyOut);
+        outQueue.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> mulQue;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<float> mGm;
+    uint32_t myChannels;
+    uint32_t startChannel;
+    uint32_t channels;
+    uint32_t channelSize;
+    uint32_t tileLen;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose3d_leaky_relu_multiply_leaky_relu_max_custom(
+    GM_ADDR x, GM_ADDR multiplier, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelFusedLeakyMulLeaky op;
+    op.Init(x, multiplier, y,
+            tiling_data.totalChannels,
+            tiling_data.channelSize,
+            tiling_data.channels,
+            tiling_data.tileLen);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose3d_leaky_relu_multiply_leaky_relu_max_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& multiplier)
+{
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnConvTranspose3dLeakyReluMultiplyLeakyReluMaxCustom, x, multiplier, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose3d_leaky_relu_multiply_leaky_relu_max_custom",
+           &conv_transpose3d_leaky_relu_multiply_leaky_relu_max_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose3d_leaky_relu_multiply_leaky_relu_max_custom",
+          &conv_transpose3d_leaky_relu_multiply_leaky_relu_max_custom_impl_npu,
+          "fused leaky_relu(leaky_relu(x, 0.2) * multiplier, 0.2)");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, output_padding, multiplier_shape):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size,
+                                                 stride=stride, padding=padding,
+                                                 output_padding=output_padding)
+        self.multiplier = nn.Parameter(torch.randn(multiplier_shape))
+        self.max_pool = nn.MaxPool3d(kernel_size=2)
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = x.contiguous()
+        mul_flat = self.multiplier.reshape(-1).contiguous()
+        x = custom_ops_lib.conv_transpose3d_leaky_relu_multiply_leaky_relu_max_custom(x, mul_flat)
+        x = self.max_pool(x)
+        return x
+'''

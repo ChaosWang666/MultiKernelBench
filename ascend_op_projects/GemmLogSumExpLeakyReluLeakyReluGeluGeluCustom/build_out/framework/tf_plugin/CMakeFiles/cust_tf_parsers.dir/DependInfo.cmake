@@ -1,0 +1,19 @@
+
+# Consider dependencies only in project.
+set(CMAKE_DEPENDS_IN_PROJECT_ONLY OFF)
+
+# The set of languages for which implicit dependencies are needed:
+set(CMAKE_DEPENDS_LANGUAGES
+  )
+
+# The set of dependency files which are needed:
+set(CMAKE_DEPENDS_DEPENDENCY_FILES
+  "/data/w00936672/test_mkb/MultiKernelBench-bak3/ascend_op_projects/GemmLogSumExpLeakyReluLeakyReluGeluGeluCustom/framework/tf_plugin/tensorflow_gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu_custom_plugin.cc" "framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu_custom_plugin.cc.o" "gcc" "framework/tf_plugin/CMakeFiles/cust_tf_parsers.dir/tensorflow_gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu_custom_plugin.cc.o.d"
+  )
+
+# Targets to which this target links.
+set(CMAKE_TARGET_LINKED_INFO_FILES
+  )
+
+# Fortran module output directory.
+set(CMAKE_Fortran_TARGET_MODULE_DIR "")

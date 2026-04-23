@@ -11,12 +11,6 @@
                 "type": ["float"]
             },
             {
-                "name": "weight",
-                "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
-            },
-            {
                 "name": "gamma",
                 "param_type": "required",
                 "format": ["ND"],
@@ -31,7 +25,7 @@
         ],
         "output_desc": [
             {
-                "name": "y",
+                "name": "z",
                 "param_type": "required",
                 "format": ["ND"],
                 "type": ["float"]
