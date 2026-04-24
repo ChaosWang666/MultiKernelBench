@@ -1,0 +1,292 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "GemmSigmoidSumLogSumExpCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "w1",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "b1",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "w2",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "b2",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GemmSigmoidSumLogSumExpCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inputSize);
+  TILING_DATA_FIELD_DEF(uint32_t, hiddenSize);
+  TILING_DATA_FIELD_DEF(uint32_t, outputSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GemmSigmoidSumLogSumExpCustom, GemmSigmoidSumLogSumExpCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "gemm_sigmoid_sum_log_sum_exp_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    GemmSigmoidSumLogSumExpCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto w1Shape = context->GetInputShape(1)->GetOriginShape();
+    auto w2Shape = context->GetInputShape(3)->GetOriginShape();
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t inputSize = xShape.GetDim(1);
+    uint32_t hiddenSize = w1Shape.GetDim(0);
+    uint32_t outputSize = w2Shape.GetDim(0);
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_inputSize(inputSize);
+    tiling.set_hiddenSize(hiddenSize);
+    tiling.set_outputSize(outputSize);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(1);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class GemmSigmoidSumLogSumExpCustom : public OpDef {
+public:
+    explicit GemmSigmoidSumLogSumExpCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("w1").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("b1").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("w2").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("b2").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(GemmSigmoidSumLogSumExpCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelGemmSigmoidSumLogSumExp {
+public:
+    __aicore__ inline KernelGemmSigmoidSumLogSumExp() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR w1, GM_ADDR b1, GM_ADDR w2, GM_ADDR b2, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t inputSize, uint32_t hiddenSize, uint32_t outputSize)
+    {
+        this->batchSize = batchSize;
+        this->inputSize = inputSize;
+        this->hiddenSize = hiddenSize;
+        this->outputSize = outputSize;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->rowsPerBlock = (batchSize + blockNum - 1) / blockNum;
+        this->startRow = blockIdx * this->rowsPerBlock;
+        this->endRow = this->startRow + this->rowsPerBlock;
+        if (this->endRow > batchSize) this->endRow = batchSize;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inputSize);
+        w1Gm.SetGlobalBuffer((__gm__ float *)w1, hiddenSize * inputSize);
+        b1Gm.SetGlobalBuffer((__gm__ float *)b1, hiddenSize);
+        w2Gm.SetGlobalBuffer((__gm__ float *)w2, outputSize * hiddenSize);
+        b2Gm.SetGlobalBuffer((__gm__ float *)b2, outputSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize);
+
+        pipe.InitBuffer(xBuf, inputSize * sizeof(float));
+        pipe.InitBuffer(hBuf, hiddenSize * sizeof(float));
+        pipe.InitBuffer(oBuf, outputSize * sizeof(float));
+        pipe.InitBuffer(wRowBuf, ((inputSize > hiddenSize ? inputSize : hiddenSize)) * sizeof(float));
+        pipe.InitBuffer(tmpBuf, ((inputSize > hiddenSize ? inputSize : hiddenSize)) * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<float> xLocal = xBuf.Get<float>();
+        AscendC::LocalTensor<float> hLocal = hBuf.Get<float>();
+        AscendC::LocalTensor<float> oLocal = oBuf.Get<float>();
+        AscendC::LocalTensor<float> wRow = wRowBuf.Get<float>();
+        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+
+        for (uint32_t row = startRow; row < endRow; row++) {
+            // Load x row
+            AscendC::DataCopy(xLocal, xGm[row * inputSize], inputSize);
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            // Compute hidden = sigmoid(x @ w1^T + b1)
+            for (uint32_t h = 0; h < hiddenSize; h++) {
+                AscendC::DataCopy(wRow, w1Gm[h * inputSize], inputSize);
+                AscendC::PipeBarrier<PIPE_ALL>();
+                AscendC::Mul(tmp, xLocal, wRow, inputSize);
+                AscendC::PipeBarrier<PIPE_ALL>();
+                float sum = 0.0f;
+                for (uint32_t i = 0; i < inputSize; i++) {
+                    sum += tmp.GetValue(i);
+                }
+                sum += b1Gm.GetValue(h);
+                // sigmoid
+                float s = 1.0f / (1.0f + AscendC::ScalarCast<float, float, AscendC::RoundMode::CAST_NONE>(expf(-sum)));
+                hLocal.SetValue(h, s);
+            }
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            // Compute output = hidden @ w2^T + b2
+            float maxVal = -3.4e38f;
+            for (uint32_t o = 0; o < outputSize; o++) {
+                AscendC::DataCopy(wRow, w2Gm[o * hiddenSize], hiddenSize);
+                AscendC::PipeBarrier<PIPE_ALL>();
+                AscendC::Mul(tmp, hLocal, wRow, hiddenSize);
+                AscendC::PipeBarrier<PIPE_ALL>();
+                float sum = 0.0f;
+                for (uint32_t i = 0; i < hiddenSize; i++) {
+                    sum += tmp.GetValue(i);
+                }
+                sum += b2Gm.GetValue(o);
+                oLocal.SetValue(o, sum);
+                if (sum > maxVal) maxVal = sum;
+            }
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            // LogSumExp
+            float sumExp = 0.0f;
+            for (uint32_t o = 0; o < outputSize; o++) {
+                sumExp += expf(oLocal.GetValue(o) - maxVal);
+            }
+            float result = maxVal + logf(sumExp);
+            yGm.SetValue(row, result);
+            AscendC::PipeBarrier<PIPE_ALL>();
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> xBuf, hBuf, oBuf, wRowBuf, tmpBuf;
+    AscendC::GlobalTensor<float> xGm, w1Gm, b1Gm, w2Gm, b2Gm, yGm;
+    uint32_t batchSize, inputSize, hiddenSize, outputSize;
+    uint32_t startRow, endRow, rowsPerBlock;
+};
+
+extern "C" __global__ __aicore__ void gemm_sigmoid_sum_log_sum_exp_custom(
+    GM_ADDR x, GM_ADDR w1, GM_ADDR b1, GM_ADDR w2, GM_ADDR b2, GM_ADDR y,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGemmSigmoidSumLogSumExp op;
+    op.Init(x, w1, b1, w2, b2, y,
+            tiling_data.batchSize, tiling_data.inputSize,
+            tiling_data.hiddenSize, tiling_data.outputSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gemm_sigmoid_sum_log_sum_exp_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& w1, const at::Tensor& b1,
+    const at::Tensor& w2, const at::Tensor& b2) {
+    auto sizes = x.sizes();
+    at::Tensor result = at::empty({sizes[0]}, x.options());
+    EXEC_NPU_CMD(aclnnGemmSigmoidSumLogSumExpCustom, x, w1, b1, w2, b2, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gemm_sigmoid_sum_log_sum_exp_custom", &gemm_sigmoid_sum_log_sum_exp_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_sigmoid_sum_log_sum_exp_custom", &gemm_sigmoid_sum_log_sum_exp_custom_impl_npu, "fused gemm sigmoid gemm logsumexp");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(ModelNew, self).__init__()
+        self.linear1 = nn.Linear(input_size, hidden_size)
+        self.linear2 = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        return custom_ops_lib.gemm_sigmoid_sum_log_sum_exp_custom(
+            x, self.linear1.weight, self.linear1.bias,
+            self.linear2.weight, self.linear2.bias)
+'''
+```

@@ -1,0 +1,292 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "MatmulSumMaxAvgPoolLogSumExpLogSumExpCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulSumMaxAvgPoolLogSumExpLogSumExpCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, outFeatures);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulSumMaxAvgPoolLogSumExpLogSumExpCustom, MatmulSumMaxAvgPoolLogSumExpLogSumExpCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulSumMaxAvgPoolLogSumExpLogSumExpCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto wShape = context->GetInputShape(1)->GetOriginShape();
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t inFeatures = xShape.GetDim(1);
+    uint32_t outFeatures = wShape.GetDim(0);
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_inFeatures(inFeatures);
+    tiling.set_outFeatures(outFeatures);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, 1);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MatmulSumMaxAvgPoolLogSumExpLogSumExpCustom : public OpDef {
+public:
+    explicit MatmulSumMaxAvgPoolLogSumExpLogSumExpCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MatmulSumMaxAvgPoolLogSumExpLogSumExpCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+// Note: the chain reduces to: out[b] = sum_j(x[b,:] @ W[j,:]^T) + sum_j(bias[j])
+// = sum over all out features of (linear(x)[b,j])
+// = sum_i x[b,i] * (sum_j W[j,i]) + sum_j bias[j]
+// All subsequent ops (max,mean,logsumexp,logsumexp) along dim=1 of size 1 are identity.
+
+class KernelMatmulChain {
+public:
+    __aicore__ inline KernelMatmulChain() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z,
+                                uint32_t batchSize, uint32_t inFeatures, uint32_t outFeatures)
+    {
+        this->batchSize = batchSize;
+        this->inFeatures = inFeatures;
+        this->outFeatures = outFeatures;
+        this->blockIdx = AscendC::GetBlockIdx();
+        this->blockNum = AscendC::GetBlockNum();
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inFeatures);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, outFeatures * inFeatures);
+        bGm.SetGlobalBuffer((__gm__ float *)bias, outFeatures);
+        zGm.SetGlobalBuffer((__gm__ float *)z, batchSize);
+
+        pipe.InitBuffer(inQueueX, 1, this->inFeatures * sizeof(float));
+        pipe.InitBuffer(inQueueW, 2, this->inFeatures * sizeof(float));
+        pipe.InitBuffer(inQueueB, 1, 64 * sizeof(float));
+        pipe.InitBuffer(tmpBuf, this->inFeatures * sizeof(float));
+        pipe.InitBuffer(wsumBuf, this->inFeatures * sizeof(float));
+        pipe.InitBuffer(outQueueZ, 1, 32 * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        // Step 1: compute wsum[i] = sum_j W[j,i], and bsum scalar (only block 0 broadcasts via recompute on each block)
+        AscendC::LocalTensor<float> wsum = wsumBuf.Get<float>();
+        AscendC::Duplicate(wsum, (float)0, this->inFeatures);
+
+        for (uint32_t j = 0; j < this->outFeatures; j++) {
+            AscendC::LocalTensor<float> wLocal = inQueueW.AllocTensor<float>();
+            AscendC::DataCopy(wLocal, wGm[j * this->inFeatures], this->inFeatures);
+            inQueueW.EnQue(wLocal);
+            AscendC::LocalTensor<float> wL = inQueueW.DeQue<float>();
+            AscendC::Add(wsum, wsum, wL, this->inFeatures);
+            inQueueW.FreeTensor(wL);
+        }
+
+        // bias sum
+        float bsum = 0.0f;
+        // Load bias in chunks
+        uint32_t biasChunk = 64;
+        AscendC::LocalTensor<float> bAccum = tmpBuf.Get<float>();
+        AscendC::Duplicate(bAccum, (float)0, biasChunk);
+        uint32_t fullChunks = this->outFeatures / biasChunk;
+        uint32_t rem = this->outFeatures % biasChunk;
+        for (uint32_t c = 0; c < fullChunks; c++) {
+            AscendC::LocalTensor<float> bLocal = inQueueB.AllocTensor<float>();
+            AscendC::DataCopy(bLocal, bGm[c * biasChunk], biasChunk);
+            inQueueB.EnQue(bLocal);
+            AscendC::LocalTensor<float> bL = inQueueB.DeQue<float>();
+            AscendC::Add(bAccum, bAccum, bL, biasChunk);
+            inQueueB.FreeTensor(bL);
+        }
+        // Reduce bAccum to scalar
+        for (uint32_t k = 0; k < biasChunk; k++) {
+            bsum += bAccum.GetValue(k);
+        }
+        // remainder
+        for (uint32_t k = 0; k < rem; k++) {
+            bsum += bGm.GetValue(fullChunks * biasChunk + k);
+        }
+
+        // Step 2: distribute batch across blocks
+        uint32_t perBlock = (this->batchSize + this->blockNum - 1) / this->blockNum;
+        uint32_t start = this->blockIdx * perBlock;
+        uint32_t end = start + perBlock;
+        if (end > this->batchSize) end = this->batchSize;
+
+        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+
+        for (uint32_t b = start; b < end; b++) {
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+            AscendC::DataCopy(xLocal, xGm[b * this->inFeatures], this->inFeatures);
+            inQueueX.EnQue(xLocal);
+            AscendC::LocalTensor<float> xL = inQueueX.DeQue<float>();
+
+            AscendC::Mul(tmp, xL, wsum, this->inFeatures);
+            inQueueX.FreeTensor(xL);
+
+            // Reduce sum
+            float s = 0.0f;
+            for (uint32_t k = 0; k < this->inFeatures; k++) {
+                s += tmp.GetValue(k);
+            }
+            s += bsum;
+
+            AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+            zLocal.SetValue(0, s);
+            outQueueZ.EnQue<float>(zLocal);
+            AscendC::LocalTensor<float> zL = outQueueZ.DeQue<float>();
+            // Write single value; use DataCopy with 8 elements alignment workaround
+            // Use SetAtomicNone and write via GM pointer
+            zGm.SetValue(b, s);
+            outQueueZ.FreeTensor(zL);
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECIN, 2> inQueueW;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueB;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> wsumBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> wGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t batchSize;
+    uint32_t inFeatures;
+    uint32_t outFeatures;
+    uint32_t blockIdx;
+    uint32_t blockNum;
+};
+
+extern "C" __global__ __aicore__ void matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMatmulChain op;
+    op.Init(x, weight, bias, z, tiling_data.batchSize, tiling_data.inFeatures, tiling_data.outFeatures);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias) {
+    auto sizes = x.sizes().vec();
+    std::vector<int64_t> outSizes = {sizes[0], 1};
+    at::Tensor result = at::empty(outSizes, x.options());
+    EXEC_NPU_CMD(aclnnMatmulSumMaxAvgPoolLogSumExpLogSumExpCustom, x, weight, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom", &matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom", &matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom_impl_npu, "fused chain");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+import torch.nn as nn
+
+class ModelNew(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(ModelNew, self).__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        w = self.linear.weight.contiguous()
+        b = self.linear.bias.contiguous()
+        return custom_ops_lib.matmul_sum_max_avg_pool_log_sum_exp_log_sum_exp_custom(x, w, b)
+'''
+```

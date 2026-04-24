@@ -1,0 +1,338 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "MatmulSwishSumGroupNormCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "linear_bias",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "gn_weight",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "gn_bias",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulSwishSumGroupNormCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, outFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, numGroups);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulSwishSumGroupNormCustom, MatmulSwishSumGroupNormCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_swish_sum_group_norm_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulSwishSumGroupNormCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto wShape = context->GetInputShape(1)->GetOriginShape();
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t inFeatures = xShape.GetDim(1);
+    uint32_t outFeatures = wShape.GetDim(0);
+    uint32_t numGroups = 64;
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_inFeatures(inFeatures);
+    tiling.set_outFeatures(outFeatures);
+    tiling.set_numGroups(numGroups);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* w_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, w_shape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MatmulSwishSumGroupNormCustom : public OpDef {
+public:
+    explicit MatmulSwishSumGroupNormCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("linear_bias").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("gn_weight").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("gn_bias").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MatmulSwishSumGroupNormCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelMatmulSwishSumGroupNorm {
+public:
+    __aicore__ inline KernelMatmulSwishSumGroupNorm() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR linear_bias, GM_ADDR bias,
+                                GM_ADDR gn_weight, GM_ADDR gn_bias, GM_ADDR z,
+                                uint32_t batchSize, uint32_t inFeatures, uint32_t outFeatures, uint32_t numGroups)
+    {
+        this->batchSize = batchSize;
+        this->inFeatures = inFeatures;
+        this->outFeatures = outFeatures;
+        this->numGroups = numGroups;
+        this->groupSize = outFeatures / numGroups;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->rowsPerBlock = (batchSize + blockNum - 1) / blockNum;
+        this->startRow = blockIdx * this->rowsPerBlock;
+        this->endRow = this->startRow + this->rowsPerBlock;
+        if (this->endRow > batchSize) this->endRow = batchSize;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inFeatures);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, outFeatures * inFeatures);
+        lbGm.SetGlobalBuffer((__gm__ float *)linear_bias, outFeatures);
+        bGm.SetGlobalBuffer((__gm__ float *)bias, outFeatures);
+        gnwGm.SetGlobalBuffer((__gm__ float *)gn_weight, outFeatures);
+        gnbGm.SetGlobalBuffer((__gm__ float *)gn_bias, outFeatures);
+        zGm.SetGlobalBuffer((__gm__ float *)z, batchSize * outFeatures);
+
+        pipe.InitBuffer(xBuf, inFeatures * sizeof(float));
+        pipe.InitBuffer(wBuf, inFeatures * sizeof(float));
+        pipe.InitBuffer(outBuf, outFeatures * sizeof(float));
+        pipe.InitBuffer(gnwBuf, outFeatures * sizeof(float));
+        pipe.InitBuffer(gnbBuf, outFeatures * sizeof(float));
+        pipe.InitBuffer(lbBuf, outFeatures * sizeof(float));
+        pipe.InitBuffer(bBuf, outFeatures * sizeof(float));
+        pipe.InitBuffer(tmpBuf, inFeatures * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (this->startRow >= this->endRow) return;
+
+        AscendC::LocalTensor<float> lbLocal = lbBuf.Get<float>();
+        AscendC::LocalTensor<float> bLocal = bBuf.Get<float>();
+        AscendC::LocalTensor<float> gnwLocal = gnwBuf.Get<float>();
+        AscendC::LocalTensor<float> gnbLocal = gnbBuf.Get<float>();
+        AscendC::DataCopy(lbLocal, lbGm, this->outFeatures);
+        AscendC::DataCopy(bLocal, bGm, this->outFeatures);
+        AscendC::DataCopy(gnwLocal, gnwGm, this->outFeatures);
+        AscendC::DataCopy(gnbLocal, gnbGm, this->outFeatures);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        for (uint32_t row = this->startRow; row < this->endRow; row++) {
+            ProcessRow(row, lbLocal, bLocal, gnwLocal, gnbLocal);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessRow(uint32_t row,
+                                       AscendC::LocalTensor<float>& lbLocal,
+                                       AscendC::LocalTensor<float>& bLocal,
+                                       AscendC::LocalTensor<float>& gnwLocal,
+                                       AscendC::LocalTensor<float>& gnbLocal)
+    {
+        AscendC::LocalTensor<float> xLocal = xBuf.Get<float>();
+        AscendC::LocalTensor<float> wLocal = wBuf.Get<float>();
+        AscendC::LocalTensor<float> outLocal = outBuf.Get<float>();
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+
+        AscendC::DataCopy(xLocal, xGm[row * this->inFeatures], this->inFeatures);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // matmul: for each out feature, dot(x, weight[o])
+        for (uint32_t o = 0; o < this->outFeatures; o++) {
+            AscendC::DataCopy(wLocal, wGm[o * this->inFeatures], this->inFeatures);
+            AscendC::PipeBarrier<PIPE_ALL>();
+            AscendC::Mul(tmpLocal, xLocal, wLocal, this->inFeatures);
+            AscendC::PipeBarrier<PIPE_ALL>();
+            float sum = 0.0f;
+            for (uint32_t i = 0; i < this->inFeatures; i++) {
+                sum += tmpLocal.GetValue(i);
+            }
+            outLocal.SetValue(o, sum);
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // add linear bias
+        AscendC::Add(outLocal, outLocal, lbLocal, this->outFeatures);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // swish: sigmoid(x)*x
+        AscendC::LocalTensor<float> sigLocal = tmpBuf.Get<float>();
+        // We need tmp of size outFeatures; tmpBuf is inFeatures, but inFeatures=1024 < outFeatures=4096
+        // So do it in a loop using scalar to avoid issue: compute in-place using element scalar
+        for (uint32_t o = 0; o < this->outFeatures; o++) {
+            float v = outLocal.GetValue(o);
+            float s = 1.0f / (1.0f + AscendC::ScalarCast<float, float, AscendC::RoundMode::CAST_NONE>(
+                              AscendC::ScalarGetExpVal(-v)));
+            float swish = v * s;
+            outLocal.SetValue(o, swish + bLocal.GetValue(o));
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        // GroupNorm
+        for (uint32_t g = 0; g < this->numGroups; g++) {
+            uint32_t start = g * this->groupSize;
+            float mean = 0.0f;
+            for (uint32_t i = 0; i < this->groupSize; i++) {
+                mean += outLocal.GetValue(start + i);
+            }
+            mean /= this->groupSize;
+            float var = 0.0f;
+            for (uint32_t i = 0; i < this->groupSize; i++) {
+                float d = outLocal.GetValue(start + i) - mean;
+                var += d * d;
+            }
+            var /= this->groupSize;
+            float invStd = 1.0f / AscendC::ScalarCast<float, float, AscendC::RoundMode::CAST_NONE>(
+                               AscendC::ScalarGetSqrtVal(var + 1e-5f));
+            for (uint32_t i = 0; i < this->groupSize; i++) {
+                float v = (outLocal.GetValue(start + i) - mean) * invStd;
+                v = v * gnwLocal.GetValue(start + i) + gnbLocal.GetValue(start + i);
+                outLocal.SetValue(start + i, v);
+            }
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        AscendC::DataCopy(zGm[row * this->outFeatures], outLocal, this->outFeatures);
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> xBuf, wBuf, outBuf, gnwBuf, gnbBuf, lbBuf, bBuf, tmpBuf;
+    AscendC::GlobalTensor<float> xGm, wGm, lbGm, bGm, gnwGm, gnbGm, zGm;
+    uint32_t batchSize, inFeatures, outFeatures, numGroups, groupSize;
+    uint32_t startRow, endRow, rowsPerBlock;
+};
+
+extern "C" __global__ __aicore__ void matmul_swish_sum_group_norm_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR linear_bias, GM_ADDR bias,
+    GM_ADDR gn_weight, GM_ADDR gn_bias, GM_ADDR z,
+    GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMatmulSwishSumGroupNorm op;
+    op.Init(x, weight, linear_bias, bias, gn_weight, gn_bias, z,
+            tiling_data.batchSize, tiling_data.inFeatures, tiling_data.outFeatures, tiling_data.numGroups);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_swish_sum_group_norm_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& weight, const at::Tensor& linear_bias,
+    const at::Tensor& bias, const at::Tensor& gn_weight, const at::Tensor& gn_bias) {
+    auto sizes = x.sizes().vec();
+    sizes[sizes.size()-1] = weight.size(0);
+    at::Tensor result = at::empty(sizes, x.options());
+    EXEC_NPU_CMD(aclnnMatmulSwishSumGroupNormCustom, x, weight, linear_bias, bias, gn_weight, gn_bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_swish_sum_group_norm_custom", &matmul_swish_sum_group_norm_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_swish_sum_group_norm_custom", &matmul_swish_sum_group_norm_custom_impl_npu, "fused");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_features, out_features, num_groups, bias_shape):
+        super(ModelNew, self).__init__()
+        self.matmul = nn.Linear(in_features, out_features)
+        self.bias = nn.Parameter(torch.randn(bias_shape))
+        self.group_norm = nn.GroupNorm(num_groups, out_features)
+
+    def forward(self, x):
+        return custom_ops_lib.matmul_swish_sum_group_norm_custom(
+            x, self.matmul.weight, self.matmul.bias, self.bias,
+            self.group_norm.weight, self.group_norm.bias)
+'''
+```

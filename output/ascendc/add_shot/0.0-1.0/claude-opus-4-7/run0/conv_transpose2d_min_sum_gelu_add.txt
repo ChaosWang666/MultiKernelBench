@@ -1,0 +1,230 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose2dMinSumGeluAddCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose2dMinSumGeluAddCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, width);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose2dMinSumGeluAddCustom, ConvTranspose2dMinSumGeluAddCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose2d_min_sum_gelu_add_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 16;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose2dMinSumGeluAddCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    uint32_t width = context->GetInputShape(0)->GetOriginShape().GetDim(3);
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_width(width);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvTranspose2dMinSumGeluAddCustom : public OpDef {
+public:
+    explicit ConvTranspose2dMinSumGeluAddCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose2dMinSumGeluAddCustom);
+}
+"""
+
+kernel_src=r"""
+#include "kernel_operator.h"
+
+class KernelFused {
+public:
+    __aicore__ inline KernelFused() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR z, uint32_t totalLength, uint32_t width)
+    {
+        this->totalLength = totalLength;
+        this->width = width;
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->blockLength = totalLength / blockNum;
+        this->offset = this->blockLength * blockIdx;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + this->offset, this->blockLength);
+        zGm.SetGlobalBuffer((__gm__ float *)z + this->offset, this->blockLength);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, 1);
+
+        pipe.InitBuffer(inQueueX, 1, this->blockLength * sizeof(float));
+        pipe.InitBuffer(outQueueZ, 1, this->blockLength * sizeof(float));
+    }
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm, this->blockLength);
+        inQueueX.EnQue(xLocal);
+
+        AscendC::LocalTensor<float> xL = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+
+        float biasVal = biasGm.GetValue(0);
+        const float c0 = 0.5f;
+        const float c1 = 0.7978845608f; // sqrt(2/pi)
+        const float c2 = 0.044715f;
+
+        for (uint32_t i = 0; i < this->blockLength; i++) {
+            float v = xL.GetValue(i);
+            float t = c1 * (v + c2 * v * v * v);
+            float e2 = AscendC::ScalarCast<float, float, AscendC::RoundMode::CAST_NONE>(expf(2.0f * t));
+            float tanh_t = (e2 - 1.0f) / (e2 + 1.0f);
+            float gelu = c0 * v * (1.0f + tanh_t);
+            zLocal.SetValue(i, gelu + biasVal);
+        }
+
+        outQueueZ.EnQue<float>(zLocal);
+        inQueueX.FreeTensor(xL);
+
+        AscendC::LocalTensor<float> zOut = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm, zOut, this->blockLength);
+        outQueueZ.FreeTensor(zOut);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueZ;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> zGm;
+    AscendC::GlobalTensor<float> biasGm;
+    uint32_t totalLength;
+    uint32_t width;
+    uint32_t blockLength;
+    uint32_t offset;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose2d_min_sum_gelu_add_custom(GM_ADDR x, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelFused op;
+    op.Init(x, bias, z, tiling_data.totalLength, tiling_data.width);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose2d_min_sum_gelu_add_custom_impl_npu(const at::Tensor& self, const at::Tensor& bias) {
+    at::Tensor result = at::empty_like(self);
+    EXEC_NPU_CMD(aclnnConvTranspose2dMinSumGeluAddCustom, self, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose2d_min_sum_gelu_add_custom", &conv_transpose2d_min_sum_gelu_add_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose2d_min_sum_gelu_add_custom", &conv_transpose2d_min_sum_gelu_add_custom_impl_npu, "fused gelu+bias");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, output_padding, bias_shape):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride, padding, output_padding)
+        self.bias = nn.Parameter(torch.randn(bias_shape))
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = torch.min(x, dim=1, keepdim=True)[0]
+        x = torch.sum(x, dim=2, keepdim=True)
+        x_contig = x.contiguous()
+        bias_contig = self.bias.contiguous().view(-1)[:1].contiguous()
+        return custom_ops_lib.conv_transpose2d_min_sum_gelu_add_custom(x_contig, bias_contig)
+'''
+```

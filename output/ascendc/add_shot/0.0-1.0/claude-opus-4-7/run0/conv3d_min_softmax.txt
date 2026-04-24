@@ -1,0 +1,252 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv3dMinSoftmaxCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dMinSoftmaxCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, N);
+  TILING_DATA_FIELD_DEF(uint32_t, C);
+  TILING_DATA_FIELD_DEF(uint32_t, D);
+  TILING_DATA_FIELD_DEF(uint32_t, H);
+  TILING_DATA_FIELD_DEF(uint32_t, W);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dMinSoftmaxCustom, Conv3dMinSoftmaxCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_min_softmax_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dMinSoftmaxCustomTilingData tiling;
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = shape.GetDim(0);
+    uint32_t C = shape.GetDim(1);
+    uint32_t D = shape.GetDim(2);
+    uint32_t H = shape.GetDim(3);
+    uint32_t W = shape.GetDim(4);
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_N(N);
+    tiling.set_C(C);
+    tiling.set_D(D);
+    tiling.set_H(H);
+    tiling.set_W(W);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv3dMinSoftmaxCustom : public OpDef {
+public:
+    explicit Conv3dMinSoftmaxCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv3dMinSoftmaxCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+// Input after conv: shape (N, C, D, H, W)
+// Min over dim=2 (D): -> (N, C, H, W)
+// Softmax over dim=1 (C): -> (N, C, H, W)
+// We parallelize over (N, H, W) spatial positions.
+
+class KernelConv3dMinSoftmax {
+public:
+    __aicore__ inline KernelConv3dMinSoftmax() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t N, uint32_t C, uint32_t D, uint32_t H, uint32_t W)
+    {
+        this->N = N;
+        this->C = C;
+        this->D = D;
+        this->H = H;
+        this->W = W;
+        this->totalSpatial = N * H * W;
+        xGm.SetGlobalBuffer((__gm__ float *)x);
+        yGm.SetGlobalBuffer((__gm__ float *)y);
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t perCore = (totalSpatial + blockNum - 1) / blockNum;
+        uint32_t start = blockIdx * perCore;
+        uint32_t end = start + perCore;
+        if (end > totalSpatial) end = totalSpatial;
+
+        for (uint32_t idx = start; idx < end; idx++) {
+            uint32_t n = idx / (H * W);
+            uint32_t hw = idx % (H * W);
+            uint32_t h = hw / W;
+            uint32_t w = hw % W;
+
+            // For each channel, compute min over D
+            float minVals[64];
+            float maxVal = -3.4e38f;
+            for (uint32_t c = 0; c < C; c++) {
+                float m = 3.4e38f;
+                for (uint32_t d = 0; d < D; d++) {
+                    uint64_t offset = ((uint64_t)n * C * D * H * W) + ((uint64_t)c * D * H * W) + ((uint64_t)d * H * W) + h * W + w;
+                    float v = xGm.GetValue(offset);
+                    if (v < m) m = v;
+                }
+                minVals[c] = m;
+                if (m > maxVal) maxVal = m;
+            }
+
+            // Softmax over C
+            float sum = 0.0f;
+            for (uint32_t c = 0; c < C; c++) {
+                float e = AscendC::ScalarCast<float, float, AscendC::RoundMode::CAST_NONE>(
+                    (float)expf(minVals[c] - maxVal));
+                minVals[c] = e;
+                sum += e;
+            }
+            float inv = 1.0f / sum;
+            for (uint32_t c = 0; c < C; c++) {
+                uint64_t outOff = ((uint64_t)n * C * H * W) + ((uint64_t)c * H * W) + h * W + w;
+                yGm.SetValue(outOff, minVals[c] * inv);
+            }
+        }
+    }
+
+private:
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t N, C, D, H, W;
+    uint32_t totalSpatial;
+};
+
+extern "C" __global__ __aicore__ void conv3d_min_softmax_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv3dMinSoftmax op;
+    op.Init(x, y, tiling_data.N, tiling_data.C, tiling_data.D, tiling_data.H, tiling_data.W);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_min_softmax_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes();
+    std::vector<int64_t> outSizes = {sizes[0], sizes[1], sizes[3], sizes[4]};
+    at::Tensor result = at::empty(outSizes, self.options());
+    // We allocate a tensor shaped like input to match kernel's expectations for offsets
+    // Actually kernel writes to (N,C,H,W), so result is correct.
+    EXEC_NPU_CMD(aclnnConv3dMinSoftmaxCustom, self, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_min_softmax_custom", &conv3d_min_softmax_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_min_softmax_custom", &conv3d_min_softmax_custom_impl_npu, "conv3d min softmax");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, dim):
+        super(ModelNew, self).__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size)
+        self.dim = dim
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = x.contiguous()
+        return custom_ops_lib.conv3d_min_softmax_custom(x)
+'''
+```
