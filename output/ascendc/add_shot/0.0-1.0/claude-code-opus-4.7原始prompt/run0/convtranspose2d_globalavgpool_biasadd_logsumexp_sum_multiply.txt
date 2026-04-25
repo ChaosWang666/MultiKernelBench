@@ -1,0 +1,314 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "Convtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Convtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Convtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustom, Convtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "convtranspose2d_globalavgpool_biasadd_logsumexp_sum_multiply_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Convtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t H = xShape.GetDim(2);
+    uint32_t W = xShape.GetDim(3);
+
+    context->SetBlockDim(N);
+    tiling.set_batchSize(N);
+    tiling.set_channels(C);
+    tiling.set_spatialSize(H * W);
+    tiling.set_tileSize(8192);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, 1);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Convtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustom : public OpDef {
+public:
+    explicit Convtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Convtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelFused {
+public:
+    __aicore__ inline KernelFused() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+                                uint32_t batchSize, uint32_t channels,
+                                uint32_t spatialSize, uint32_t tileSize)
+    {
+        this->batchSize = batchSize;
+        this->channels = channels;
+        this->spatialSize = spatialSize;
+        this->tileSize = tileSize;
+        this->invSpatial = 1.0f / (float)spatialSize;
+        this->blockIdx = AscendC::GetBlockIdx();
+
+        xGm.SetGlobalBuffer((__gm__ float *)x);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias);
+        yGm.SetGlobalBuffer((__gm__ float *)y);
+
+        pipe.InitBuffer(inQueueX, 2, tileSize * sizeof(float));
+        pipe.InitBuffer(biasBuf, 256 * sizeof(float));
+        pipe.InitBuffer(valBuf, 256 * sizeof(float));
+        pipe.InitBuffer(tmpBuf, 256 * sizeof(float));
+        pipe.InitBuffer(redBuf, 64 * sizeof(float));
+        pipe.InitBuffer(outBuf, 64 * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (blockIdx >= batchSize) return;
+
+        AscendC::LocalTensor<float> biasLocal = biasBuf.Get<float>();
+        AscendC::DataCopy(biasLocal, biasGm, channels);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+
+        AscendC::LocalTensor<float> valLocal = valBuf.Get<float>();
+        AscendC::LocalTensor<float> red = redBuf.Get<float>();
+
+        for (uint32_t c = 0; c < channels; c++) {
+            uint64_t channelBase = ((uint64_t)blockIdx * channels + c) * spatialSize;
+            float channelSum = 0.0f;
+            uint32_t pos = 0;
+
+            while (pos < spatialSize) {
+                uint32_t currentTile = (spatialSize - pos) < tileSize ? (spatialSize - pos) : tileSize;
+                uint32_t alignedTile = (currentTile + 63) / 64 * 64;
+
+                AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+                AscendC::DataCopyExtParams copyParams{1, (uint32_t)(currentTile * sizeof(float)), 0, 0, 0};
+                AscendC::DataCopyPadExtParams<float> padParams{true, 0, (uint8_t)(alignedTile - currentTile), 0.0f};
+                AscendC::DataCopyPad(xLocal, xGm[channelBase + pos], copyParams, padParams);
+                inQueueX.EnQue(xLocal);
+
+                xLocal = inQueueX.DeQue<float>();
+                AscendC::ReduceSum(red, xLocal, red, alignedTile);
+                AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+                channelSum += red.GetValue(0);
+                inQueueX.FreeTensor(xLocal);
+
+                pos += currentTile;
+            }
+
+            float biasVal = biasLocal.GetValue(c);
+            valLocal.SetValue(c, channelSum * invSpatial + biasVal);
+        }
+
+        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+
+        AscendC::ReduceMax(red, valLocal, red, channels, false);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID1);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID1);
+        float maxVal = red.GetValue(0);
+
+        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+        AscendC::Adds(tmp, valLocal, -maxVal, channels);
+        AscendC::Exp(tmp, tmp, channels);
+        AscendC::ReduceSum(red, tmp, red, channels);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
+        float sumExp = red.GetValue(0);
+
+        AscendC::LocalTensor<float> outLocal = outBuf.Get<float>();
+        AscendC::Duplicate(outLocal, 1.0f, 64);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID3);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID3);
+        outLocal.SetValue(0, sumExp);
+        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID1);
+        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID1);
+        AscendC::Ln(outLocal, outLocal, 64);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        float logSumExp = outLocal.GetValue(0);
+
+        float result = (maxVal + logSumExp) * 10.0f;
+        outLocal.SetValue(0, result);
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+
+        AscendC::DataCopyExtParams outParams{1, (uint32_t)sizeof(float), 0, 0, 0};
+        AscendC::DataCopyPad(yGm[blockIdx], outLocal, outParams);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, 2> inQueueX;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> biasBuf, valBuf, tmpBuf, redBuf, outBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t channels;
+    uint32_t spatialSize;
+    uint32_t tileSize;
+    uint32_t blockIdx;
+    float invSpatial;
+};
+
+extern "C" __global__ __aicore__ void convtranspose2d_globalavgpool_biasadd_logsumexp_sum_multiply_custom(
+    GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelFused op;
+    op.Init(x, bias, y, tiling_data.batchSize, tiling_data.channels,
+            tiling_data.spatialSize, tiling_data.tileSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor convtranspose2d_globalavgpool_biasadd_logsumexp_sum_multiply_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias) {
+    auto N = x.size(0);
+    at::Tensor result = at::empty({N, 1}, x.options());
+    EXEC_NPU_CMD(aclnnConvtranspose2dGlobalavgpoolBiasaddLogsumexpSumMultiplyCustom, x, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("convtranspose2d_globalavgpool_biasadd_logsumexp_sum_multiply_custom", &convtranspose2d_globalavgpool_biasadd_logsumexp_sum_multiply_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("convtranspose2d_globalavgpool_biasadd_logsumexp_sum_multiply_custom", &convtranspose2d_globalavgpool_biasadd_logsumexp_sum_multiply_custom_impl_npu, "fused avgpool+bias+lse+sum+mul");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, bias_shape):
+        super().__init__()
+        self.conv_transpose = nn.ConvTranspose2d(in_channels, out_channels, kernel_size)
+        self.bias = nn.Parameter(torch.randn(bias_shape))
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = x.contiguous()
+        bias_flat = self.bias.reshape(-1).contiguous()
+        return custom_ops_lib.convtranspose2d_globalavgpool_biasadd_logsumexp_sum_multiply_custom(x, bias_flat)
+'''
+```

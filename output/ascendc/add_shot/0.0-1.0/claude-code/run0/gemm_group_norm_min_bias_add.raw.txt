@@ -1,0 +1,270 @@
+project_json_src='''
+[
+    {
+        "op": "GemmGroupNormMinBiasAddCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GemmGroupNormMinBiasAddCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, vecLength);
+  TILING_DATA_FIELD_DEF(uint32_t, totalRows);
+  TILING_DATA_FIELD_DEF(uint32_t, rowsPerCore);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GemmGroupNormMinBiasAddCustom, GemmGroupNormMinBiasAddCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "gemm_group_norm_min_bias_add_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    GemmGroupNormMinBiasAddCustomTilingData tiling;
+
+    uint32_t vecLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    uint32_t totalRows = context->GetInputShape(1)->GetOriginShape().GetShapeSize();
+
+    uint32_t blockDim = BLOCK_DIM;
+    if (totalRows < blockDim) {
+        blockDim = totalRows;
+    }
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+    uint32_t rowsPerCore = totalRows / blockDim;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_vecLength(vecLength);
+    tiling.set_totalRows(totalRows);
+    tiling.set_rowsPerCore(rowsPerCore);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* bias_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, bias_shape->GetDim(0));
+    y_shape->SetDim(1, x_shape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class GemmGroupNormMinBiasAddCustom : public OpDef {
+public:
+    explicit GemmGroupNormMinBiasAddCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(GemmGroupNormMinBiasAddCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelGemmGroupNormMinBiasAdd {
+public:
+    __aicore__ inline KernelGemmGroupNormMinBiasAdd() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR z,
+                                  uint32_t totalRows, uint32_t vecLength, uint32_t rowsPerCore)
+    {
+        this->vecLength = vecLength;
+        this->rowsPerCore = rowsPerCore;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t startRow = blockIdx * rowsPerCore;
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x, vecLength);
+        biasGm.SetGlobalBuffer((__gm__ DTYPE_BIAS *)bias + startRow, rowsPerCore);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + startRow * vecLength, rowsPerCore * vecLength);
+
+        pipe.InitBuffer(inQueueX, 1, vecLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(inQueueBias, 1, ((rowsPerCore * sizeof(DTYPE_BIAS) + 31) / 32) * 32);
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, vecLength * sizeof(DTYPE_Z));
+    }
+
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocalIn = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocalIn, xGm, this->vecLength);
+        inQueueX.EnQue(xLocalIn);
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+
+        AscendC::LocalTensor<DTYPE_BIAS> biasLocalIn = inQueueBias.AllocTensor<DTYPE_BIAS>();
+        AscendC::DataCopy(biasLocalIn, biasGm, this->rowsPerCore);
+        inQueueBias.EnQue(biasLocalIn);
+        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.DeQue<DTYPE_BIAS>();
+
+        for (uint32_t i = 0; i < this->rowsPerCore; i++) {
+            DTYPE_BIAS biasVal = biasLocal.GetValue(i);
+
+            AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+            AscendC::Adds(zLocal, xLocal, biasVal, this->vecLength);
+            outQueueZ.EnQue<DTYPE_Z>(zLocal);
+
+            AscendC::LocalTensor<DTYPE_Z> zOut = outQueueZ.DeQue<DTYPE_Z>();
+            AscendC::DataCopy(zGm[i * this->vecLength], zOut, this->vecLength);
+            outQueueZ.FreeTensor(zOut);
+        }
+
+        inQueueX.FreeTensor(xLocal);
+        inQueueBias.FreeTensor(biasLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueBias;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_BIAS> biasGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
+    uint32_t vecLength;
+    uint32_t rowsPerCore;
+};
+
+extern "C" __global__ __aicore__ void gemm_group_norm_min_bias_add_custom(
+    GM_ADDR x, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGemmGroupNormMinBiasAdd op;
+    op.Init(x, bias, z, tiling_data.totalRows, tiling_data.vecLength, tiling_data.rowsPerCore);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gemm_group_norm_min_bias_add_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias) {
+    int64_t rows = bias.size(0);
+    int64_t cols = x.size(0);
+    at::Tensor result = at::empty({rows, cols}, x.options());
+    EXEC_NPU_CMD(aclnnGemmGroupNormMinBiasAddCustom, x, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gemm_group_norm_min_bias_add_custom", &gemm_group_norm_min_bias_add_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_group_norm_min_bias_add_custom", &gemm_group_norm_min_bias_add_custom_impl_npu, "fused bias broadcast add");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_features, out_features, num_groups, bias_shape):
+        super(ModelNew, self).__init__()
+        self.gemm = nn.Linear(in_features, out_features)
+        self.group_norm = nn.GroupNorm(num_groups, out_features)
+        self.bias = nn.Parameter(torch.randn(bias_shape))
+        self.out_features = out_features
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        x = self.gemm(x)
+        x = self.group_norm(x)
+        x = torch.min(x, dim=1, keepdim=True)[0]
+        x_flat = x.contiguous().view(-1)
+        bias_flat = self.bias.contiguous().view(-1)
+        out = custom_ops_lib.gemm_group_norm_min_bias_add_custom(x_flat, bias_flat)
+        return out.view(1, self.out_features, batch_size, 1)
+'''

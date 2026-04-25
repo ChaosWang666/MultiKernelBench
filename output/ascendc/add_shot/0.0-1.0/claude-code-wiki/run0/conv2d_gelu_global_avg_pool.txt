@@ -62,8 +62,7 @@ BEGIN_TILING_DATA_DEF(Conv2dGeluGlobalAvgPoolCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, height);
   TILING_DATA_FIELD_DEF(uint32_t, width);
   TILING_DATA_FIELD_DEF(uint32_t, kSize);
-  TILING_DATA_FIELD_DEF(int32_t, outH);
-  TILING_DATA_FIELD_DEF(int32_t, outW);
+  TILING_DATA_FIELD_DEF(float, invHW);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv2dGeluGlobalAvgPoolCustom, Conv2dGeluGlobalAvgPoolCustomTilingData)
@@ -90,6 +89,10 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     uint32_t outCh = wShape.GetDim(0);
     uint32_t kSize = wShape.GetDim(2);
 
+    uint32_t outH = height - kSize + 1;
+    uint32_t outW = width - kSize + 1;
+    float invHW = 1.0f / static_cast<float>(static_cast<int32_t>(outH * outW));
+
     context->SetBlockDim(BLOCK_DIM);
     tiling.set_batch(batch);
     tiling.set_inCh(inCh);
@@ -97,8 +100,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     tiling.set_height(height);
     tiling.set_width(width);
     tiling.set_kSize(kSize);
-    tiling.set_outH((int32_t)(height - kSize + 1));
-    tiling.set_outW((int32_t)(width - kSize + 1));
+    tiling.set_invHW(invHW);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
@@ -176,8 +178,7 @@ public:
 
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR w, GM_ADDR b, GM_ADDR y,
         uint32_t batch, uint32_t inCh, uint32_t outCh,
-        uint32_t height, uint32_t width, uint32_t kSize,
-        int32_t outH, int32_t outW)
+        uint32_t height, uint32_t width, uint32_t kSize, float invHW)
     {
         this->batch = batch;
         this->inCh = inCh;
@@ -185,8 +186,9 @@ public:
         this->height = height;
         this->width = width;
         this->kSize = kSize;
-        this->outH = outH;
-        this->outW = outW;
+        this->outH = height - kSize + 1;
+        this->outW = width - kSize + 1;
+        this->invHW = invHW;
 
         uint32_t totalTasks = batch * outCh;
         uint32_t blockIdx = AscendC::GetBlockIdx();
@@ -209,7 +211,7 @@ public:
         uint32_t weightCount = inCh * kSize * kSize;
         uint32_t weightBytes = ((weightCount * sizeof(float) + 31) / 32) * 32;
         uint32_t inputBytes = kSize * inCh * width * sizeof(float);
-        int32_t outWAligned = (outW + 7) / 8 * 8;
+        uint32_t outWAligned = (outW + 7) / 8 * 8;
         uint32_t convBytes = outWAligned * sizeof(float);
         uint32_t outBufBytes = ((tpb * sizeof(float) + 31) / 32) * 32;
         if (outBufBytes < 32) outBufBytes = 32;
@@ -277,7 +279,7 @@ private:
 
         float totalSum = 0.0f;
 
-        for (int32_t h = 0; h < outH; h++) {
+        for (uint32_t h = 0; h < outH; h++) {
             AscendC::LocalTensor<float> inLocal = inputBuf.Get<float>();
             copyParams.blockCount = (uint16_t)inCh;
             copyParams.blockLen = kSize * width * sizeof(float);
@@ -323,16 +325,15 @@ private:
             totalSum += accLocal.GetValue(0);
         }
 
-        float spatialSize = (float)(outH * outW);
-        return totalSum / spatialSize;
+        return totalSum * invHW;
     }
 
     AscendC::TPipe pipe;
     AscendC::TBuf<AscendC::TPosition::VECCALC> weightBuf, inputBuf, convOutBuf, geluTmpBuf, reduceBuf, accBuf, biasBuf, outBuf;
     AscendC::GlobalTensor<float> xGm, wGm, bGm, yGm;
-    uint32_t batch, inCh, outCh, height, width, kSize;
-    int32_t outH, outW;
+    uint32_t batch, inCh, outCh, height, width, kSize, outH, outW;
     uint32_t startTask, endTask, myTaskCount, tasksPerBlock;
+    float invHW;
 };
 
 extern "C" __global__ __aicore__ void conv2d_gelu_global_avg_pool_custom(
@@ -343,8 +344,7 @@ extern "C" __global__ __aicore__ void conv2d_gelu_global_avg_pool_custom(
     KernelConv2dGeluGAP op;
     op.Init(x, weight, bias, y,
         tiling_data.batch, tiling_data.inCh, tiling_data.outCh,
-        tiling_data.height, tiling_data.width, tiling_data.kSize,
-        tiling_data.outH, tiling_data.outW);
+        tiling_data.height, tiling_data.width, tiling_data.kSize, tiling_data.invHW);
     op.Process();
 }
 """

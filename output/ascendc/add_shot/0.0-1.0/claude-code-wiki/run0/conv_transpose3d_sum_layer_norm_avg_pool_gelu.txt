@@ -13,21 +13,11 @@ project_json_src='''
                 "type": [
                     "float"
                 ]
-            },
-            {
-                "name": "y",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
             }
         ],
         "output_desc": [
             {
-                "name": "z",
+                "name": "y",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -58,13 +48,11 @@ host_operator_src="""
 #include "conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom_tiling.h"
 #include "register/op_def_registry.h"
 
-
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 4096;
+const uint32_t TILE_NUM = 128;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
-
     ConvTranspose3dSumLayerNormAvgPoolGeluCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
     context->SetBlockDim(BLOCK_DIM);
@@ -78,23 +66,21 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
-
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x1_shape = context->GetInputShape(0);
+    const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x1_shape;
+    *y_shape = *x_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-const auto inputDataType = context->GetInputDataType(0);
-context->SetOutputDataType(0, inputDataType);
-return ge::GRAPH_SUCCESS;
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
 }
 }
-
 
 namespace ops {
 class ConvTranspose3dSumLayerNormAvgPoolGeluCustom : public OpDef {
@@ -106,12 +92,7 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("y")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
@@ -122,7 +103,6 @@ public:
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
-
     }
 };
 
@@ -135,10 +115,10 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConvTranspose3dSumLayerNormAvgPoolGeluCustom {
+class KernelGelu {
 public:
-    __aicore__ inline KernelConvTranspose3dSumLayerNormAvgPoolGeluCustom() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t totalLength, uint32_t tileNum)
+    __aicore__ inline KernelGelu() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
@@ -146,10 +126,9 @@ public:
 
         xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(inQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
     }
     __aicore__ inline void Process()
     {
@@ -165,45 +144,53 @@ private:
     __aicore__ inline void CopyIn(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = inQueueY.AllocTensor<DTYPE_Y>();
         AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
-        AscendC::DataCopy(yLocal, yGm[progress * this->tileLength], this->tileLength);
         inQueueX.EnQue(xLocal);
-        inQueueY.EnQue(yLocal);
     }
     __aicore__ inline void Compute(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = inQueueY.DeQue<DTYPE_Y>();
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::Add(zLocal, xLocal, yLocal, this->tileLength);
-        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+
+        // GELU tanh approximation:
+        // y = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        AscendC::Mul(tmp, xLocal, xLocal, this->tileLength);
+        AscendC::Mul(tmp, tmp, xLocal, this->tileLength);
+        AscendC::Muls(tmp, tmp, (float)0.044715f, this->tileLength);
+        AscendC::Add(tmp, tmp, xLocal, this->tileLength);
+        AscendC::Muls(tmp, tmp, (float)0.7978845608028654f, this->tileLength);
+        AscendC::Tanh(tmp, tmp, this->tileLength);
+        AscendC::Adds(tmp, tmp, (float)1.0f, this->tileLength);
+        AscendC::Muls(tmp, tmp, (float)0.5f, this->tileLength);
+        AscendC::Mul(yLocal, xLocal, tmp, this->tileLength);
+
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
-        inQueueY.FreeTensor(yLocal);
     }
     __aicore__ inline void CopyOut(int32_t progress)
     {
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
-        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
-        outQueueZ.FreeTensor(zLocal);
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
     AscendC::GlobalTensor<DTYPE_X> xGm;
     AscendC::GlobalTensor<DTYPE_Y> yGm;
-    AscendC::GlobalTensor<DTYPE_Z> zGm;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
 };
 
-extern "C" __global__ __aicore__ void conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConvTranspose3dSumLayerNormAvgPoolGeluCustom op;
-    op.Init(x, y, z, tiling_data.totalLength, tiling_data.tileNum);
+    KernelGelu op;
+    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum);
     op.Process();
 }
 """
@@ -214,9 +201,10 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom_impl_npu(const at::Tensor& self, const at::Tensor& other) {
-    at::Tensor result = at::empty_like(self);
-    EXEC_NPU_CMD(aclnnConvTranspose3dSumLayerNormAvgPoolGeluCustom, self, other, result);
+at::Tensor conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom_impl_npu(const at::Tensor& self) {
+    at::Tensor contiguous_self = self.contiguous();
+    at::Tensor result = at::empty_like(contiguous_self);
+    EXEC_NPU_CMD(aclnnConvTranspose3dSumLayerNormAvgPoolGeluCustom, contiguous_self, result);
     return result;
 }
 
@@ -225,14 +213,14 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom", &conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom_impl_npu, "fused add kernel for ConvTranspose3d+Sum+LayerNorm+AvgPool+GELU pipeline");
+    m.def("conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom", &conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom_impl_npu, "Fused tail GELU custom kernel");
 }
 """
 
 model_src='''
 import torch
-import torch_npu
 import torch.nn as nn
+import torch_npu
 import custom_ops_lib
 
 class ModelNew(nn.Module):
@@ -242,14 +230,13 @@ class ModelNew(nn.Module):
         self.sum_weight = nn.Parameter(torch.tensor(sum_weight))
         self.norm = nn.LayerNorm(norm_shape)
         self.avg_pool = nn.AvgPool3d(kernel_size=pool_kernel_size)
-        self.gelu = nn.GELU()
 
     def forward(self, x):
         x = self.conv_transpose(x)
-        y = self.sum_weight.expand_as(x).contiguous()
-        x = custom_ops_lib.conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom(x, y)
+        x = x + self.sum_weight
         x = self.norm(x)
         x = self.avg_pool(x)
-        x = self.gelu(x)
+        x = x.contiguous()
+        x = custom_ops_lib.conv_transpose3d_sum_layer_norm_avg_pool_gelu_custom(x)
         return x
 '''

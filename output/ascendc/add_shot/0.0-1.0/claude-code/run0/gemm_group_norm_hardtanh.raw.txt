@@ -1,0 +1,324 @@
+project_json_src='''
+[
+    {
+        "op": "GemmGroupNormHardtanhCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GemmGroupNormHardtanhCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, numFeatures);
+  TILING_DATA_FIELD_DEF(uint32_t, numGroups);
+  TILING_DATA_FIELD_DEF(uint32_t, groupSize);
+  TILING_DATA_FIELD_DEF(uint32_t, rowsPerBlock);
+  TILING_DATA_FIELD_DEF(float, hardtanhMin);
+  TILING_DATA_FIELD_DEF(float, hardtanhMax);
+  TILING_DATA_FIELD_DEF(float, eps);
+  TILING_DATA_FIELD_DEF(float, invGroupSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GemmGroupNormHardtanhCustom, GemmGroupNormHardtanhCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "gemm_group_norm_hardtanh_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t NUM_GROUPS = 16;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    GemmGroupNormHardtanhCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t numFeatures = xShape.GetDim(1);
+    uint32_t numGroups = NUM_GROUPS;
+    uint32_t groupSize = numFeatures / numGroups;
+    uint32_t rowsPerBlock = batchSize / BLOCK_DIM;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_numFeatures(numFeatures);
+    tiling.set_numGroups(numGroups);
+    tiling.set_groupSize(groupSize);
+    tiling.set_rowsPerBlock(rowsPerBlock);
+    tiling.set_hardtanhMin(-2.0f);
+    tiling.set_hardtanhMax(2.0f);
+    tiling.set_eps(1e-5f);
+    tiling.set_invGroupSize(1.0f / static_cast<float>(groupSize));
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class GemmGroupNormHardtanhCustom : public OpDef {
+public:
+    explicit GemmGroupNormHardtanhCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(GemmGroupNormHardtanhCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelGemmGroupNormHardtanh {
+public:
+    __aicore__ inline KernelGemmGroupNormHardtanh() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t numFeatures, uint32_t numGroups,
+                                 uint32_t groupSize, uint32_t rowsPerBlock,
+                                 float hardtanhMin, float hardtanhMax, float eps, float invGroupSize)
+    {
+        this->batchSize = batchSize;
+        this->numFeatures = numFeatures;
+        this->numGroups = numGroups;
+        this->groupSize = groupSize;
+        this->rowsPerBlock = rowsPerBlock;
+        this->hardtanhMin = hardtanhMin;
+        this->hardtanhMax = hardtanhMax;
+        this->eps = eps;
+        this->invGroupSize = invGroupSize;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t rowOffset = blockIdx * rowsPerBlock;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x + rowOffset * numFeatures, rowsPerBlock * numFeatures);
+        yGm.SetGlobalBuffer((__gm__ float*)y + rowOffset * numFeatures, rowsPerBlock * numFeatures);
+        weightGm.SetGlobalBuffer((__gm__ float*)weight, numFeatures);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias, numFeatures);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, groupSize * sizeof(float));
+        pipe.InitBuffer(inQueueW, 1, groupSize * sizeof(float));
+        pipe.InitBuffer(inQueueB, 1, groupSize * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, groupSize * sizeof(float));
+        pipe.InitBuffer(tmpBuf, groupSize * sizeof(float));
+        pipe.InitBuffer(workBuf, groupSize * sizeof(float));
+        pipe.InitBuffer(sumBuf, 32);
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t row = 0; row < rowsPerBlock; row++) {
+            for (uint32_t g = 0; g < numGroups; g++) {
+                ProcessGroup(row, g);
+            }
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessGroup(uint32_t row, uint32_t g)
+    {
+        uint32_t offset = row * numFeatures + g * groupSize;
+        uint32_t wOffset = g * groupSize;
+
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[offset], groupSize);
+        inQueueX.EnQue(xLocal);
+        xLocal = inQueueX.DeQue<float>();
+
+        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+        AscendC::LocalTensor<float> work = workBuf.Get<float>();
+        AscendC::LocalTensor<float> sumLocal = sumBuf.Get<float>();
+
+        AscendC::ReduceSum<float>(sumLocal, xLocal, work, groupSize);
+        float sumVal = sumLocal.GetValue(0);
+        float meanVal = sumVal * invGroupSize;
+        float negMean = -meanVal;
+
+        AscendC::Adds<float>(tmp, xLocal, negMean, groupSize);
+        AscendC::Mul<float>(work, tmp, tmp, groupSize);
+        AscendC::ReduceSum<float>(sumLocal, work, tmp, groupSize);
+        float varSum = sumLocal.GetValue(0);
+        float varVal = varSum * invGroupSize;
+        float rstd = 1.0f / sqrt(varVal + eps);
+
+        AscendC::LocalTensor<float> wLocal = inQueueW.AllocTensor<float>();
+        AscendC::DataCopy(wLocal, weightGm[wOffset], groupSize);
+        inQueueW.EnQue(wLocal);
+        wLocal = inQueueW.DeQue<float>();
+
+        AscendC::LocalTensor<float> bLocal = inQueueB.AllocTensor<float>();
+        AscendC::DataCopy(bLocal, biasGm[wOffset], groupSize);
+        inQueueB.EnQue(bLocal);
+        bLocal = inQueueB.DeQue<float>();
+
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+        AscendC::Adds<float>(yLocal, xLocal, negMean, groupSize);
+        AscendC::Muls<float>(yLocal, yLocal, rstd, groupSize);
+        AscendC::Mul<float>(yLocal, yLocal, wLocal, groupSize);
+        AscendC::Add<float>(yLocal, yLocal, bLocal, groupSize);
+        AscendC::Maxs<float>(yLocal, yLocal, hardtanhMin, groupSize);
+        AscendC::Mins<float>(yLocal, yLocal, hardtanhMax, groupSize);
+
+        outQueueY.EnQue<float>(yLocal);
+        yLocal = outQueueY.DeQue<float>();
+        AscendC::DataCopy(yGm[offset], yLocal, groupSize);
+        outQueueY.FreeTensor(yLocal);
+
+        inQueueX.FreeTensor(xLocal);
+        inQueueW.FreeTensor(wLocal);
+        inQueueB.FreeTensor(bLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueW;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueB;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> workBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> sumBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<float> weightGm;
+    AscendC::GlobalTensor<float> biasGm;
+    uint32_t batchSize;
+    uint32_t numFeatures;
+    uint32_t numGroups;
+    uint32_t groupSize;
+    uint32_t rowsPerBlock;
+    float hardtanhMin;
+    float hardtanhMax;
+    float eps;
+    float invGroupSize;
+};
+
+extern "C" __global__ __aicore__ void gemm_group_norm_hardtanh_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGemmGroupNormHardtanh op;
+    op.Init(x, weight, bias, y,
+            tiling_data.batchSize, tiling_data.numFeatures, tiling_data.numGroups,
+            tiling_data.groupSize, tiling_data.rowsPerBlock,
+            tiling_data.hardtanhMin, tiling_data.hardtanhMax, tiling_data.eps, tiling_data.invGroupSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gemm_group_norm_hardtanh_custom_impl_npu(const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnGemmGroupNormHardtanhCustom, x, weight, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gemm_group_norm_hardtanh_custom", &gemm_group_norm_hardtanh_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_group_norm_hardtanh_custom", &gemm_group_norm_hardtanh_custom_impl_npu, "fused group norm + hardtanh after GEMM");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_features, out_features, num_groups, hardtanh_min, hardtanh_max):
+        super(ModelNew, self).__init__()
+        self.gemm = nn.Linear(in_features, out_features)
+        self.group_norm = nn.GroupNorm(num_groups, out_features)
+        self.hardtanh_min = hardtanh_min
+        self.hardtanh_max = hardtanh_max
+
+    def forward(self, x):
+        x = self.gemm(x)
+        x = custom_ops_lib.gemm_group_norm_hardtanh_custom(x.contiguous(), self.group_norm.weight.contiguous(), self.group_norm.bias.contiguous())
+        return x
+'''

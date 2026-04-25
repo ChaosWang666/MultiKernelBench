@@ -1,0 +1,315 @@
+project_json_src='''
+[
+    {
+        "op": "MatmulSigmoidSumCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulSigmoidSumCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inputSize);
+  TILING_DATA_FIELD_DEF(uint32_t, hiddenSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulSigmoidSumCustom, MatmulSigmoidSumCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_sigmoid_sum_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_LENGTH = 2048;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulSigmoidSumCustomTilingData tiling;
+    const gert::Shape* xShape = context->GetInputShape(0)->GetOriginShape();
+    const gert::Shape* wShape = context->GetInputShape(1)->GetOriginShape();
+    uint32_t batchSize = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    uint32_t inputSize = context->GetInputShape(0)->GetOriginShape().GetDim(1);
+    uint32_t hiddenSize = context->GetInputShape(1)->GetOriginShape().GetDim(0);
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_inputSize(inputSize);
+    tiling.set_hiddenSize(hiddenSize);
+    tiling.set_tileLength(TILE_LENGTH);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, 1);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class MatmulSigmoidSumCustom : public OpDef {
+public:
+    explicit MatmulSigmoidSumCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(MatmulSigmoidSumCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelMatmulSigmoidSum {
+public:
+    __aicore__ inline KernelMatmulSigmoidSum() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+                                uint32_t batchSize, uint32_t inputSize, uint32_t hiddenSize, uint32_t tileLength)
+    {
+        this->batchSize = batchSize;
+        this->inputSize = inputSize;
+        this->hiddenSize = hiddenSize;
+        this->tileLength = tileLength;
+
+        int32_t blockNum = static_cast<int32_t>(AscendC::GetBlockNum());
+        int32_t blockIdx = static_cast<int32_t>(AscendC::GetBlockIdx());
+        int32_t bs = static_cast<int32_t>(batchSize);
+        this->rowsPerCore = (bs + blockNum - 1) / blockNum;
+        this->startRow = blockIdx * this->rowsPerCore;
+        this->endRow = this->startRow + this->rowsPerCore;
+        if (this->endRow > bs) {
+            this->endRow = bs;
+        }
+        if (this->startRow > bs) {
+            this->startRow = bs;
+        }
+
+        this->tileNum = static_cast<int32_t>(inputSize) / static_cast<int32_t>(tileLength);
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inputSize);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, hiddenSize * inputSize);
+        bGm.SetGlobalBuffer((__gm__ float *)bias, hiddenSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueW, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(accBuf, 64 * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        int32_t hidden = static_cast<int32_t>(this->hiddenSize);
+        int32_t input = static_cast<int32_t>(this->inputSize);
+
+        for (int32_t row = this->startRow; row < this->endRow; row++) {
+            float rowSum = 0.0f;
+            for (int32_t h = 0; h < hidden; h++) {
+                float biasVal = bGm.GetValue(h);
+                float dot = 0.0f;
+                for (int32_t t = 0; t < this->tileNum; t++) {
+                    AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+                    AscendC::LocalTensor<float> wLocal = inQueueW.AllocTensor<float>();
+                    AscendC::DataCopy(xLocal, xGm[row * input + t * this->tileLength], this->tileLength);
+                    AscendC::DataCopy(wLocal, wGm[h * input + t * this->tileLength], this->tileLength);
+                    inQueueX.EnQue(xLocal);
+                    inQueueW.EnQue(wLocal);
+
+                    AscendC::LocalTensor<float> xIn = inQueueX.DeQue<float>();
+                    AscendC::LocalTensor<float> wIn = inQueueW.DeQue<float>();
+                    AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+                    AscendC::Mul(tmp, xIn, wIn, this->tileLength);
+
+                    AscendC::LocalTensor<float> acc = accBuf.Get<float>();
+                    AscendC::ReduceSum(acc, tmp, tmp, this->tileLength);
+                    float partial = acc.GetValue(0);
+                    dot += partial;
+
+                    inQueueX.FreeTensor(xIn);
+                    inQueueW.FreeTensor(wIn);
+                }
+                float preSig = dot + biasVal;
+                float sigv = 1.0f / (1.0f + AscendC::ScalarCast<float, float, AscendC::RoundMode::CAST_NONE>(
+                    static_cast<float>(AscendC::ScalarCast<float, float, AscendC::RoundMode::CAST_NONE>(
+                        1.0f / (1.0f + 0.0f)))));
+                // compute sigmoid in scalar
+                float negv = -preSig;
+                float expv = 1.0f;
+                // scalar exp via Taylor-free: use AscendC scalar exp if available, otherwise rely on math
+                expv = expf(negv);
+                sigv = 1.0f / (1.0f + expv);
+                rowSum += sigv;
+            }
+            if (AscendC::GetBlockIdx() < AscendC::GetBlockNum()) {
+                yGm.SetValue(row, rowSum);
+            }
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueW;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> accBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> wGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t inputSize;
+    uint32_t hiddenSize;
+    uint32_t tileLength;
+    int32_t rowsPerCore;
+    int32_t startRow;
+    int32_t endRow;
+    int32_t tileNum;
+};
+
+extern "C" __global__ __aicore__ void matmul_sigmoid_sum_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMatmulSigmoidSum op;
+    op.Init(x, weight, bias, y, tiling_data.batchSize, tiling_data.inputSize, tiling_data.hiddenSize, tiling_data.tileLength);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_sigmoid_sum_custom_impl_npu(const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias) {
+    auto sizes = x.sizes();
+    int64_t batch = sizes[0];
+    at::Tensor result = at::empty({batch, 1}, x.options());
+    EXEC_NPU_CMD(aclnnMatmulSigmoidSumCustom, x, weight, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_sigmoid_sum_custom", &matmul_sigmoid_sum_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_sigmoid_sum_custom", &matmul_sigmoid_sum_custom_impl_npu, "matmul + sigmoid + sum");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super(ModelNew, self).__init__()
+        self.linear = nn.Linear(input_size, hidden_size)
+
+    def forward(self, x):
+        weight = self.linear.weight.contiguous()
+        bias = self.linear.bias.contiguous()
+        x = x.contiguous()
+        return custom_ops_lib.matmul_sigmoid_sum_custom(x, weight, bias)
+'''

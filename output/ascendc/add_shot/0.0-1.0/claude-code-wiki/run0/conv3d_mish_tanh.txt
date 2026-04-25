@@ -1,5 +1,3 @@
-I have enough context. Generating the output now - I'll fuse Mish+Tanh into a custom AscendC kernel post-Conv3d, using Exp/Ln/Tanh/Mul primitives.
-
 project_json_src='''
 [
     {

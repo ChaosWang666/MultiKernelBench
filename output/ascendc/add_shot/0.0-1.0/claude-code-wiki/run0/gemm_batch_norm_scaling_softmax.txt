@@ -36,8 +36,9 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(GemmBatchNormScalingSoftmaxCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
-  TILING_DATA_FIELD_DEF(uint32_t, dimSize);
+  TILING_DATA_FIELD_DEF(uint32_t, totalRows);
+  TILING_DATA_FIELD_DEF(uint32_t, rowLength);
+  TILING_DATA_FIELD_DEF(uint32_t, rowsPerCore);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(GemmBatchNormScalingSoftmaxCustom, GemmBatchNormScalingSoftmaxCustomTilingData)
@@ -54,14 +55,19 @@ const uint32_t BLOCK_DIM = 32;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     GemmBatchNormScalingSoftmaxCustomTilingData tiling;
-    const gert::StorageShape* xShape = context->GetInputShape(0);
-    uint32_t batchSize = xShape->GetStorageShape().GetDim(0);
-    uint32_t dimSize = xShape->GetStorageShape().GetDim(1);
-
+    const gert::Shape shape = context->GetInputShape(0)->GetStorageShape();
+    uint32_t totalRows = static_cast<uint32_t>(shape.GetDim(0));
+    uint32_t rowLength = static_cast<uint32_t>(shape.GetDim(1));
+    uint32_t rowsPerCore = totalRows / BLOCK_DIM;
+    if (rowsPerCore == 0) {
+        rowsPerCore = 1;
+    }
     context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_dimSize(dimSize);
-    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    tiling.set_totalRows(totalRows);
+    tiling.set_rowLength(rowLength);
+    tiling.set_rowsPerCore(rowsPerCore);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
+                        context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
     currentWorkspace[0] = 0;
@@ -73,9 +79,9 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x1_shape = context->GetInputShape(0);
+    const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x1_shape;
+    *y_shape = *x_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -118,82 +124,82 @@ OP_ADD(GemmBatchNormScalingSoftmaxCustom);
 kernel_src="""
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t BUFFER_NUM = 1;
 
-class KernelGemmBatchNormScalingSoftmax {
+class KernelGemmBNScaleSoftmax {
 public:
-    __aicore__ inline KernelGemmBatchNormScalingSoftmax() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t dimSize)
+    __aicore__ inline KernelGemmBNScaleSoftmax() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                 uint32_t rowLength, uint32_t rowsPerCore)
     {
-        this->batchSize = batchSize;
-        this->dimSize = dimSize;
+        this->rowLength = rowLength;
+        this->rowsPerCore = rowsPerCore;
 
-        uint32_t blockIdx = AscendC::GetBlockIdx();
-        uint32_t blockNum = AscendC::GetBlockNum();
+        uint64_t perCore = static_cast<uint64_t>(rowsPerCore) * static_cast<uint64_t>(rowLength);
+        uint64_t offset = static_cast<uint64_t>(AscendC::GetBlockIdx()) * perCore;
 
-        uint32_t rowsPerBlock = batchSize / blockNum;
-        uint32_t remainder = batchSize % blockNum;
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + offset, perCore);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + offset, perCore);
 
-        if (blockIdx < remainder) {
-            this->startRow = blockIdx * (rowsPerBlock + 1);
-            this->endRow = this->startRow + rowsPerBlock + 1;
-        } else {
-            this->startRow = remainder * (rowsPerBlock + 1) + (blockIdx - remainder) * rowsPerBlock;
-            this->endRow = this->startRow + rowsPerBlock;
-        }
-
-        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * dimSize);
-        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * dimSize);
-
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, dimSize * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, dimSize * sizeof(float));
-        pipe.InitBuffer(reduceBuf, 64 * sizeof(float));
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, rowLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, rowLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(workBuf, rowLength * sizeof(float));
+        pipe.InitBuffer(scalarBuf, 32);
     }
 
     __aicore__ inline void Process()
     {
-        for (uint32_t row = this->startRow; row < this->endRow; row++) {
-            CopyIn(row);
-            Compute();
-            CopyOut(row);
+        for (uint32_t r = 0; r < this->rowsPerCore; r++) {
+            CopyIn(r);
+            Compute(r);
+            CopyOut(r);
         }
     }
 
 private:
-    __aicore__ inline void CopyIn(uint32_t row)
+    __aicore__ inline void CopyIn(uint32_t r)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::DataCopy(xLocal, xGm[row * this->dimSize], this->dimSize);
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocal, xGm[r * this->rowLength], this->rowLength);
         inQueueX.EnQue(xLocal);
     }
 
-    __aicore__ inline void Compute()
+    __aicore__ inline void Compute(uint32_t r)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-        AscendC::LocalTensor<float> reduceTmp = reduceBuf.Get<float>();
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<float> work = workBuf.Get<float>();
+        AscendC::LocalTensor<float> scalar = scalarBuf.Get<float>();
 
-        AscendC::ReduceMax<float>(reduceTmp, xLocal, xLocal, this->dimSize, false);
-        float maxVal = reduceTmp.GetValue(0);
+        int32_t count = static_cast<int32_t>(this->rowLength);
 
-        AscendC::Adds(yLocal, xLocal, -maxVal, this->dimSize);
+        AscendC::ReduceMax<float>(scalar, xLocal, work, count, false);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        float maxVal = scalar.GetValue(0);
 
-        AscendC::Exp(yLocal, yLocal, this->dimSize);
+        AscendC::Adds(yLocal, xLocal, -maxVal, count);
+        AscendC::PipeBarrier<PIPE_V>();
 
-        AscendC::ReduceSum<float>(reduceTmp, yLocal, yLocal, this->dimSize);
-        float sumVal = reduceTmp.GetValue(0);
+        AscendC::Exp(yLocal, yLocal, count);
+        AscendC::PipeBarrier<PIPE_V>();
 
+        AscendC::ReduceSum<float>(scalar, yLocal, work, count);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID1);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID1);
+        float sumVal = scalar.GetValue(0);
         float invSum = 1.0f / sumVal;
-        AscendC::Muls(yLocal, yLocal, invSum, this->dimSize);
 
-        outQueueY.EnQue<float>(yLocal);
+        AscendC::Muls(yLocal, yLocal, invSum, count);
+
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
     }
 
-    __aicore__ inline void CopyOut(uint32_t row)
+    __aicore__ inline void CopyOut(uint32_t r)
     {
-        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
-        AscendC::DataCopy(yGm[row * this->dimSize], yLocal, this->dimSize);
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[r * this->rowLength], yLocal, this->rowLength);
         outQueueY.FreeTensor(yLocal);
     }
 
@@ -201,19 +207,20 @@ private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
-    uint32_t batchSize;
-    uint32_t dimSize;
-    uint32_t startRow;
-    uint32_t endRow;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> workBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> scalarBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    uint32_t rowLength;
+    uint32_t rowsPerCore;
 };
 
-extern "C" __global__ __aicore__ void gemm_batch_norm_scaling_softmax_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void gemm_batch_norm_scaling_softmax_custom(
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelGemmBatchNormScalingSoftmax op;
-    op.Init(x, y, tiling_data.batchSize, tiling_data.dimSize);
+    KernelGemmBNScaleSoftmax op;
+    op.Init(x, y, tiling_data.rowLength, tiling_data.rowsPerCore);
     op.Process();
 }
 """
@@ -224,9 +231,9 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor gemm_batch_norm_scaling_softmax_custom_impl_npu(const at::Tensor& self) {
-    at::Tensor result = at::empty_like(self);
-    EXEC_NPU_CMD(aclnnGemmBatchNormScalingSoftmaxCustom, self, result);
+at::Tensor gemm_batch_norm_scaling_softmax_custom_impl_npu(const at::Tensor& x) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnGemmBatchNormScalingSoftmaxCustom, x, result);
     return result;
 }
 
@@ -235,7 +242,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("gemm_batch_norm_scaling_softmax_custom", &gemm_batch_norm_scaling_softmax_custom_impl_npu, "gemm+bn+scale+softmax custom softmax tail");
+    m.def("gemm_batch_norm_scaling_softmax_custom", &gemm_batch_norm_scaling_softmax_custom_impl_npu, "softmax(scale * bn(gemm(x)), dim=1)");
 }
 """
 
@@ -244,6 +251,7 @@ import torch
 import torch.nn as nn
 import torch_npu
 import custom_ops_lib
+
 
 class ModelNew(nn.Module):
     def __init__(self, in_features, out_features, bn_eps=1e-5, bn_momentum=0.1, scale_shape=(1,)):

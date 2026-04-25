@@ -1,26 +1,3 @@
-```python
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-
-class Model(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, scaling_factor, bias_shape, pool_kernel_size):
-        super(Model, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
-        self.scaling_factor = scaling_factor
-        self.bias = nn.Parameter(torch.randn(bias_shape))
-        self.max_pool = nn.MaxPool2d(pool_kernel_size)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = torch.tanh(x)
-        x = x * self.scaling_factor
-        x = x + self.bias
-        x = self.max_pool(x)
-        return x
-
-
 project_json_src='''
 [
     {
@@ -30,34 +7,34 @@ project_json_src='''
             {
                 "name": "x",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             },
             {
-                "name": "w",
+                "name": "bias",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
-            },
-            {
-                "name": "cb",
-                "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
-            },
-            {
-                "name": "b",
-                "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             }
         ],
         "output_desc": [
             {
-                "name": "y",
+                "name": "z",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             }
         ],
         "attr": [
@@ -67,37 +44,7 @@ project_json_src='''
                 "type": "float"
             },
             {
-                "name": "pool_size",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "batch",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "in_channels",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "out_channels",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "height",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "width",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "ksize",
+                "name": "pool_k",
                 "param_type": "required",
                 "type": "int"
             }
@@ -111,17 +58,13 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv2dTanhScalingBiasAddMaxCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, batch);
-  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
-  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
-  TILING_DATA_FIELD_DEF(uint32_t, height);
-  TILING_DATA_FIELD_DEF(uint32_t, width);
-  TILING_DATA_FIELD_DEF(uint32_t, ksize);
-  TILING_DATA_FIELD_DEF(uint32_t, poolSize);
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, inH);
+  TILING_DATA_FIELD_DEF(uint32_t, inW);
   TILING_DATA_FIELD_DEF(uint32_t, outH);
   TILING_DATA_FIELD_DEF(uint32_t, outW);
-  TILING_DATA_FIELD_DEF(uint32_t, pooledH);
-  TILING_DATA_FIELD_DEF(uint32_t, pooledW);
+  TILING_DATA_FIELD_DEF(uint32_t, poolK);
   TILING_DATA_FIELD_DEF(float, scalingFactor);
 END_TILING_DATA_DEF;
 
@@ -139,34 +82,31 @@ const uint32_t BLOCK_DIM = 32;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv2dTanhScalingBiasAddMaxCustomTilingData tiling;
-    auto attrs = context->GetAttrs();
-    const float* scaling_factor = attrs->GetAttrPointer<float>(0);
-    const int* pool_size = attrs->GetAttrPointer<int>(1);
-    const int* batch = attrs->GetAttrPointer<int>(2);
-    const int* in_channels = attrs->GetAttrPointer<int>(3);
-    const int* out_channels = attrs->GetAttrPointer<int>(4);
-    const int* height = attrs->GetAttrPointer<int>(5);
-    const int* width = attrs->GetAttrPointer<int>(6);
-    const int* ksize = attrs->GetAttrPointer<int>(7);
 
-    uint32_t outH = (*height) - (*ksize) + 1;
-    uint32_t outW = (*width) - (*ksize) + 1;
-    uint32_t pooledH = outH / (*pool_size);
-    uint32_t pooledW = outW / (*pool_size);
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = static_cast<uint32_t>(xShape.GetDim(0));
+    uint32_t channels = static_cast<uint32_t>(xShape.GetDim(1));
+    uint32_t inH = static_cast<uint32_t>(xShape.GetDim(2));
+    uint32_t inW = static_cast<uint32_t>(xShape.GetDim(3));
+
+    auto attrs = context->GetAttrs();
+    const float* scalePtr = attrs->GetAttrPointer<float>(0);
+    const int64_t* poolKPtr = attrs->GetAttrPointer<int64_t>(1);
+    float scalingFactor = *scalePtr;
+    uint32_t poolK = static_cast<uint32_t>(*poolKPtr);
+
+    uint32_t outH = inH / poolK;
+    uint32_t outW = inW / poolK;
 
     context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batch(*batch);
-    tiling.set_inChannels(*in_channels);
-    tiling.set_outChannels(*out_channels);
-    tiling.set_height(*height);
-    tiling.set_width(*width);
-    tiling.set_ksize(*ksize);
-    tiling.set_poolSize(*pool_size);
+    tiling.set_batchSize(batchSize);
+    tiling.set_channels(channels);
+    tiling.set_inH(inH);
+    tiling.set_inW(inW);
     tiling.set_outH(outH);
     tiling.set_outW(outW);
-    tiling.set_pooledH(pooledH);
-    tiling.set_pooledW(pooledW);
-    tiling.set_scalingFactor(*scaling_factor);
+    tiling.set_poolK(poolK);
+    tiling.set_scalingFactor(scalingFactor);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
@@ -182,22 +122,16 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    auto attrs = context->GetAttrs();
-    const int* pool_size = attrs->GetAttrPointer<int>(1);
-    const int* out_channels = attrs->GetAttrPointer<int>(4);
-    const int* ksize = attrs->GetAttrPointer<int>(7);
 
-    int64_t N = x_shape->GetDim(0);
-    int64_t H = x_shape->GetDim(2);
-    int64_t W = x_shape->GetDim(3);
-    int64_t outH = (H - (*ksize) + 1) / (*pool_size);
-    int64_t outW = (W - (*ksize) + 1) / (*pool_size);
+    auto attrs = context->GetAttrs();
+    const int64_t* poolKPtr = attrs->GetAttrPointer<int64_t>(1);
+    int64_t poolK = *poolKPtr;
 
     y_shape->SetDimNum(4);
-    y_shape->SetDim(0, N);
-    y_shape->SetDim(1, *out_channels);
-    y_shape->SetDim(2, outH);
-    y_shape->SetDim(3, outW);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, x_shape->GetDim(1));
+    y_shape->SetDim(2, x_shape->GetDim(2) / poolK);
+    y_shape->SetDim(3, x_shape->GetDim(3) / poolK);
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -215,27 +149,27 @@ public:
     explicit Conv2dTanhScalingBiasAddMaxCustom(const char* name) : OpDef(name)
     {
         this->Input("x")
-            .ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("w")
-            .ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("cb")
-            .ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("b")
-            .ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("y")
-            .ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
         this->Attr("scaling_factor").AttrType(REQUIRED).Float();
-        this->Attr("pool_size").AttrType(REQUIRED).Int();
-        this->Attr("batch").AttrType(REQUIRED).Int();
-        this->Attr("in_channels").AttrType(REQUIRED).Int();
-        this->Attr("out_channels").AttrType(REQUIRED).Int();
-        this->Attr("height").AttrType(REQUIRED).Int();
-        this->Attr("width").AttrType(REQUIRED).Int();
-        this->Attr("ksize").AttrType(REQUIRED).Int();
+        this->Attr("pool_k").AttrType(REQUIRED).Int();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
-        this->AICore().SetTiling(optiling::TilingFunc);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
     }
 };
@@ -247,126 +181,159 @@ OP_ADD(Conv2dTanhScalingBiasAddMaxCustom);
 kernel_src="""
 #include "kernel_operator.h"
 
-class KernelConvTanhScalingBiasAddMax {
+class KernelConv2dTanhScalingBiasAddMax {
 public:
-    __aicore__ inline KernelConvTanhScalingBiasAddMax() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR w, GM_ADDR cb, GM_ADDR b, GM_ADDR y,
-                                 uint32_t batch, uint32_t inC, uint32_t outC,
-                                 uint32_t H, uint32_t W, uint32_t K,
-                                 uint32_t P, uint32_t oH, uint32_t oW,
-                                 uint32_t pH, uint32_t pW, float scale)
+    __aicore__ inline KernelConv2dTanhScalingBiasAddMax() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR z,
+                                 uint32_t batchSize, uint32_t channels,
+                                 uint32_t inH, uint32_t inW,
+                                 uint32_t outH, uint32_t outW,
+                                 uint32_t poolK, float scalingFactor)
     {
-        this->batch = batch;
-        this->inC = inC;
-        this->outC = outC;
-        this->H = H; this->W = W; this->K = K;
-        this->P = P;
-        this->oH = oH; this->oW = oW;
-        this->pH = pH; this->pW = pW;
-        this->scale = scale;
+        this->batchSize = batchSize;
+        this->channels = channels;
+        this->inH = inH;
+        this->inW = inW;
+        this->outH = outH;
+        this->outW = outW;
+        this->poolK = poolK;
+        this->scalingFactor = scalingFactor;
+        this->tileSize = poolK * inW;
 
-        uint64_t xSize = (uint64_t)batch * inC * H * W;
-        uint64_t wSize = (uint64_t)outC * inC * K * K;
-        uint64_t ySize = (uint64_t)batch * outC * pH * pW;
+        uint32_t totalNC = batchSize * channels;
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->ncPerBlock = totalNC / blockNum;
+        this->ncStart = blockIdx * this->ncPerBlock;
 
-        xGm.SetGlobalBuffer((__gm__ float*)x, xSize);
-        wGm.SetGlobalBuffer((__gm__ float*)w, wSize);
-        cbGm.SetGlobalBuffer((__gm__ float*)cb, outC);
-        bGm.SetGlobalBuffer((__gm__ float*)b, outC);
-        yGm.SetGlobalBuffer((__gm__ float*)y, ySize);
+        uint64_t xTotalSize = (uint64_t)totalNC * inH * inW;
+        uint64_t zTotalSize = (uint64_t)totalNC * outH * outW;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, xTotalSize);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, channels);
+        zGm.SetGlobalBuffer((__gm__ float *)z, zTotalSize);
+
+        uint32_t tileBufBytes = ((this->tileSize * (uint32_t)sizeof(float) + 31u) / 32u) * 32u;
+        pipe.InitBuffer(xBuf, tileBufBytes);
+
+        uint32_t outAccumBytes = ((outH * outW * (uint32_t)sizeof(float) + 31u) / 32u) * 32u;
+        pipe.InitBuffer(outAccumBuf, outAccumBytes);
     }
 
     __aicore__ inline void Process()
     {
-        uint32_t blockIdx = AscendC::GetBlockIdx();
-        uint32_t blockNum = AscendC::GetBlockNum();
-        uint32_t total = this->batch * this->outC;
+        AscendC::LocalTensor<float> xLocal = xBuf.Get<float>();
+        AscendC::LocalTensor<float> outAccum = outAccumBuf.Get<float>();
 
-        for (uint32_t idx = blockIdx; idx < total; idx += blockNum) {
-            uint32_t n = idx / this->outC;
-            uint32_t oc = idx % this->outC;
-            ProcessOne(n, oc);
-        }
-    }
+        AscendC::DataCopyExtParams copyInParams;
+        copyInParams.blockCount = 1;
+        copyInParams.blockLen = this->tileSize * (uint32_t)sizeof(float);
+        copyInParams.srcStride = 0;
+        copyInParams.dstStride = 0;
 
-private:
-    __aicore__ inline void ProcessOne(uint32_t n, uint32_t oc)
-    {
-        float cbias = cbGm.GetValue(oc);
-        float pbias = bGm.GetValue(oc);
-        uint64_t xBase = (uint64_t)n * this->inC * this->H * this->W;
-        uint64_t wBase = (uint64_t)oc * this->inC * this->K * this->K;
-        uint64_t yBase = (uint64_t)n * this->outC * this->pH * this->pW + (uint64_t)oc * this->pH * this->pW;
+        AscendC::DataCopyPadExtParams<float> padParams;
+        padParams.isPad = false;
+        padParams.leftPadding = 0;
+        padParams.rightPadding = 0;
+        padParams.paddingValue = 0;
 
-        for (uint32_t ph = 0; ph < this->pH; ph++) {
-            for (uint32_t pw = 0; pw < this->pW; pw++) {
-                float maxVal = -3.4e38f;
-                for (uint32_t dh = 0; dh < this->P; dh++) {
-                    for (uint32_t dw = 0; dw < this->P; dw++) {
-                        uint32_t oh = ph * this->P + dh;
-                        uint32_t ow = pw * this->P + dw;
-                        float acc = cbias;
-                        for (uint32_t ic = 0; ic < this->inC; ic++) {
-                            for (uint32_t kh = 0; kh < this->K; kh++) {
-                                for (uint32_t kw = 0; kw < this->K; kw++) {
-                                    uint32_t ih = oh + kh;
-                                    uint32_t iw = ow + kw;
-                                    uint64_t xIdx = xBase + (uint64_t)ic * this->H * this->W + (uint64_t)ih * this->W + iw;
-                                    uint64_t wIdx = wBase + (uint64_t)ic * this->K * this->K + (uint64_t)kh * this->K + kw;
-                                    acc += xGm.GetValue(xIdx) * wGm.GetValue(wIdx);
-                                }
+        AscendC::DataCopyExtParams copyOutParams;
+        copyOutParams.blockCount = 1;
+        copyOutParams.blockLen = this->outH * this->outW * (uint32_t)sizeof(float);
+        copyOutParams.srcStride = 0;
+        copyOutParams.dstStride = 0;
+
+        for (uint32_t i = 0; i < this->ncPerBlock; i++) {
+            uint32_t ncIdx = this->ncStart + i;
+            uint32_t cIdx = ncIdx % this->channels;
+            float biasVal = biasGm.GetValue(cIdx);
+
+            for (uint32_t rowGroup = 0; rowGroup < this->outH; rowGroup++) {
+                uint64_t xOffset = (uint64_t)ncIdx * this->inH * this->inW
+                                 + (uint64_t)rowGroup * this->poolK * this->inW;
+                AscendC::DataCopyPad(xLocal, xGm[xOffset], copyInParams, padParams);
+
+                AscendC::TEventID evMTE2V = AscendC::GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_V);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(evMTE2V);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(evMTE2V);
+
+                AscendC::Tanh(xLocal, xLocal, this->tileSize);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Muls(xLocal, xLocal, this->scalingFactor, this->tileSize);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Adds(xLocal, xLocal, biasVal, this->tileSize);
+
+                AscendC::TEventID evVS = AscendC::GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S);
+                AscendC::SetFlag<AscendC::HardEvent::V_S>(evVS);
+                AscendC::WaitFlag<AscendC::HardEvent::V_S>(evVS);
+
+                for (uint32_t colOut = 0; colOut < this->outW; colOut++) {
+                    uint32_t baseOffset = colOut * this->poolK;
+                    float maxVal = xLocal.GetValue(baseOffset);
+                    for (uint32_t ki = 0; ki < this->poolK; ki++) {
+                        for (uint32_t kj = 0; kj < this->poolK; kj++) {
+                            float v = xLocal.GetValue(ki * this->inW + baseOffset + kj);
+                            if (v > maxVal) {
+                                maxVal = v;
                             }
                         }
-                        float t = Tanhf(acc);
-                        float v = t * this->scale + pbias;
-                        if (v > maxVal) maxVal = v;
                     }
+                    outAccum.SetValue(rowGroup * this->outW + colOut, maxVal);
                 }
-                yGm.SetValue(yBase + ph * this->pW + pw, maxVal);
+
+                if (rowGroup < this->outH - 1) {
+                    AscendC::TEventID evSMTE2 = AscendC::GetTPipePtr()->FetchEventID(AscendC::HardEvent::S_MTE2);
+                    AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(evSMTE2);
+                    AscendC::WaitFlag<AscendC::HardEvent::S_MTE2>(evSMTE2);
+                }
+            }
+
+            AscendC::TEventID evSMTE3 = AscendC::GetTPipePtr()->FetchEventID(AscendC::HardEvent::S_MTE3);
+            AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(evSMTE3);
+            AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(evSMTE3);
+
+            uint64_t zOffset = (uint64_t)ncIdx * this->outH * this->outW;
+            AscendC::DataCopyPad(zGm[zOffset], outAccum, copyOutParams);
+
+            if (i < this->ncPerBlock - 1) {
+                AscendC::TEventID evMTE3S = AscendC::GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE3_S);
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(evMTE3S);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(evMTE3S);
             }
         }
     }
 
-    __aicore__ inline float Tanhf(float x)
-    {
-        if (x > 20.0f) return 1.0f;
-        if (x < -20.0f) return -1.0f;
-        float e2x = Expf(2.0f * x);
-        return (e2x - 1.0f) / (e2x + 1.0f);
-    }
-
-    __aicore__ inline float Expf(float x)
-    {
-        float result = 1.0f;
-        float term = 1.0f;
-        for (int i = 1; i < 20; i++) {
-            term *= x / (float)i;
-            result += term;
-        }
-        return result;
-    }
-
 private:
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> xBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> outAccumBuf;
     AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> wGm;
-    AscendC::GlobalTensor<float> cbGm;
-    AscendC::GlobalTensor<float> bGm;
-    AscendC::GlobalTensor<float> yGm;
-    uint32_t batch, inC, outC, H, W, K, P, oH, oW, pH, pW;
-    float scale;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> zGm;
+
+    uint32_t batchSize;
+    uint32_t channels;
+    uint32_t inH;
+    uint32_t inW;
+    uint32_t outH;
+    uint32_t outW;
+    uint32_t poolK;
+    uint32_t tileSize;
+    uint32_t ncPerBlock;
+    uint32_t ncStart;
+    float scalingFactor;
 };
 
 extern "C" __global__ __aicore__ void conv2d_tanh_scaling_bias_add_max_custom(
-    GM_ADDR x, GM_ADDR w, GM_ADDR cb, GM_ADDR b, GM_ADDR y,
-    GM_ADDR workspace, GM_ADDR tiling)
+    GM_ADDR x, GM_ADDR bias, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
 {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConvTanhScalingBiasAddMax op;
-    op.Init(x, w, cb, b, y,
-            tiling_data.batch, tiling_data.inChannels, tiling_data.outChannels,
-            tiling_data.height, tiling_data.width, tiling_data.ksize,
-            tiling_data.poolSize, tiling_data.outH, tiling_data.outW,
-            tiling_data.pooledH, tiling_data.pooledW, tiling_data.scalingFactor);
+    KernelConv2dTanhScalingBiasAddMax op;
+    op.Init(x, bias, z,
+            tiling_data.batchSize, tiling_data.channels,
+            tiling_data.inH, tiling_data.inW,
+            tiling_data.outH, tiling_data.outW,
+            tiling_data.poolK, tiling_data.scalingFactor);
     op.Process();
 }
 """
@@ -378,34 +345,21 @@ python_bind_src="""
 #include <torch/extension.h>
 
 at::Tensor conv2d_tanh_scaling_bias_add_max_custom_impl_npu(
-    const at::Tensor& x, const at::Tensor& w, const at::Tensor& cb, const at::Tensor& b,
-    double scaling_factor, int64_t pool_size)
+    const at::Tensor& x,
+    const at::Tensor& bias,
+    double scaling_factor,
+    int64_t pool_k)
 {
     int64_t N = x.size(0);
-    int64_t inC = x.size(1);
+    int64_t C = x.size(1);
     int64_t H = x.size(2);
     int64_t W = x.size(3);
-    int64_t outC = w.size(0);
-    int64_t K = w.size(2);
-    int64_t outH = H - K + 1;
-    int64_t outW = W - K + 1;
-    int64_t pH = outH / pool_size;
-    int64_t pW = outW / pool_size;
+    int64_t outH = H / pool_k;
+    int64_t outW = W / pool_k;
 
-    at::Tensor result = at::empty({N, outC, pH, pW}, x.options());
-
-    float sf = (float)scaling_factor;
-    int64_t ps = pool_size;
-    int64_t batch = N;
-    int64_t in_channels = inC;
-    int64_t out_channels = outC;
-    int64_t height = H;
-    int64_t width = W;
-    int64_t ksize = K;
-
-    EXEC_NPU_CMD(aclnnConv2dTanhScalingBiasAddMaxCustom, x, w, cb, b,
-                 sf, ps, batch, in_channels, out_channels, height, width, ksize,
-                 result);
+    at::Tensor result = at::empty({N, C, outH, outW}, x.options());
+    float scale_f = static_cast<float>(scaling_factor);
+    EXEC_NPU_CMD(aclnnConv2dTanhScalingBiasAddMaxCustom, x, bias, scale_f, pool_k, result);
     return result;
 }
 
@@ -415,33 +369,28 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("conv2d_tanh_scaling_bias_add_max_custom", &conv2d_tanh_scaling_bias_add_max_custom_impl_npu,
-          "fused conv2d tanh scaling bias max");
+          "Conv2d followed by tanh, scale, bias, maxpool fused");
 }
 """
 
 model_src='''
 import torch
-import torch.nn as nn
 import torch_npu
 import custom_ops_lib
 
-class ModelNew(nn.Module):
+class ModelNew(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, scaling_factor, bias_shape, pool_kernel_size):
-        super(ModelNew, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = kernel_size
+        super().__init__()
+        self.conv = torch.nn.Conv2d(in_channels, out_channels, kernel_size)
         self.scaling_factor = float(scaling_factor)
-        self.pool_kernel_size = pool_kernel_size
-        conv = nn.Conv2d(in_channels, out_channels, kernel_size)
-        self.weight = nn.Parameter(conv.weight.data.clone())
-        self.conv_bias = nn.Parameter(conv.bias.data.clone())
-        self.bias = nn.Parameter(torch.randn(bias_shape))
+        self.bias = torch.nn.Parameter(torch.randn(bias_shape))
+        self.pool_kernel_size = int(pool_kernel_size)
 
     def forward(self, x):
-        pbias = self.bias.view(-1).contiguous()
+        x = self.conv(x)
+        x = x.contiguous()
+        bias_flat = self.bias.view(-1).contiguous()
         return custom_ops_lib.conv2d_tanh_scaling_bias_add_max_custom(
-            x.contiguous(), self.weight.contiguous(), self.conv_bias.contiguous(),
-            pbias, self.scaling_factor, self.pool_kernel_size)
+            x, bias_flat, self.scaling_factor, self.pool_kernel_size
+        )
 '''
-```

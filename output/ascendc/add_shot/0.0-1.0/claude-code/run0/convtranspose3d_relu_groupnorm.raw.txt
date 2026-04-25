@@ -1,0 +1,396 @@
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose3dReluGroupnormCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "gamma",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "beta",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose3dReluGroupnormCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, numChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, numGroups);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channelsPerGroup);
+  TILING_DATA_FIELD_DEF(float, invGroupSize);
+  TILING_DATA_FIELD_DEF(float, eps);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose3dReluGroupnormCustom, ConvTranspose3dReluGroupnormCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "convtranspose3d_relu_groupnorm_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose3dReluGroupnormCustomTilingData tiling;
+    auto inputShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batch = static_cast<uint32_t>(inputShape.GetDim(0));
+    uint32_t channels = static_cast<uint32_t>(inputShape.GetDim(1));
+    uint32_t D = static_cast<uint32_t>(inputShape.GetDim(2));
+    uint32_t H = static_cast<uint32_t>(inputShape.GetDim(3));
+    uint32_t W = static_cast<uint32_t>(inputShape.GetDim(4));
+    uint32_t spatialSize = D * H * W;
+    uint32_t numGroups = 8;
+    uint32_t channelsPerGroup = channels / numGroups;
+    int32_t groupSizeI = static_cast<int32_t>(channelsPerGroup * spatialSize);
+    float invGroupSize = 1.0f / static_cast<float>(groupSizeI);
+    float eps = 1e-5f;
+
+    context->SetBlockDim(16);
+    tiling.set_batchSize(batch);
+    tiling.set_numChannels(channels);
+    tiling.set_numGroups(numGroups);
+    tiling.set_spatialSize(spatialSize);
+    tiling.set_channelsPerGroup(channelsPerGroup);
+    tiling.set_invGroupSize(invGroupSize);
+    tiling.set_eps(eps);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* z_shape = context->GetOutputShape(0);
+    *z_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class ConvTranspose3dReluGroupnormCustom : public OpDef {
+public:
+    explicit ConvTranspose3dReluGroupnormCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("gamma")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("beta")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose3dReluGroupnormCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConvTranspose3dReluGroupnorm {
+public:
+    __aicore__ inline KernelConvTranspose3dReluGroupnorm() {}
+
+    __aicore__ inline void Init(
+        GM_ADDR x, GM_ADDR gamma, GM_ADDR beta, GM_ADDR z,
+        uint32_t batchSize, uint32_t numChannels, uint32_t numGroups,
+        uint32_t spatialSize, uint32_t channelsPerGroup,
+        float invGroupSize, float eps)
+    {
+        this->batchSize_ = batchSize;
+        this->numChannels_ = numChannels;
+        this->numGroups_ = numGroups;
+        this->channelsPerGroup_ = channelsPerGroup;
+        this->spatialSize_ = spatialSize;
+        this->invGroupSize_ = invGroupSize;
+        this->eps_ = eps;
+
+        uint32_t totalPairs = batchSize * numGroups;
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        uint32_t basePairs = totalPairs / blockNum;
+        uint32_t extraPairs = totalPairs - basePairs * blockNum;
+        uint32_t extra = (blockIdx < extraPairs) ? blockIdx : extraPairs;
+        this->startPair_ = blockIdx * basePairs + extra;
+        uint32_t myPairs = basePairs + ((blockIdx < extraPairs) ? 1u : 0u);
+        this->endPair_ = this->startPair_ + myPairs;
+
+        uint32_t totalElements = batchSize * numChannels * spatialSize;
+        xGm_.SetGlobalBuffer((__gm__ float*)x, totalElements);
+        zGm_.SetGlobalBuffer((__gm__ float*)z, totalElements);
+        gammaGm_.SetGlobalBuffer((__gm__ float*)gamma, numChannels);
+        betaGm_.SetGlobalBuffer((__gm__ float*)beta, numChannels);
+
+        pipe_.InitBuffer(inQueueX_, BUFFER_NUM, spatialSize * sizeof(float));
+        pipe_.InitBuffer(outQueueZ_, BUFFER_NUM, spatialSize * sizeof(float));
+        pipe_.InitBuffer(tmpBuf_, spatialSize * sizeof(float));
+        pipe_.InitBuffer(reduceResBuf_, 64);
+        pipe_.InitBuffer(reduceWorkBuf_, 4096);
+        pipe_.InitBuffer(gammaLocalBuf_, numChannels * sizeof(float));
+        pipe_.InitBuffer(betaLocalBuf_, numChannels * sizeof(float));
+        pipe_.InitBuffer(sqrtBuf_, 64);
+
+        AscendC::LocalTensor<float> gammaLoc = gammaLocalBuf_.Get<float>();
+        AscendC::LocalTensor<float> betaLoc = betaLocalBuf_.Get<float>();
+        AscendC::DataCopy(gammaLoc, gammaGm_[0], numChannels);
+        AscendC::DataCopy(betaLoc, betaGm_[0], numChannels);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    }
+
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<float> gammaLoc = gammaLocalBuf_.Get<float>();
+        AscendC::LocalTensor<float> betaLoc = betaLocalBuf_.Get<float>();
+
+        for (uint32_t p = this->startPair_; p < this->endPair_; p++) {
+            uint32_t batchIdx = p / this->numGroups_;
+            uint32_t groupIdx = p - batchIdx * this->numGroups_;
+            ProcessOneGroup(batchIdx, groupIdx, gammaLoc, betaLoc);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOneGroup(
+        uint32_t batchIdx, uint32_t groupIdx,
+        AscendC::LocalTensor<float>& gammaLoc,
+        AscendC::LocalTensor<float>& betaLoc)
+    {
+        uint32_t groupBaseOffset = batchIdx * this->numChannels_ * this->spatialSize_
+                                  + groupIdx * this->channelsPerGroup_ * this->spatialSize_;
+
+        float sum = 0.0f;
+        float sumSq = 0.0f;
+
+        AscendC::LocalTensor<float> reduceRes = reduceResBuf_.Get<float>();
+        AscendC::LocalTensor<float> reduceWork = reduceWorkBuf_.Get<float>();
+        AscendC::LocalTensor<float> reluBuf = tmpBuf_.Get<float>();
+
+        for (uint32_t c = 0; c < this->channelsPerGroup_; c++) {
+            uint32_t channelOffset = groupBaseOffset + c * this->spatialSize_;
+
+            AscendC::LocalTensor<float> xLocal = inQueueX_.AllocTensor<float>();
+            AscendC::DataCopy(xLocal, xGm_[channelOffset], this->spatialSize_);
+            inQueueX_.EnQue(xLocal);
+            xLocal = inQueueX_.DeQue<float>();
+
+            AscendC::Maxs(reluBuf, xLocal, 0.0f, this->spatialSize_);
+
+            AscendC::ReduceSum<float>(reduceRes, reluBuf, reduceWork, this->spatialSize_);
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            sum += reduceRes.GetValue(0);
+
+            AscendC::Mul(xLocal, reluBuf, reluBuf, this->spatialSize_);
+
+            AscendC::ReduceSum<float>(reduceRes, xLocal, reduceWork, this->spatialSize_);
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            sumSq += reduceRes.GetValue(0);
+
+            inQueueX_.FreeTensor(xLocal);
+        }
+
+        float mean = sum * this->invGroupSize_;
+        float var = sumSq * this->invGroupSize_ - mean * mean;
+        float varEps = var + this->eps_;
+
+        AscendC::LocalTensor<float> sqrtTensor = sqrtBuf_.Get<float>();
+        AscendC::Duplicate<float>(sqrtTensor, varEps, 8);
+        AscendC::Sqrt<float>(sqrtTensor, sqrtTensor, 8);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID1);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID1);
+        float stdDev = sqrtTensor.GetValue(0);
+        float invStd = 1.0f / stdDev;
+
+        for (uint32_t c = 0; c < this->channelsPerGroup_; c++) {
+            uint32_t channelIdx = groupIdx * this->channelsPerGroup_ + c;
+            float gamma_c = gammaLoc.GetValue(channelIdx);
+            float beta_c = betaLoc.GetValue(channelIdx);
+
+            float scale = invStd * gamma_c;
+            float offsetV = beta_c - mean * scale;
+
+            uint32_t channelOffset = groupBaseOffset + c * this->spatialSize_;
+
+            AscendC::LocalTensor<float> xLocal = inQueueX_.AllocTensor<float>();
+            AscendC::DataCopy(xLocal, xGm_[channelOffset], this->spatialSize_);
+            inQueueX_.EnQue(xLocal);
+            xLocal = inQueueX_.DeQue<float>();
+
+            AscendC::LocalTensor<float> zLocal = outQueueZ_.AllocTensor<float>();
+            AscendC::Maxs(zLocal, xLocal, 0.0f, this->spatialSize_);
+            AscendC::Muls(zLocal, zLocal, scale, this->spatialSize_);
+            AscendC::Adds(zLocal, zLocal, offsetV, this->spatialSize_);
+            outQueueZ_.EnQue(zLocal);
+
+            inQueueX_.FreeTensor(xLocal);
+
+            zLocal = outQueueZ_.DeQue<float>();
+            AscendC::DataCopy(zGm_[channelOffset], zLocal, this->spatialSize_);
+            outQueueZ_.FreeTensor(zLocal);
+        }
+    }
+
+private:
+    AscendC::TPipe pipe_;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX_;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceResBuf_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceWorkBuf_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> gammaLocalBuf_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> betaLocalBuf_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> sqrtBuf_;
+    AscendC::GlobalTensor<float> xGm_;
+    AscendC::GlobalTensor<float> gammaGm_;
+    AscendC::GlobalTensor<float> betaGm_;
+    AscendC::GlobalTensor<float> zGm_;
+    uint32_t batchSize_;
+    uint32_t numChannels_;
+    uint32_t numGroups_;
+    uint32_t channelsPerGroup_;
+    uint32_t spatialSize_;
+    uint32_t startPair_;
+    uint32_t endPair_;
+    float invGroupSize_;
+    float eps_;
+};
+
+extern "C" __global__ __aicore__ void convtranspose3d_relu_groupnorm_custom(
+    GM_ADDR x, GM_ADDR gamma, GM_ADDR beta, GM_ADDR z,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConvTranspose3dReluGroupnorm op;
+    op.Init(x, gamma, beta, z,
+            tiling_data.batchSize, tiling_data.numChannels, tiling_data.numGroups,
+            tiling_data.spatialSize, tiling_data.channelsPerGroup,
+            tiling_data.invGroupSize, tiling_data.eps);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor convtranspose3d_relu_groupnorm_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& gamma, const at::Tensor& beta) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnConvTranspose3dReluGroupnormCustom, x, gamma, beta, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("convtranspose3d_relu_groupnorm_custom", &convtranspose3d_relu_groupnorm_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("convtranspose3d_relu_groupnorm_custom", &convtranspose3d_relu_groupnorm_custom_impl_npu, "fused relu + groupnorm after conv_transpose3d");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, groups, bias=False):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size, bias=bias)
+        self.group_norm = nn.GroupNorm(num_groups=groups, num_channels=out_channels)
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = x.contiguous()
+        return custom_ops_lib.convtranspose3d_relu_groupnorm_custom(
+            x, self.group_norm.weight.contiguous(), self.group_norm.bias.contiguous())
+'''

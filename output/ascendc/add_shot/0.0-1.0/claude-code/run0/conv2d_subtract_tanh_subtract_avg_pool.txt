@@ -1,4 +1,3 @@
-```python
 project_json_src='''
 [
     {
@@ -27,6 +26,18 @@ project_json_src='''
                     "float"
                 ]
             }
+        ],
+        "attr": [
+            {
+                "name": "sub1_value",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "sub2_value",
+                "param_type": "required",
+                "type": "float"
+            }
         ]
     }
 ]
@@ -39,6 +50,8 @@ namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv2dSubtractTanhSubtractAvgPoolCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, totalLength);
   TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(float, sub1Value);
+  TILING_DATA_FIELD_DEF(float, sub2Value);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv2dSubtractTanhSubtractAvgPoolCustom, Conv2dSubtractTanhSubtractAvgPoolCustomTilingData)
@@ -52,14 +65,19 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 3969;
+const uint32_t TILE_NUM = 1008;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv2dSubtractTanhSubtractAvgPoolCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    auto attrs = context->GetAttrs();
+    const float* sub1 = attrs->GetAttrPointer<float>(0);
+    const float* sub2 = attrs->GetAttrPointer<float>(1);
     context->SetBlockDim(BLOCK_DIM);
     tiling.set_totalLength(totalLength);
     tiling.set_tileNum(TILE_NUM);
+    tiling.set_sub1Value(*sub1);
+    tiling.set_sub2Value(*sub2);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -72,9 +90,9 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x1_shape = context->GetInputShape(0);
+    const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x1_shape;
+    *y_shape = *x_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -101,12 +119,15 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("sub1_value").AttrType(REQUIRED).Float();
+        this->Attr("sub2_value").AttrType(REQUIRED).Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
+
     }
 };
 
@@ -119,14 +140,16 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConv2dSubtractTanhSubtractAvgPoolCustom {
+class KernelConv2dSubTanhSubAvgPool {
 public:
-    __aicore__ inline KernelConv2dSubtractTanhSubtractAvgPoolCustom() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
+    __aicore__ inline KernelConv2dSubTanhSubAvgPool() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum, float sub1, float sub2)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
         this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->sub1 = sub1;
+        this->sub2 = sub2;
 
         xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
@@ -154,11 +177,11 @@ private:
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
         AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
-
-        AscendC::Adds(xLocal, xLocal, (DTYPE_X)(-0.5f), this->tileLength);
+        float negSub1 = -this->sub1;
+        float negSub2 = -this->sub2;
+        AscendC::Adds(xLocal, xLocal, (DTYPE_X)negSub1, this->tileLength);
         AscendC::Tanh(yLocal, xLocal, this->tileLength);
-        AscendC::Adds(yLocal, yLocal, (DTYPE_Y)(-0.2f), this->tileLength);
-
+        AscendC::Adds(yLocal, yLocal, (DTYPE_Y)negSub2, this->tileLength);
         outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
     }
@@ -178,12 +201,14 @@ private:
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
+    float sub1;
+    float sub2;
 };
 
 extern "C" __global__ __aicore__ void conv2d_subtract_tanh_subtract_avg_pool_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConv2dSubtractTanhSubtractAvgPoolCustom op;
-    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum);
+    KernelConv2dSubTanhSubAvgPool op;
+    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum, tiling_data.sub1Value, tiling_data.sub2Value);
     op.Process();
 }
 """
@@ -194,10 +219,11 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv2d_subtract_tanh_subtract_avg_pool_custom_impl_npu(const at::Tensor& self) {
-    at::Tensor contig = self.contiguous();
-    at::Tensor result = at::empty_like(contig);
-    EXEC_NPU_CMD(aclnnConv2dSubtractTanhSubtractAvgPoolCustom, contig, result);
+at::Tensor conv2d_subtract_tanh_subtract_avg_pool_custom_impl_npu(const at::Tensor& self, double sub1_value, double sub2_value) {
+    at::Tensor result = at::empty_like(self);
+    float s1 = static_cast<float>(sub1_value);
+    float s2 = static_cast<float>(sub2_value);
+    EXEC_NPU_CMD(aclnnConv2dSubtractTanhSubtractAvgPoolCustom, self, s1, s2, result);
     return result;
 }
 
@@ -206,14 +232,14 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv2d_subtract_tanh_subtract_avg_pool_custom", &conv2d_subtract_tanh_subtract_avg_pool_custom_impl_npu, "fused subtract-tanh-subtract");
+    m.def("conv2d_subtract_tanh_subtract_avg_pool_custom", &conv2d_subtract_tanh_subtract_avg_pool_custom_impl_npu, "fused (x-sub1)->tanh->(-sub2)");
 }
 """
 
 model_src='''
 import torch
-import torch_npu
 import torch.nn as nn
+import torch_npu
 import custom_ops_lib
 
 class ModelNew(nn.Module):
@@ -226,8 +252,8 @@ class ModelNew(nn.Module):
 
     def forward(self, x):
         x = self.conv(x)
-        x = custom_ops_lib.conv2d_subtract_tanh_subtract_avg_pool_custom(x.contiguous())
+        x = x.contiguous()
+        x = custom_ops_lib.conv2d_subtract_tanh_subtract_avg_pool_custom(x, float(self.subtract1_value), float(self.subtract2_value))
         x = self.avgpool(x)
         return x
 '''
-```

@@ -1,4 +1,3 @@
-```python
 project_json_src='''
 [
     {
@@ -7,26 +6,6 @@ project_json_src='''
         "input_desc": [
             {
                 "name": "x",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bias",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -47,48 +26,6 @@ project_json_src='''
                     "float"
                 ]
             }
-        ],
-        "attr": [
-            {
-                "name": "subtract_value",
-                "param_type": "required",
-                "type": "float"
-            },
-            {
-                "name": "pool_kernel_size",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "kernel_size",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "in_channels",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "out_channels",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "batch_size",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "height",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
-                "name": "width",
-                "param_type": "required",
-                "type": "int"
-            }
         ]
     }
 ]
@@ -99,20 +36,13 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv2dSubtractHardSwishMaxPoolMishCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
-  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
-  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
-  TILING_DATA_FIELD_DEF(uint32_t, height);
-  TILING_DATA_FIELD_DEF(uint32_t, width);
-  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
-  TILING_DATA_FIELD_DEF(uint32_t, poolKernelSize);
-  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
-  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
-  TILING_DATA_FIELD_DEF(uint32_t, pooledHeight);
-  TILING_DATA_FIELD_DEF(uint32_t, pooledWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, totalPlanes);
+  TILING_DATA_FIELD_DEF(uint32_t, planesPerBlock);
+  TILING_DATA_FIELD_DEF(uint32_t, heightIn);
+  TILING_DATA_FIELD_DEF(uint32_t, widthIn);
+  TILING_DATA_FIELD_DEF(uint32_t, heightOut);
+  TILING_DATA_FIELD_DEF(uint32_t, widthOut);
   TILING_DATA_FIELD_DEF(float, subtractValue);
-  TILING_DATA_FIELD_DEF(uint32_t, blockDim);
-  TILING_DATA_FIELD_DEF(uint32_t, totalOut);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv2dSubtractHardSwishMaxPoolMishCustom, Conv2dSubtractHardSwishMaxPoolMishCustomTilingData)
@@ -125,50 +55,31 @@ host_operator_src="""
 
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
+const uint32_t BLOCK_DIM = 40;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv2dSubtractHardSwishMaxPoolMishCustomTilingData tiling;
 
-    auto attrs = context->GetAttrs();
-    const float* subtractValuePtr = attrs->GetAttrPointer<float>(0);
-    const int* poolKernelSizePtr = attrs->GetAttrPointer<int>(1);
-    const int* kernelSizePtr = attrs->GetAttrPointer<int>(2);
-    const int* inChannelsPtr = attrs->GetAttrPointer<int>(3);
-    const int* outChannelsPtr = attrs->GetAttrPointer<int>(4);
-    const int* batchSizePtr = attrs->GetAttrPointer<int>(5);
-    const int* heightPtr = attrs->GetAttrPointer<int>(6);
-    const int* widthPtr = attrs->GetAttrPointer<int>(7);
+    auto inputShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = inputShape.GetDim(0);
+    uint32_t C = inputShape.GetDim(1);
+    uint32_t H = inputShape.GetDim(2);
+    uint32_t W = inputShape.GetDim(3);
 
-    uint32_t batchSize = static_cast<uint32_t>(*batchSizePtr);
-    uint32_t inChannels = static_cast<uint32_t>(*inChannelsPtr);
-    uint32_t outChannels = static_cast<uint32_t>(*outChannelsPtr);
-    uint32_t height = static_cast<uint32_t>(*heightPtr);
-    uint32_t width = static_cast<uint32_t>(*widthPtr);
-    uint32_t kernelSize = static_cast<uint32_t>(*kernelSizePtr);
-    uint32_t poolKernelSize = static_cast<uint32_t>(*poolKernelSizePtr);
-
-    uint32_t outHeight = height - kernelSize + 1;
-    uint32_t outWidth = width - kernelSize + 1;
-    uint32_t pooledHeight = outHeight / poolKernelSize;
-    uint32_t pooledWidth = outWidth / poolKernelSize;
+    uint32_t totalPlanes = N * C;
+    uint32_t Ho = H / 2;
+    uint32_t Wo = W / 2;
+    uint32_t planesPerBlock = (totalPlanes + BLOCK_DIM - 1) / BLOCK_DIM;
 
     context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_inChannels(inChannels);
-    tiling.set_outChannels(outChannels);
-    tiling.set_height(height);
-    tiling.set_width(width);
-    tiling.set_kernelSize(kernelSize);
-    tiling.set_poolKernelSize(poolKernelSize);
-    tiling.set_outHeight(outHeight);
-    tiling.set_outWidth(outWidth);
-    tiling.set_pooledHeight(pooledHeight);
-    tiling.set_pooledWidth(pooledWidth);
-    tiling.set_subtractValue(*subtractValuePtr);
-    tiling.set_blockDim(BLOCK_DIM);
-    tiling.set_totalOut(batchSize * outChannels * pooledHeight * pooledWidth);
-
+    tiling.set_totalPlanes(totalPlanes);
+    tiling.set_planesPerBlock(planesPerBlock);
+    tiling.set_heightIn(H);
+    tiling.set_widthIn(W);
+    tiling.set_heightOut(Ho);
+    tiling.set_widthOut(Wo);
+    tiling.set_subtractValue(0.5f);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -182,27 +93,12 @@ namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
-    const gert::Shape* w_shape = context->GetInputShape(1);
     gert::Shape* y_shape = context->GetOutputShape(0);
-
-    auto attrs = context->GetAttrs();
-    const int* poolKernelSizePtr = attrs->GetAttrPointer<int>(1);
-    const int* kernelSizePtr = attrs->GetAttrPointer<int>(2);
-
-    int64_t N = x_shape->GetDim(0);
-    int64_t H = x_shape->GetDim(2);
-    int64_t W = x_shape->GetDim(3);
-    int64_t Cout = w_shape->GetDim(0);
-    int64_t KS = static_cast<int64_t>(*kernelSizePtr);
-    int64_t PK = static_cast<int64_t>(*poolKernelSizePtr);
-    int64_t OH = (H - KS + 1) / PK;
-    int64_t OW = (W - KS + 1) / PK;
-
     y_shape->SetDimNum(4);
-    y_shape->SetDim(0, N);
-    y_shape->SetDim(1, Cout);
-    y_shape->SetDim(2, OH);
-    y_shape->SetDim(3, OW);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, x_shape->GetDim(1));
+    y_shape->SetDim(2, x_shape->GetDim(2) / 2);
+    y_shape->SetDim(3, x_shape->GetDim(3) / 2);
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -224,37 +120,17 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("weight")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("bias")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
         this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
-        this->Attr("subtract_value").AttrType(REQUIRED).Float();
-        this->Attr("pool_kernel_size").AttrType(REQUIRED).Int();
-        this->Attr("kernel_size").AttrType(REQUIRED).Int();
-        this->Attr("in_channels").AttrType(REQUIRED).Int();
-        this->Attr("out_channels").AttrType(REQUIRED).Int();
-        this->Attr("batch_size").AttrType(REQUIRED).Int();
-        this->Attr("height").AttrType(REQUIRED).Int();
-        this->Attr("width").AttrType(REQUIRED).Int();
-
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
-
     }
 };
 
@@ -265,148 +141,145 @@ OP_ADD(Conv2dSubtractHardSwishMaxPoolMishCustom);
 kernel_src="""
 #include "kernel_operator.h"
 
-class KernelConv2dSubtractHardSwishMaxPoolMish {
-public:
-    __aicore__ inline KernelConv2dSubtractHardSwishMaxPoolMish() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
-                                uint32_t batchSize, uint32_t inChannels, uint32_t outChannels,
-                                uint32_t height, uint32_t width, uint32_t kernelSize,
-                                uint32_t poolKernelSize, uint32_t outHeight, uint32_t outWidth,
-                                uint32_t pooledHeight, uint32_t pooledWidth,
-                                float subtractValue, uint32_t blockDim, uint32_t totalOut)
-    {
-        this->batchSize = batchSize;
-        this->inChannels = inChannels;
-        this->outChannels = outChannels;
-        this->height = height;
-        this->width = width;
-        this->kernelSize = kernelSize;
-        this->poolKernelSize = poolKernelSize;
-        this->outHeight = outHeight;
-        this->outWidth = outWidth;
-        this->pooledHeight = pooledHeight;
-        this->pooledWidth = pooledWidth;
-        this->subtractValue = subtractValue;
-        this->totalOut = totalOut;
-        this->blockIdx = AscendC::GetBlockIdx();
-        this->blockDim = blockDim;
+constexpr int32_t MAX_PLANE_IN = 128 * 128;
+constexpr int32_t MAX_PLANE_OUT = 64 * 64;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inChannels * height * width);
-        wGm.SetGlobalBuffer((__gm__ float *)weight, outChannels * inChannels * kernelSize * kernelSize);
-        bGm.SetGlobalBuffer((__gm__ float *)bias, outChannels);
-        yGm.SetGlobalBuffer((__gm__ float *)y, totalOut);
+class KernelFused {
+public:
+    __aicore__ inline KernelFused() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                 uint32_t totalPlanes, uint32_t planesPerBlock,
+                                 uint32_t heightIn, uint32_t widthIn,
+                                 uint32_t heightOut, uint32_t widthOut,
+                                 float subtractValue)
+    {
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t startP = blockIdx * planesPerBlock;
+        uint32_t endP = startP + planesPerBlock;
+        if (endP > totalPlanes) endP = totalPlanes;
+        if (startP > totalPlanes) startP = totalPlanes;
+        this->startPlane = startP;
+        this->endPlane = endP;
+
+        this->heightIn = heightIn;
+        this->widthIn = widthIn;
+        this->heightOut = heightOut;
+        this->widthOut = widthOut;
+        this->planeSizeIn = heightIn * widthIn;
+        this->planeSizeOut = heightOut * widthOut;
+        this->subtractValue = subtractValue;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x);
+        yGm.SetGlobalBuffer((__gm__ float*)y);
+
+        pipe.InitBuffer(inBuf, MAX_PLANE_IN * sizeof(float));
+        pipe.InitBuffer(outBuf, MAX_PLANE_OUT * sizeof(float));
+        pipe.InitBuffer(tmpBuf, MAX_PLANE_IN * sizeof(float));
     }
 
     __aicore__ inline void Process()
     {
-        uint32_t chunk = (totalOut + blockDim - 1) / blockDim;
-        uint32_t start = blockIdx * chunk;
-        uint32_t end = start + chunk;
-        if (end > totalOut) end = totalOut;
+        if (startPlane >= endPlane) return;
 
-        for (uint32_t idx = start; idx < end; idx++) {
-            uint32_t ow = idx % pooledWidth;
-            uint32_t oh = (idx / pooledWidth) % pooledHeight;
-            uint32_t oc = (idx / (pooledWidth * pooledHeight)) % outChannels;
-            uint32_t n = idx / (pooledWidth * pooledHeight * outChannels);
+        AscendC::LocalTensor<float> inLocal = inBuf.Get<float>();
+        AscendC::LocalTensor<float> outLocal = outBuf.Get<float>();
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
 
-            float maxv = -3.4e38f;
-            for (uint32_t ph = 0; ph < poolKernelSize; ph++) {
-                for (uint32_t pw = 0; pw < poolKernelSize; pw++) {
-                    uint32_t rh = oh * poolKernelSize + ph;
-                    uint32_t rw = ow * poolKernelSize + pw;
+        for (uint32_t p = startPlane; p < endPlane; p++) {
+            AscendC::DataCopyExtParams copyInParams;
+            copyInParams.blockCount = 1;
+            copyInParams.blockLen = planeSizeIn * sizeof(float);
+            copyInParams.srcStride = 0;
+            copyInParams.dstStride = 0;
+            AscendC::DataCopyPadExtParams<float> padParams;
+            padParams.isPad = false;
+            padParams.leftPadding = 0;
+            padParams.rightPadding = 0;
+            padParams.paddingValue = 0;
+            uint64_t inOffset = (uint64_t)p * (uint64_t)planeSizeIn;
+            AscendC::DataCopyPad(inLocal, xGm[inOffset], copyInParams, padParams);
 
-                    float acc = bGm.GetValue(oc);
-                    for (uint32_t ic = 0; ic < inChannels; ic++) {
-                        for (uint32_t kh = 0; kh < kernelSize; kh++) {
-                            for (uint32_t kw = 0; kw < kernelSize; kw++) {
-                                uint32_t ih = rh + kh;
-                                uint32_t iw = rw + kw;
-                                uint64_t xOff = ((uint64_t)n * inChannels + ic) * height * width +
-                                                (uint64_t)ih * width + iw;
-                                uint64_t wOff = ((uint64_t)oc * inChannels + ic) * kernelSize * kernelSize +
-                                                (uint64_t)kh * kernelSize + kw;
-                                acc += xGm.GetValue(xOff) * wGm.GetValue(wOff);
-                            }
-                        }
-                    }
-                    acc = acc - subtractValue;
-                    float hs_in = acc + 3.0f;
-                    if (hs_in < 0.0f) hs_in = 0.0f;
-                    if (hs_in > 6.0f) hs_in = 6.0f;
-                    float hs = acc * hs_in / 6.0f;
-                    if (hs > maxv) maxv = hs;
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+
+            AscendC::Adds(inLocal, inLocal, -subtractValue, planeSizeIn);
+            AscendC::Adds(tmpLocal, inLocal, 3.0f, planeSizeIn);
+            AscendC::Maxs(tmpLocal, tmpLocal, 0.0f, planeSizeIn);
+            AscendC::Mins(tmpLocal, tmpLocal, 6.0f, planeSizeIn);
+            AscendC::Muls(tmpLocal, tmpLocal, (float)(1.0f / 6.0f), planeSizeIn);
+            AscendC::Mul(inLocal, inLocal, tmpLocal, planeSizeIn);
+
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+
+            for (uint32_t oh = 0; oh < heightOut; oh++) {
+                for (uint32_t ow = 0; ow < widthOut; ow++) {
+                    uint32_t ih = 2 * oh;
+                    uint32_t iw = 2 * ow;
+                    float a = inLocal.GetValue(ih * widthIn + iw);
+                    float b = inLocal.GetValue(ih * widthIn + iw + 1);
+                    float c = inLocal.GetValue((ih + 1) * widthIn + iw);
+                    float d = inLocal.GetValue((ih + 1) * widthIn + iw + 1);
+                    float m1 = a > b ? a : b;
+                    float m2 = c > d ? c : d;
+                    float mx = m1 > m2 ? m1 : m2;
+                    outLocal.SetValue(oh * widthOut + ow, mx);
                 }
             }
-            float sp = log_approx(1.0f + exp_approx(maxv));
-            float th = tanh_approx(sp);
-            float out = maxv * th;
-            yGm.SetValue(idx, out);
+
+            AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+
+            AscendC::Exp(tmpLocal, outLocal, planeSizeOut);
+            AscendC::Adds(tmpLocal, tmpLocal, 1.0f, planeSizeOut);
+            AscendC::Ln(tmpLocal, tmpLocal, planeSizeOut);
+            AscendC::Tanh(tmpLocal, tmpLocal, planeSizeOut);
+            AscendC::Mul(outLocal, outLocal, tmpLocal, planeSizeOut);
+
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+
+            AscendC::DataCopyExtParams copyOutParams;
+            copyOutParams.blockCount = 1;
+            copyOutParams.blockLen = planeSizeOut * sizeof(float);
+            copyOutParams.srcStride = 0;
+            copyOutParams.dstStride = 0;
+            uint64_t outOffset = (uint64_t)p * (uint64_t)planeSizeOut;
+            AscendC::DataCopyPad(yGm[outOffset], outLocal, copyOutParams);
+
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
         }
     }
 
 private:
-    __aicore__ inline float exp_approx(float x) {
-        if (x > 88.0f) x = 88.0f;
-        if (x < -88.0f) x = -88.0f;
-        float result = 1.0f;
-        float term = 1.0f;
-        for (int i = 1; i < 16; i++) {
-            term = term * x / (float)i;
-            result += term;
-        }
-        return result;
-    }
-    __aicore__ inline float log_approx(float x) {
-        if (x <= 0.0f) return -88.0f;
-        float y = (x - 1.0f) / (x + 1.0f);
-        float y2 = y * y;
-        float result = 0.0f;
-        float term = y;
-        for (int i = 0; i < 10; i++) {
-            result += term / (float)(2 * i + 1);
-            term *= y2;
-        }
-        return 2.0f * result;
-    }
-    __aicore__ inline float tanh_approx(float x) {
-        float e1 = exp_approx(x);
-        float e2 = exp_approx(-x);
-        return (e1 - e2) / (e1 + e2);
-    }
-
-private:
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> inBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> outBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
     AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> wGm;
-    AscendC::GlobalTensor<float> bGm;
     AscendC::GlobalTensor<float> yGm;
-    uint32_t batchSize;
-    uint32_t inChannels;
-    uint32_t outChannels;
-    uint32_t height;
-    uint32_t width;
-    uint32_t kernelSize;
-    uint32_t poolKernelSize;
-    uint32_t outHeight;
-    uint32_t outWidth;
-    uint32_t pooledHeight;
-    uint32_t pooledWidth;
+    uint32_t startPlane;
+    uint32_t endPlane;
+    uint32_t heightIn;
+    uint32_t widthIn;
+    uint32_t heightOut;
+    uint32_t widthOut;
+    uint32_t planeSizeIn;
+    uint32_t planeSizeOut;
     float subtractValue;
-    uint32_t totalOut;
-    uint32_t blockIdx;
-    uint32_t blockDim;
 };
 
 extern "C" __global__ __aicore__ void conv2d_subtract_hard_swish_max_pool_mish_custom(
-    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConv2dSubtractHardSwishMaxPoolMish op;
-    op.Init(x, weight, bias, y,
-            tiling_data.batchSize, tiling_data.inChannels, tiling_data.outChannels,
-            tiling_data.height, tiling_data.width, tiling_data.kernelSize,
-            tiling_data.poolKernelSize, tiling_data.outHeight, tiling_data.outWidth,
-            tiling_data.pooledHeight, tiling_data.pooledWidth,
-            tiling_data.subtractValue, tiling_data.blockDim, tiling_data.totalOut);
+    KernelFused op;
+    op.Init(x, y,
+            tiling_data.totalPlanes, tiling_data.planesPerBlock,
+            tiling_data.heightIn, tiling_data.widthIn,
+            tiling_data.heightOut, tiling_data.widthOut,
+            tiling_data.subtractValue);
     op.Process();
 }
 """
@@ -417,27 +290,14 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv2d_subtract_hard_swish_max_pool_mish_custom_impl_npu(
-    const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias,
-    double subtract_value, int64_t pool_kernel_size, int64_t kernel_size,
-    int64_t in_channels, int64_t out_channels,
-    int64_t batch_size, int64_t height, int64_t width) {
-
-    int64_t out_h = (height - kernel_size + 1) / pool_kernel_size;
-    int64_t out_w = (width - kernel_size + 1) / pool_kernel_size;
-    at::Tensor result = at::empty({batch_size, out_channels, out_h, out_w}, x.options());
-
-    float sv = static_cast<float>(subtract_value);
-    int32_t pk = static_cast<int32_t>(pool_kernel_size);
-    int32_t ks = static_cast<int32_t>(kernel_size);
-    int32_t ic = static_cast<int32_t>(in_channels);
-    int32_t oc = static_cast<int32_t>(out_channels);
-    int32_t bs = static_cast<int32_t>(batch_size);
-    int32_t h = static_cast<int32_t>(height);
-    int32_t w = static_cast<int32_t>(width);
-
-    EXEC_NPU_CMD(aclnnConv2dSubtractHardSwishMaxPoolMishCustom,
-                 x, weight, bias, sv, pk, ks, ic, oc, bs, h, w, result);
+at::Tensor conv2d_subtract_hard_swish_max_pool_mish_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes();
+    int64_t N = sizes[0];
+    int64_t C = sizes[1];
+    int64_t H = sizes[2];
+    int64_t W = sizes[3];
+    at::Tensor result = at::empty({N, C, H / 2, W / 2}, self.options());
+    EXEC_NPU_CMD(aclnnConv2dSubtractHardSwishMaxPoolMishCustom, self, result);
     return result;
 }
 
@@ -446,8 +306,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv2d_subtract_hard_swish_max_pool_mish_custom", &conv2d_subtract_hard_swish_max_pool_mish_custom_impl_npu,
-          "Fused conv2d-subtract-hardswish-maxpool-mish");
+    m.def("conv2d_subtract_hard_swish_max_pool_mish_custom", &conv2d_subtract_hard_swish_max_pool_mish_custom_impl_npu, "fused conv2d-subtract-hardswish-maxpool-mish");
 }
 """
 
@@ -459,22 +318,14 @@ import custom_ops_lib
 
 class ModelNew(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, subtract_value, pool_kernel_size):
-        super(ModelNew, self).__init__()
+        super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
-        self.subtract_value = float(subtract_value)
-        self.pool_kernel_size = int(pool_kernel_size)
-        self.kernel_size = int(kernel_size)
-        self.in_channels = int(in_channels)
-        self.out_channels = int(out_channels)
+        self.subtract_value = subtract_value
+        self.pool_kernel_size = pool_kernel_size
 
     def forward(self, x):
-        bs, _, h, w = x.shape
-        weight = self.conv.weight.contiguous()
-        bias = self.conv.bias.contiguous()
-        return custom_ops_lib.conv2d_subtract_hard_swish_max_pool_mish_custom(
-            x.contiguous(), weight, bias,
-            self.subtract_value, self.pool_kernel_size, self.kernel_size,
-            self.in_channels, self.out_channels,
-            int(bs), int(h), int(w))
+        x = self.conv(x)
+        x = x.contiguous()
+        x = custom_ops_lib.conv2d_subtract_hard_swish_max_pool_mish_custom(x)
+        return x
 '''
-```

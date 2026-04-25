@@ -1,5 +1,3 @@
-I've gathered enough information from the Wiki. Let me generate the complete kernel implementation. The approach: implement the swish activation (x * sigmoid(x)) and scaling as a fused elementwise AscendC kernel, while keeping PyTorch's optimized nn.Linear for the matmul.
-
 project_json_src='''
 [
     {
@@ -9,24 +7,35 @@ project_json_src='''
             {
                 "name": "x",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
             }
         ],
         "output_desc": [
             {
                 "name": "y",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "attr": [
+            {
+                "name": "scaling_factor",
+                "param_type": "required",
+                "type": "float"
             }
         ]
     }
@@ -35,11 +44,15 @@ project_json_src='''
 
 host_tiling_src="""
 #include "register/tilingdata_base.h"
+#include "tiling/tiling_api.h"
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(MatmulSwishScalingCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
-  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, cubeTilingData);
+  TILING_DATA_FIELD_DEF(float, scalingFactor);
+  TILING_DATA_FIELD_DEF(uint32_t, M);
+  TILING_DATA_FIELD_DEF(uint32_t, N);
+  TILING_DATA_FIELD_DEF(uint32_t, K);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(MatmulSwishScalingCustom, MatmulSwishScalingCustomTilingData)
@@ -49,44 +62,85 @@ REGISTER_TILING_DATA_CLASS(MatmulSwishScalingCustom, MatmulSwishScalingCustomTil
 host_operator_src="""
 #include "matmul_swish_scaling_custom_tiling.h"
 #include "register/op_def_registry.h"
-
+#include "tiling/platform/platform_ascendc.h"
+#include "tiling/tiling_api.h"
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 8;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
-
     MatmulSwishScalingCustomTilingData tiling;
-    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(TILE_NUM);
-    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto weightShape = context->GetInputShape(1)->GetOriginShape();
+
+    uint32_t M = xShape.GetDim(0);
+    uint32_t K = xShape.GetDim(1);
+    uint32_t N = weightShape.GetDim(0);
+
+    auto attrs = context->GetAttrs();
+    const float* scalingFactorPtr = attrs->GetAttrPointer<float>(0);
+    float scalingFactor = *scalingFactorPtr;
+
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    auto aicNum = ascendcPlatform.GetCoreNumAic();
+
+    matmul_tiling::MultiCoreMatmulTiling cubeTiling(ascendcPlatform);
+    cubeTiling.SetDim(aicNum);
+    cubeTiling.SetAType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                        matmul_tiling::DataType::DT_FLOAT, false);
+    cubeTiling.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                        matmul_tiling::DataType::DT_FLOAT, true);
+    cubeTiling.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                        matmul_tiling::DataType::DT_FLOAT);
+    cubeTiling.SetBiasType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                           matmul_tiling::DataType::DT_FLOAT);
+    cubeTiling.SetShape(M, N, K);
+    cubeTiling.SetOrgShape(M, N, K);
+    cubeTiling.SetBias(true);
+    cubeTiling.SetBufferSpace(-1, -1, -1);
+
+    if (cubeTiling.GetTiling(tiling.cubeTilingData) == -1) {
+        return ge::GRAPH_FAILED;
+    }
+
+    tiling.set_scalingFactor(scalingFactor);
+    tiling.set_M(M);
+    tiling.set_N(N);
+    tiling.set_K(K);
+
+    context->SetBlockDim(aicNum);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
+                        context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
-    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
-    currentWorkspace[0] = 0;
+
+    size_t userWorkspaceSize = static_cast<size_t>(M) * static_cast<size_t>(N) * sizeof(float);
+    size_t systemWorkspaceSize = static_cast<size_t>(ascendcPlatform.GetLibApiWorkSpaceSize());
+    size_t* currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = userWorkspaceSize + systemWorkspaceSize;
+
     return ge::GRAPH_SUCCESS;
 }
 }
 
-
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x_shape = context->GetInputShape(0);
-    gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x_shape;
+    const gert::Shape* xShape = context->GetInputShape(0);
+    const gert::Shape* weightShape = context->GetInputShape(1);
+    gert::Shape* yShape = context->GetOutputShape(0);
+    yShape->SetDimNum(2);
+    yShape->SetDim(0, xShape->GetDim(0));
+    yShape->SetDim(1, weightShape->GetDim(0));
     return GRAPH_SUCCESS;
 }
-static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext* context)
 {
     const auto inputDataType = context->GetInputDataType(0);
     context->SetOutputDataType(0, inputDataType);
     return ge::GRAPH_SUCCESS;
 }
 }
-
 
 namespace ops {
 class MatmulSwishScalingCustom : public OpDef {
@@ -98,18 +152,28 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
         this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
+        this->Attr("scaling_factor").AttrType(REQUIRED).Float();
+
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
-        this->AICore()
-            .SetTiling(optiling::TilingFunc);
+        this->AICore().SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
-
     }
 };
 
@@ -119,76 +183,119 @@ OP_ADD(MatmulSwishScalingCustom);
 
 kernel_src="""
 #include "kernel_operator.h"
+#include "lib/matmul_intf.h"
+
+using namespace AscendC;
 
 constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t TILE_LEN = 2048;
 
-class KernelSwishScaling {
-public:
-    __aicore__ inline KernelSwishScaling() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
-    {
-        this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->tileNum = tileNum;
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+typedef matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float, false> aType;
+typedef matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float, true> bType;
+typedef matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float> cType;
+typedef matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float> biasType;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ float *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+extern "C" __global__ __aicore__ void matmul_swish_scaling_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tilingData, tiling);
+    GM_ADDR userWS = GetUserWorkspace(workspace);
+    if (userWS == nullptr) {
+        return;
     }
-    __aicore__ inline void Process()
-    {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
+
+    if ASCEND_IS_AIC {
+        TPipe cubePipe;
+        matmul::Matmul<aType, bType, cType, biasType> mm;
+        REGIST_MATMUL_OBJ(&cubePipe, GetSysWorkSpacePtr(), mm, &tilingData.cubeTilingData);
+
+        GlobalTensor<float> xGm;
+        GlobalTensor<float> weightGm;
+        GlobalTensor<float> biasGm;
+        GlobalTensor<float> outGm;
+        xGm.SetGlobalBuffer((__gm__ float*)x);
+        weightGm.SetGlobalBuffer((__gm__ float*)weight);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias);
+        outGm.SetGlobalBuffer((__gm__ float*)userWS);
+
+        mm.SetTensorA(xGm);
+        mm.SetTensorB(weightGm, true);
+        mm.SetBias(biasGm);
+        mm.IterateAll(outGm);
+        mm.End();
+    }
+
+    SyncAll();
+
+    if ASCEND_IS_AIV {
+        TPipe vecPipe;
+        TQue<TPosition::VECIN, BUFFER_NUM> inQueue;
+        TQue<TPosition::VECOUT, BUFFER_NUM> outQueue;
+        TBuf<TPosition::VECCALC> tmpBuf;
+        TBuf<TPosition::VECCALC> oneBuf;
+
+        vecPipe.InitBuffer(inQueue, BUFFER_NUM, TILE_LEN * sizeof(float));
+        vecPipe.InitBuffer(outQueue, BUFFER_NUM, TILE_LEN * sizeof(float));
+        vecPipe.InitBuffer(tmpBuf, TILE_LEN * sizeof(float));
+        vecPipe.InitBuffer(oneBuf, TILE_LEN * sizeof(float));
+
+        GlobalTensor<float> srcGm;
+        GlobalTensor<float> dstGm;
+        srcGm.SetGlobalBuffer((__gm__ float*)userWS);
+        dstGm.SetGlobalBuffer((__gm__ float*)y);
+
+        LocalTensor<float> oneLocal = oneBuf.Get<float>();
+        Duplicate(oneLocal, (float)1.0f, TILE_LEN);
+
+        uint32_t totalLen = tilingData.M * tilingData.N;
+        uint32_t aivNum = GetBlockNum();
+        uint32_t aivIdx = GetBlockIdx();
+
+        uint32_t lenPerBlock = (totalLen + aivNum - 1) / aivNum;
+        lenPerBlock = ((lenPerBlock + 7) / 8) * 8;
+        uint32_t startOffset = aivIdx * lenPerBlock;
+        if (startOffset >= totalLen) {
+            return;
+        }
+        uint32_t realLen = lenPerBlock;
+        if (startOffset + realLen > totalLen) {
+            realLen = totalLen - startOffset;
+        }
+
+        float scaling = tilingData.scalingFactor;
+        uint32_t processed = 0;
+        while (processed < realLen) {
+            uint32_t curLen = realLen - processed;
+            if (curLen > (uint32_t)TILE_LEN) {
+                curLen = (uint32_t)TILE_LEN;
+            }
+
+            LocalTensor<float> inLocal = inQueue.AllocTensor<float>();
+            DataCopy(inLocal, srcGm[startOffset + processed], curLen);
+            inQueue.EnQue(inLocal);
+
+            LocalTensor<float> xLocal = inQueue.DeQue<float>();
+            LocalTensor<float> outLocal = outQueue.AllocTensor<float>();
+            LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+
+            Muls(tmpLocal, xLocal, (float)-1.0f, curLen);
+            Exp(tmpLocal, tmpLocal, curLen);
+            Adds(tmpLocal, tmpLocal, (float)1.0f, curLen);
+            Div(tmpLocal, oneLocal, tmpLocal, curLen);
+            Mul(outLocal, xLocal, tmpLocal, curLen);
+            Muls(outLocal, outLocal, scaling, curLen);
+
+            outQueue.EnQue<float>(outLocal);
+            LocalTensor<float> yLocal = outQueue.DeQue<float>();
+            DataCopy(dstGm[startOffset + processed], yLocal, curLen);
+
+            inQueue.FreeTensor(xLocal);
+            outQueue.FreeTensor(yLocal);
+
+            processed += curLen;
         }
     }
-
-private:
-    __aicore__ inline void CopyIn(int32_t progress)
-    {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
-        inQueueX.EnQue(xLocal);
-    }
-    __aicore__ inline void Compute(int32_t progress)
-    {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-        AscendC::Muls(yLocal, xLocal, (float)(-1.0), this->tileLength);
-        AscendC::Exp(yLocal, yLocal, this->tileLength);
-        AscendC::Adds(yLocal, yLocal, (float)(1.0), this->tileLength);
-        AscendC::Reciprocal(yLocal, yLocal, this->tileLength);
-        AscendC::Mul(yLocal, xLocal, yLocal, this->tileLength);
-        AscendC::Muls(yLocal, yLocal, (float)(2.0), this->tileLength);
-        outQueueY.EnQue<float>(yLocal);
-        inQueueX.FreeTensor(xLocal);
-    }
-    __aicore__ inline void CopyOut(int32_t progress)
-    {
-        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
-        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
-        outQueueY.FreeTensor(yLocal);
-    }
-
-private:
-    AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
-    uint32_t blockLength;
-    uint32_t tileNum;
-    uint32_t tileLength;
-};
-
-extern "C" __global__ __aicore__ void matmul_swish_scaling_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
-    GET_TILING_DATA(tiling_data, tiling);
-    KernelSwishScaling op;
-    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum);
-    op.Process();
 }
 """
 
@@ -198,9 +305,16 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor matmul_swish_scaling_custom_impl_npu(const at::Tensor& x) {
-    at::Tensor result = at::empty_like(x);
-    EXEC_NPU_CMD(aclnnMatmulSwishScalingCustom, x, result);
+at::Tensor matmul_swish_scaling_custom_impl_npu(const at::Tensor& x,
+                                                 const at::Tensor& weight,
+                                                 const at::Tensor& bias,
+                                                 double scaling_factor) {
+    auto sizes = x.sizes();
+    int64_t M = sizes[0];
+    int64_t N = weight.size(0);
+    at::Tensor result = at::empty({M, N}, x.options());
+    float sf = static_cast<float>(scaling_factor);
+    EXEC_NPU_CMD(aclnnMatmulSwishScalingCustom, x, weight, bias, sf, result);
     return result;
 }
 
@@ -209,7 +323,8 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("matmul_swish_scaling_custom", &matmul_swish_scaling_custom_impl_npu, "swish activation with scaling");
+    m.def("matmul_swish_scaling_custom", &matmul_swish_scaling_custom_impl_npu,
+          "matmul + swish + scaling fused kernel");
 }
 """
 
@@ -218,6 +333,7 @@ import torch
 import torch.nn as nn
 import torch_npu
 import custom_ops_lib
+
 class ModelNew(nn.Module):
     def __init__(self, in_features, out_features, scaling_factor):
         super(ModelNew, self).__init__()
@@ -225,6 +341,10 @@ class ModelNew(nn.Module):
         self.scaling_factor = scaling_factor
 
     def forward(self, x):
-        x = self.matmul(x)
-        return custom_ops_lib.matmul_swish_scaling_custom(x)
+        return custom_ops_lib.matmul_swish_scaling_custom(
+            x.contiguous(),
+            self.matmul.weight.contiguous(),
+            self.matmul.bias.contiguous(),
+            float(self.scaling_factor),
+        )
 '''

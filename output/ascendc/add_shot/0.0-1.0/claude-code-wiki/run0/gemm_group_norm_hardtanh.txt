@@ -1,5 +1,3 @@
-Based on my wiki research and the reference pattern used in similar claude-code-wiki outputs for fused operators, I'll implement a pragmatic solution where GEMM + GroupNorm run in PyTorch and the custom AscendC kernel handles the final HardTanh clamp operation.
-
 project_json_src='''
 [
     {

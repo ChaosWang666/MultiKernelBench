@@ -1,4 +1,3 @@
-```python
 project_json_src='''
 [
     {
@@ -27,13 +26,6 @@ project_json_src='''
                     "float"
                 ]
             }
-        ],
-        "attr": [
-            {
-                "name": "multiplier",
-                "type": "float",
-                "param_type": "required"
-            }
         ]
     }
 ]
@@ -44,15 +36,15 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(ConvTranspose2dMultiplyGlobalAvgPoolGlobalAvgPoolMeanCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, totalChannels);
-  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
-  TILING_DATA_FIELD_DEF(uint32_t, channelsPerBlock);
+  TILING_DATA_FIELD_DEF(uint32_t, totalRows);
+  TILING_DATA_FIELD_DEF(uint32_t, elementsPerRow);
   TILING_DATA_FIELD_DEF(uint32_t, tileLength);
-  TILING_DATA_FIELD_DEF(float, scale);
+  TILING_DATA_FIELD_DEF(uint32_t, tilesPerRow);
+  TILING_DATA_FIELD_DEF(uint32_t, rowsPerCore);
+  TILING_DATA_FIELD_DEF(float, invSize);
 END_TILING_DATA_DEF;
 
-REGISTER_TILING_DATA_CLASS(ConvTranspose2dMultiplyGlobalAvgPoolGlobalAvgPoolMeanCustom,
-                           ConvTranspose2dMultiplyGlobalAvgPoolGlobalAvgPoolMeanCustomTilingData)
+REGISTER_TILING_DATA_CLASS(ConvTranspose2dMultiplyGlobalAvgPoolGlobalAvgPoolMeanCustom, ConvTranspose2dMultiplyGlobalAvgPoolGlobalAvgPoolMeanCustomTilingData)
 }
 """
 
@@ -60,50 +52,55 @@ host_operator_src="""
 #include "conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t MAX_TILE = 8192;
-
+const uint32_t TILE_LENGTH = 4096;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose2dMultiplyGlobalAvgPoolGlobalAvgPoolMeanCustomTilingData tiling;
 
-    auto xShape = context->GetInputShape(0)->GetStorageShape();
-    uint32_t n = xShape.GetDim(0);
-    uint32_t c = xShape.GetDim(1);
-    uint32_t h = xShape.GetDim(2);
-    uint32_t w = xShape.GetDim(3);
-    uint32_t totalChannels = n * c;
-    uint32_t spatialSize = h * w;
+    const gert::Shape& xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t B = static_cast<uint32_t>(xShape.GetDim(0));
+    uint32_t C = static_cast<uint32_t>(xShape.GetDim(1));
+    uint32_t H = static_cast<uint32_t>(xShape.GetDim(2));
+    uint32_t W = static_cast<uint32_t>(xShape.GetDim(3));
 
-    auto attrs = context->GetAttrs();
-    float multiplier = *(attrs->GetFloat(0));
-    float scale = multiplier / static_cast<float>(spatialSize);
+    uint32_t totalRows = B * C;
+    uint32_t elementsPerRow = H * W;
+    uint32_t blockDim = BLOCK_DIM;
+    if (totalRows < blockDim) {
+        blockDim = totalRows;
+    }
+    while (blockDim > 1 && (totalRows % blockDim) != 0) {
+        blockDim--;
+    }
+    uint32_t rowsPerCore = totalRows / blockDim;
+    uint32_t tileLength = TILE_LENGTH;
+    if (elementsPerRow < tileLength) {
+        tileLength = elementsPerRow;
+    }
+    while (tileLength > 8 && (elementsPerRow % tileLength) != 0) {
+        tileLength -= 8;
+    }
+    uint32_t tilesPerRow = elementsPerRow / tileLength;
+    float invSize = 1.0f / static_cast<float>(elementsPerRow);
 
-    uint32_t channelsPerBlock = (totalChannels + BLOCK_DIM - 1) / BLOCK_DIM;
-    channelsPerBlock = ((channelsPerBlock + 7) / 8) * 8;
-    if (channelsPerBlock == 0) channelsPerBlock = 8;
-
-    uint32_t tileLength = spatialSize;
-    if (tileLength > MAX_TILE) tileLength = MAX_TILE;
-    tileLength = ((tileLength + 7) / 8) * 8;
-    if (tileLength == 0) tileLength = 8;
-
-    tiling.set_totalChannels(totalChannels);
-    tiling.set_spatialSize(spatialSize);
-    tiling.set_channelsPerBlock(channelsPerBlock);
+    context->SetBlockDim(blockDim);
+    tiling.set_totalRows(totalRows);
+    tiling.set_elementsPerRow(elementsPerRow);
     tiling.set_tileLength(tileLength);
-    tiling.set_scale(scale);
-
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
-                        context->GetRawTilingData()->GetCapacity());
+    tiling.set_tilesPerRow(tilesPerRow);
+    tiling.set_rowsPerCore(rowsPerCore);
+    tiling.set_invSize(invSize);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
     currentWorkspace[0] = 0;
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -125,6 +122,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 }
 }
 
+
 namespace ops {
 class ConvTranspose2dMultiplyGlobalAvgPoolGlobalAvgPoolMeanCustom : public OpDef {
 public:
@@ -140,10 +138,11 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("multiplier").AttrType(REQUIRED).Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
-        this->AICore().SetTiling(optiling::TilingFunc);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
     }
 };
@@ -155,116 +154,81 @@ OP_ADD(ConvTranspose2dMultiplyGlobalAvgPoolGlobalAvgPoolMeanCustom);
 kernel_src="""
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2;
-
-class KernelMulMean {
+class KernelMeanReduce {
 public:
-    __aicore__ inline KernelMulMean() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z,
-                                 uint32_t totalChannels,
-                                 uint32_t spatialSize,
-                                 uint32_t channelsPerBlock,
-                                 uint32_t tileLength,
-                                 float scale)
+    __aicore__ inline KernelMeanReduce() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalRows, uint32_t elementsPerRow,
+                                uint32_t tileLength, uint32_t tilesPerRow, uint32_t rowsPerCore, float invSize)
     {
-        uint32_t blockIdx = AscendC::GetBlockIdx();
-        uint32_t startCh = blockIdx * channelsPerBlock;
-        uint32_t actualChannels = 0;
-        if (startCh < totalChannels) {
-            actualChannels = (startCh + channelsPerBlock > totalChannels)
-                             ? (totalChannels - startCh)
-                             : channelsPerBlock;
-        }
-        this->startCh = startCh;
-        this->actualChannels = actualChannels;
-        this->channelsPerBlock = channelsPerBlock;
-        this->spatialSize = spatialSize;
+        this->elementsPerRow = elementsPerRow;
         this->tileLength = tileLength;
-        this->scale = scale;
+        this->tilesPerRow = tilesPerRow;
+        this->rowsPerCore = rowsPerCore;
+        this->invSize = invSize;
 
-        xGm.SetGlobalBuffer((__gm__ float*)x + (uint64_t)startCh * spatialSize,
-                            (uint64_t)channelsPerBlock * spatialSize);
-        zGm.SetGlobalBuffer((__gm__ float*)z + startCh, channelsPerBlock);
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t startRow = rowsPerCore * blockIdx;
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLength * sizeof(float));
+        uint64_t xOffset = static_cast<uint64_t>(startRow) * static_cast<uint64_t>(elementsPerRow);
+        xGm.SetGlobalBuffer((__gm__ float *)x + xOffset, static_cast<uint64_t>(rowsPerCore) * static_cast<uint64_t>(elementsPerRow));
+        yGm.SetGlobalBuffer((__gm__ float *)y + startRow, rowsPerCore);
+
+        pipe.InitBuffer(inQueueX, 2, tileLength * sizeof(float));
+        pipe.InitBuffer(yBuf, ((rowsPerCore * sizeof(float) + 31) / 32) * 32);
         pipe.InitBuffer(workBuf, tileLength * sizeof(float));
-        pipe.InitBuffer(outQueue, 1, channelsPerBlock * sizeof(float));
+        pipe.InitBuffer(sumBuf, 32);
     }
 
     __aicore__ inline void Process()
     {
-        AscendC::LocalTensor<float> outLocal = outQueue.AllocTensor<float>();
-        AscendC::Duplicate(outLocal, (float)0.0f, this->channelsPerBlock);
-
+        AscendC::LocalTensor<float> yLocal = yBuf.Get<float>();
         AscendC::LocalTensor<float> workLocal = workBuf.Get<float>();
+        AscendC::LocalTensor<float> sumLocal = sumBuf.Get<float>();
 
-        for (uint32_t ch = 0; ch < this->actualChannels; ch++) {
-            uint64_t baseOffset = (uint64_t)ch * this->spatialSize;
-            uint32_t numTiles = this->spatialSize / this->tileLength;
-            uint32_t remainder = this->spatialSize - numTiles * this->tileLength;
+        for (uint32_t r = 0; r < this->rowsPerCore; r++) {
             float acc = 0.0f;
-
-            for (uint32_t t = 0; t < numTiles; t++) {
+            for (uint32_t t = 0; t < this->tilesPerRow; t++) {
                 AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-                AscendC::DataCopy(xLocal, xGm[baseOffset + t * this->tileLength], this->tileLength);
+                uint64_t gmOffset = static_cast<uint64_t>(r) * static_cast<uint64_t>(this->elementsPerRow)
+                                  + static_cast<uint64_t>(t) * static_cast<uint64_t>(this->tileLength);
+                AscendC::DataCopy(xLocal, xGm[gmOffset], this->tileLength);
                 inQueueX.EnQue(xLocal);
                 xLocal = inQueueX.DeQue<float>();
-                AscendC::ReduceSum<float>(workLocal, xLocal, workLocal, this->tileLength);
-                AscendC::PipeBarrier<PIPE_V>();
-                acc += workLocal.GetValue(0);
+                AscendC::ReduceSum<float>(sumLocal, xLocal, workLocal, this->tileLength);
+                AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+                acc += sumLocal.GetValue(0);
                 inQueueX.FreeTensor(xLocal);
             }
-
-            if (remainder > 0) {
-                uint32_t alignedLen = ((remainder + 7) / 8) * 8;
-                AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-                AscendC::DataCopy(xLocal, xGm[baseOffset + numTiles * this->tileLength], alignedLen);
-                inQueueX.EnQue(xLocal);
-                xLocal = inQueueX.DeQue<float>();
-                for (uint32_t i = remainder; i < alignedLen; i++) {
-                    xLocal.SetValue(i, (float)0.0f);
-                }
-                AscendC::ReduceSum<float>(workLocal, xLocal, workLocal, alignedLen);
-                AscendC::PipeBarrier<PIPE_V>();
-                acc += workLocal.GetValue(0);
-                inQueueX.FreeTensor(xLocal);
-            }
-
-            outLocal.SetValue(ch, acc * this->scale);
+            yLocal.SetValue(r, acc * this->invSize);
         }
 
-        outQueue.EnQue(outLocal);
-        outLocal = outQueue.DeQue<float>();
-        AscendC::DataCopy(zGm, outLocal, this->channelsPerBlock);
-        outQueue.FreeTensor(outLocal);
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::DataCopy(yGm, yLocal, this->rowsPerCore);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueue;
+    AscendC::TQue<AscendC::TPosition::VECIN, 2> inQueueX;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> yBuf;
     AscendC::TBuf<AscendC::TPosition::VECCALC> workBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> sumBuf;
     AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> zGm;
-    uint32_t startCh;
-    uint32_t actualChannels;
-    uint32_t channelsPerBlock;
-    uint32_t spatialSize;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t elementsPerRow;
     uint32_t tileLength;
-    float scale;
+    uint32_t tilesPerRow;
+    uint32_t rowsPerCore;
+    float invSize;
 };
 
-extern "C" __global__ __aicore__ void conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom(
-    GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
-{
+extern "C" __global__ __aicore__ void conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelMulMean op;
-    op.Init(x, z,
-            tiling_data.totalChannels,
-            tiling_data.spatialSize,
-            tiling_data.channelsPerBlock,
-            tiling_data.tileLength,
-            tiling_data.scale);
+    KernelMeanReduce op;
+    op.Init(x, y, tiling_data.totalRows, tiling_data.elementsPerRow,
+            tiling_data.tileLength, tiling_data.tilesPerRow,
+            tiling_data.rowsPerCore, tiling_data.invSize);
     op.Process();
 }
 """
@@ -275,51 +239,38 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom_impl_npu(
-    const at::Tensor& self, double multiplier)
-{
-    auto sizes = self.sizes();
-    int64_t n = sizes[0];
-    int64_t c = sizes[1];
-    at::Tensor result = at::empty({n, c, 1, 1}, self.options());
-    float multiplier_f = static_cast<float>(multiplier);
-    EXEC_NPU_CMD(aclnnConvTranspose2dMultiplyGlobalAvgPoolGlobalAvgPoolMeanCustom,
-                 self, multiplier_f, result);
+at::Tensor conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom_impl_npu(const at::Tensor& x) {
+    int64_t B = x.size(0);
+    int64_t C = x.size(1);
+    at::Tensor result = at::empty({B, C, 1, 1}, x.options());
+    EXEC_NPU_CMD(aclnnConvTranspose2dMultiplyGlobalAvgPoolGlobalAvgPoolMeanCustom, x, result);
     return result;
 }
 
 TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
-    m.impl("conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom",
-           &conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom_impl_npu);
+    m.impl("conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom", &conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom_impl_npu);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom",
           &conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom_impl_npu,
-          "fused multiply + global average pooling");
+          "conv_transpose2d + multiply + double global average pool fused mean reduction");
 }
 """
 
 model_src='''
 import torch
-import torch.nn as nn
 import torch_npu
 import custom_ops_lib
 
-
-class ModelNew(nn.Module):
+class ModelNew(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, output_padding, multiplier):
-        super(ModelNew, self).__init__()
-        self.conv_transpose = nn.ConvTranspose2d(in_channels, out_channels, kernel_size,
-                                                 stride=stride, padding=padding,
-                                                 output_padding=output_padding)
-        self.multiplier = float(multiplier)
+        super().__init__()
+        self.conv_transpose = torch.nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, output_padding=output_padding)
+        self.multiplier = multiplier
 
     def forward(self, x):
-        x = self.conv_transpose(x)
-        x = x.contiguous()
-        x = custom_ops_lib.conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom(
-            x, self.multiplier)
-        return x
+        x = self.conv_transpose(x).contiguous()
+        out = custom_ops_lib.conv_transpose2d_multiply_global_avg_pool_global_avg_pool_mean_custom(x)
+        return out * self.multiplier
 '''
-```

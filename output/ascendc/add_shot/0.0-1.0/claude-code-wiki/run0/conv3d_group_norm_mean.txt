@@ -1,5 +1,3 @@
-Based on my review of the Wiki reduction patterns and AscendC APIs, I'll implement the mean reduction as a custom kernel while keeping Conv3d and GroupNorm as PyTorch operations (these are too complex to rewrite in a small custom kernel).
-
 project_json_src='''
 [
     {
@@ -39,9 +37,11 @@ host_tiling_src="""
 namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv3dGroupNormMeanCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, batchSize);
-  TILING_DATA_FIELD_DEF(uint32_t, elementPerBatch);
+  TILING_DATA_FIELD_DEF(uint32_t, perBatch);
   TILING_DATA_FIELD_DEF(uint32_t, tileLength);
-  TILING_DATA_FIELD_DEF(uint32_t, batchPerBlock);
+  TILING_DATA_FIELD_DEF(uint32_t, numTiles);
+  TILING_DATA_FIELD_DEF(uint32_t, tailLength);
+  TILING_DATA_FIELD_DEF(float, invNum);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv3dGroupNormMeanCustom, Conv3dGroupNormMeanCustomTilingData)
@@ -52,54 +52,49 @@ host_operator_src="""
 #include "conv3d_group_norm_mean_custom_tiling.h"
 #include "register/op_def_registry.h"
 
-
 namespace optiling {
 const uint32_t BLOCK_DIM = 16;
+const uint32_t BATCH_PER_BLOCK = 8;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv3dGroupNormMeanCustomTilingData tiling;
-    const gert::Shape& xShape = context->GetInputShape(0)->GetOriginShape();
 
-    uint32_t batchSize = xShape.GetDim(0);
-    uint32_t elementPerBatch = 1;
-    for (size_t i = 1; i < xShape.GetDimNum(); i++) {
-        elementPerBatch *= xShape.GetDim(i);
-    }
-
-    uint32_t blockDim = BLOCK_DIM;
-    if (batchSize < blockDim) {
-        blockDim = batchSize;
-    }
-    if (blockDim == 0) {
-        blockDim = 1;
-    }
-    uint32_t batchPerBlock = batchSize / blockDim;
-    if (batchPerBlock == 0) {
-        batchPerBlock = 1;
+    auto inputShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = static_cast<uint32_t>(inputShape.GetDim(0));
+    uint32_t perBatch = 1;
+    for (size_t i = 1; i < inputShape.GetDimNum(); ++i) {
+        perBatch *= static_cast<uint32_t>(inputShape.GetDim(i));
     }
 
     uint32_t tileLength = 4800;
-    if (tileLength > elementPerBatch) {
-        tileLength = (elementPerBatch / 8) * 8;
-        if (tileLength == 0) {
-            tileLength = elementPerBatch;
-        }
+    if (perBatch < tileLength) {
+        tileLength = perBatch;
     }
+    while (tileLength > 8 && (perBatch % tileLength) != 0) {
+        tileLength -= 8;
+    }
+    uint32_t numTiles = perBatch / tileLength;
+    uint32_t tailLength = perBatch - numTiles * tileLength;
 
-    context->SetBlockDim(blockDim);
+    float invNum = 1.0f / static_cast<float>(static_cast<int32_t>(perBatch));
+
+    context->SetBlockDim(BLOCK_DIM);
     tiling.set_batchSize(batchSize);
-    tiling.set_elementPerBatch(elementPerBatch);
+    tiling.set_perBatch(perBatch);
     tiling.set_tileLength(tileLength);
-    tiling.set_batchPerBlock(batchPerBlock);
+    tiling.set_numTiles(numTiles);
+    tiling.set_tailLength(tailLength);
+    tiling.set_invNum(invNum);
 
-    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
+                        context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
     currentWorkspace[0] = 0;
     return ge::GRAPH_SUCCESS;
 }
 }
-
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -117,7 +112,6 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
-
 
 namespace ops {
 class Conv3dGroupNormMeanCustom : public OpDef {
@@ -151,105 +145,112 @@ kernel_src="""
 #include "kernel_operator.h"
 
 constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t BATCH_PER_BLOCK = 8;
+constexpr int32_t OUT_PER_BLOCK = 8;
 
-class KernelMean {
+class KernelConv3dGroupNormMean {
 public:
-    __aicore__ inline KernelMean() {}
+    __aicore__ inline KernelConv3dGroupNormMean() {}
+
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
-                                  uint32_t batchSize, uint32_t elementPerBatch,
-                                  uint32_t tileLength, uint32_t batchPerBlock)
+                                uint32_t perBatch, uint32_t tileLength,
+                                uint32_t numTiles, uint32_t tailLength,
+                                float invNum)
     {
-        this->batchSize = batchSize;
-        this->elementPerBatch = elementPerBatch;
+        this->perBatch = perBatch;
         this->tileLength = tileLength;
-        this->batchPerBlock = batchPerBlock;
+        this->numTiles = numTiles;
+        this->tailLength = tailLength;
+        this->invNum = invNum;
 
         uint32_t blockIdx = AscendC::GetBlockIdx();
-        this->startBatch = blockIdx * this->batchPerBlock;
+        uint32_t blockBatchOffset = blockIdx * BATCH_PER_BLOCK;
+        uint32_t blockElemOffset = blockBatchOffset * perBatch;
 
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->startBatch * elementPerBatch,
-                             this->batchPerBlock * elementPerBatch);
-        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->startBatch, this->batchPerBlock);
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + blockElemOffset,
+                            BATCH_PER_BLOCK * perBatch);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + blockBatchOffset,
+                            BATCH_PER_BLOCK);
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
-        uint32_t outAligned = ((this->batchPerBlock + 7) / 8) * 8;
-        if (outAligned == 0) outAligned = 8;
-        pipe.InitBuffer(outQueueY, 1, outAligned * sizeof(DTYPE_Y));
-        pipe.InitBuffer(workBuf, 2048);
-        pipe.InitBuffer(dstBuf, 32);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(accBuf, tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(workBuf, tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, 1, OUT_PER_BLOCK * sizeof(DTYPE_Y));
     }
 
     __aicore__ inline void Process()
     {
-        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<DTYPE_Y> outLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<DTYPE_X> acc = accBuf.Get<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_X> work = workBuf.Get<DTYPE_X>();
 
-        for (uint32_t b = 0; b < this->batchPerBlock; b++) {
-            float sum = ProcessBatch(b);
-            float mean = sum / (float)this->elementPerBatch;
-            yLocal.SetValue(b, mean);
+        AscendC::Duplicate<DTYPE_Y>(outLocal, (DTYPE_Y)0, OUT_PER_BLOCK);
+
+        for (int32_t b = 0; b < BATCH_PER_BLOCK; b++) {
+            AscendC::Duplicate<DTYPE_X>(acc, (DTYPE_X)0, this->tileLength);
+
+            uint32_t batchBase = static_cast<uint32_t>(b) * this->perBatch;
+
+            for (uint32_t t = 0; t < this->numTiles; t++) {
+                AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+                AscendC::DataCopy(xLocal,
+                                  xGm[batchBase + t * this->tileLength],
+                                  this->tileLength);
+                inQueueX.EnQue(xLocal);
+
+                AscendC::LocalTensor<DTYPE_X> xIn = inQueueX.DeQue<DTYPE_X>();
+                AscendC::Add(acc, acc, xIn, this->tileLength);
+                inQueueX.FreeTensor(xIn);
+            }
+
+            if (this->tailLength > 0) {
+                AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+                AscendC::DataCopy(xLocal,
+                                  xGm[batchBase + this->numTiles * this->tileLength],
+                                  this->tailLength);
+                inQueueX.EnQue(xLocal);
+
+                AscendC::LocalTensor<DTYPE_X> xIn = inQueueX.DeQue<DTYPE_X>();
+                AscendC::Add(acc, acc, xIn, this->tailLength);
+                inQueueX.FreeTensor(xIn);
+            }
+
+            AscendC::ReduceSum<DTYPE_X>(work, acc, work, this->tileLength);
+            DTYPE_X partial = work.GetValue(0);
+            outLocal.SetValue(b, partial * this->invNum);
         }
 
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-
-        outQueueY.EnQue(yLocal);
-        AscendC::LocalTensor<DTYPE_Y> yOut = outQueueY.DeQue<DTYPE_Y>();
-        uint32_t outAligned = ((this->batchPerBlock + 7) / 8) * 8;
-        if (outAligned == 0) outAligned = 8;
-        AscendC::DataCopy(yGm, yOut, outAligned);
-        outQueueY.FreeTensor(yOut);
-    }
-
-private:
-    __aicore__ inline float ProcessBatch(uint32_t b)
-    {
-        float sum = 0.0f;
-        uint32_t processed = 0;
-        while (processed < this->elementPerBatch) {
-            uint32_t remain = this->elementPerBatch - processed;
-            uint32_t currentTile = (remain >= this->tileLength) ? this->tileLength : remain;
-            uint32_t copyLen = ((currentTile + 7) / 8) * 8;
-
-            AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-            AscendC::DataCopy(xLocal, xGm[b * this->elementPerBatch + processed], copyLen);
-            inQueueX.EnQue(xLocal);
-            xLocal = inQueueX.DeQue<DTYPE_X>();
-
-            AscendC::LocalTensor<DTYPE_X> dst = dstBuf.Get<DTYPE_X>();
-            AscendC::LocalTensor<DTYPE_X> work = workBuf.Get<DTYPE_X>();
-            AscendC::ReduceSum<DTYPE_X>(dst, xLocal, work, currentTile);
-
-            AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-            float partialSum = dst.GetValue(0);
-            sum += partialSum;
-
-            inQueueX.FreeTensor(xLocal);
-            processed += currentTile;
-        }
-        return sum;
+        outQueueY.EnQue(outLocal);
+        AscendC::LocalTensor<DTYPE_Y> o = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm, o, OUT_PER_BLOCK);
+        outQueueY.FreeTensor(o);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> accBuf;
     AscendC::TBuf<AscendC::TPosition::VECCALC> workBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> dstBuf;
     AscendC::GlobalTensor<DTYPE_X> xGm;
     AscendC::GlobalTensor<DTYPE_Y> yGm;
-    uint32_t batchSize;
-    uint32_t elementPerBatch;
+    uint32_t perBatch;
     uint32_t tileLength;
-    uint32_t batchPerBlock;
-    uint32_t startBatch;
+    uint32_t numTiles;
+    uint32_t tailLength;
+    float invNum;
 };
 
-extern "C" __global__ __aicore__ void conv3d_group_norm_mean_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv3d_group_norm_mean_custom(
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelMean op;
-    op.Init(x, y, tiling_data.batchSize, tiling_data.elementPerBatch,
-            tiling_data.tileLength, tiling_data.batchPerBlock);
+    KernelConv3dGroupNormMean op;
+    op.Init(x, y,
+            tiling_data.perBatch,
+            tiling_data.tileLength,
+            tiling_data.numTiles,
+            tiling_data.tailLength,
+            tiling_data.invNum);
     op.Process();
 }
 """
@@ -260,10 +261,12 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv3d_group_norm_mean_custom_impl_npu(const at::Tensor& x) {
-    int64_t batch_size = x.size(0);
-    at::Tensor result = at::empty({batch_size}, x.options());
-    EXEC_NPU_CMD(aclnnConv3dGroupNormMeanCustom, x, result);
+at::Tensor conv3d_group_norm_mean_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes();
+    int64_t batch_size = sizes[0];
+    at::Tensor contiguous_self = self.contiguous();
+    at::Tensor result = at::empty({batch_size}, contiguous_self.options());
+    EXEC_NPU_CMD(aclnnConv3dGroupNormMeanCustom, contiguous_self, result);
     return result;
 }
 
@@ -272,25 +275,28 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv3d_group_norm_mean_custom", &conv3d_group_norm_mean_custom_impl_npu, "Mean reduction over non-batch dims after Conv3d + GroupNorm");
+    m.def("conv3d_group_norm_mean_custom", &conv3d_group_norm_mean_custom_impl_npu,
+          "Conv3d + GroupNorm + Mean fused tail reduction");
 }
 """
 
 model_src='''
 import torch
-import torch.nn as nn
 import torch_npu
+import torch.nn as nn
 import custom_ops_lib
+
 
 class ModelNew(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, num_groups):
-        super(ModelNew, self).__init__()
+        super().__init__()
         self.conv = nn.Conv3d(in_channels, out_channels, kernel_size)
         self.group_norm = nn.GroupNorm(num_groups, out_channels)
 
     def forward(self, x):
         x = self.conv(x)
         x = self.group_norm(x)
-        x = custom_ops_lib.conv3d_group_norm_mean_custom(x.contiguous())
+        x = x.contiguous()
+        x = custom_ops_lib.conv3d_group_norm_mean_custom(x)
         return x
 '''

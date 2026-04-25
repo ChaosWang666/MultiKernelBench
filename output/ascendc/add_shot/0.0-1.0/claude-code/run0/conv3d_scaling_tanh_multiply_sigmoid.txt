@@ -1,4 +1,3 @@
-```python
 project_json_src='''
 [
     {
@@ -72,7 +71,7 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 961;
+const uint32_t TILE_NUM = 128;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
 
@@ -151,9 +150,9 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelFused {
+class KernelFusedAct {
 public:
-    __aicore__ inline KernelFused() {}
+    __aicore__ inline KernelFusedAct() {}
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR s, GM_ADDR b, GM_ADDR z,
                                 uint32_t totalLength, uint32_t tileNum)
     {
@@ -171,7 +170,6 @@ public:
         pipe.InitBuffer(inQueueB, BUFFER_NUM, this->tileLength * sizeof(DTYPE_B));
         pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
     }
-
     __aicore__ inline void Process()
     {
         int32_t loopCount = this->tileNum * BUFFER_NUM;
@@ -195,7 +193,6 @@ private:
         inQueueS.EnQue(sLocal);
         inQueueB.EnQue(bLocal);
     }
-
     __aicore__ inline void Compute(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
@@ -206,14 +203,16 @@ private:
         AscendC::Mul(zLocal, xLocal, sLocal, this->tileLength);
         AscendC::Tanh(zLocal, zLocal, this->tileLength);
         AscendC::Mul(zLocal, zLocal, bLocal, this->tileLength);
-        AscendC::Sigmoid(zLocal, zLocal, this->tileLength);
+        AscendC::Muls(zLocal, zLocal, (float)(-1.0f), this->tileLength);
+        AscendC::Exp(zLocal, zLocal, this->tileLength);
+        AscendC::Adds(zLocal, zLocal, (float)(1.0f), this->tileLength);
+        AscendC::Reciprocal(zLocal, zLocal, this->tileLength);
 
         outQueueZ.EnQue<DTYPE_Z>(zLocal);
         inQueueX.FreeTensor(xLocal);
         inQueueS.FreeTensor(sLocal);
         inQueueB.FreeTensor(bLocal);
     }
-
     __aicore__ inline void CopyOut(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
@@ -237,7 +236,7 @@ private:
 extern "C" __global__ __aicore__ void conv3d_scaling_tanh_multiply_sigmoid_custom(
     GM_ADDR x, GM_ADDR s, GM_ADDR b, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelFused op;
+    KernelFusedAct op;
     op.Init(x, s, b, z, tiling_data.totalLength, tiling_data.tileNum);
     op.Process();
 }
@@ -263,22 +262,22 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("conv3d_scaling_tanh_multiply_sigmoid_custom",
           &conv3d_scaling_tanh_multiply_sigmoid_custom_impl_npu,
-          "fused scale+tanh+multiply+sigmoid after conv3d");
+          "fused scaling*tanh*bias*sigmoid after conv3d");
 }
 """
 
 model_src='''
 import torch
+import torch.nn as nn
 import torch_npu
 import custom_ops_lib
 
-
-class ModelNew(torch.nn.Module):
+class ModelNew(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, scaling_factor, bias_shape):
         super(ModelNew, self).__init__()
-        self.conv = torch.nn.Conv3d(in_channels, out_channels, kernel_size)
-        self.scaling_factor = torch.nn.Parameter(torch.randn(bias_shape))
-        self.bias = torch.nn.Parameter(torch.randn(bias_shape))
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size)
+        self.scaling_factor = nn.Parameter(torch.randn(bias_shape))
+        self.bias = nn.Parameter(torch.randn(bias_shape))
 
     def forward(self, x):
         x = self.conv(x)
@@ -286,4 +285,3 @@ class ModelNew(torch.nn.Module):
         b = self.bias.expand_as(x).contiguous()
         return custom_ops_lib.conv3d_scaling_tanh_multiply_sigmoid_custom(x, s, b)
 '''
-```

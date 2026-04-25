@@ -1,5 +1,3 @@
-I have enough context now to write the kernel. Following the wiki-style pragmatic approach: keep the complex GEMM and GroupNorm operations in PyTorch, and implement a fused AscendC kernel for the post-GroupNorm pipeline `swish(swish(x) * multiply_weight)`, since this is a pure elementwise computation with per-channel broadcast that fits naturally into the Vector core pattern.
-
 project_json_src='''
 [
     {
@@ -17,7 +15,27 @@ project_json_src='''
                 ]
             },
             {
-                "name": "w",
+                "name": "gamma",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "beta",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "mw",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -50,9 +68,11 @@ namespace optiling {
 BEGIN_TILING_DATA_DEF(GemmGroupNormSwishMultiplySwishCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, batchSize);
   TILING_DATA_FIELD_DEF(uint32_t, outFeatures);
-  TILING_DATA_FIELD_DEF(uint32_t, rowsPerCore);
-  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
-  TILING_DATA_FIELD_DEF(uint32_t, tilesPerRow);
+  TILING_DATA_FIELD_DEF(uint32_t, numGroups);
+  TILING_DATA_FIELD_DEF(uint32_t, groupSize);
+  TILING_DATA_FIELD_DEF(uint32_t, batchPerCore);
+  TILING_DATA_FIELD_DEF(float, invGroupSize);
+  TILING_DATA_FIELD_DEF(float, eps);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(GemmGroupNormSwishMultiplySwishCustom, GemmGroupNormSwishMultiplySwishCustomTilingData)
@@ -63,34 +83,30 @@ host_operator_src="""
 #include "gemm_group_norm_swish_multiply_swish_custom_tiling.h"
 #include "register/op_def_registry.h"
 
-
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_LENGTH = 1024;
+const uint32_t DEFAULT_NUM_GROUPS = 256;
+const float DEFAULT_EPS = 1e-5f;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     GemmGroupNormSwishMultiplySwishCustomTilingData tiling;
-    const gert::StorageShape* xShape = context->GetInputShape(0);
-    uint32_t batchSize = xShape->GetOriginShape().GetDim(0);
-    uint32_t outFeatures = xShape->GetOriginShape().GetDim(1);
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t outFeatures = xShape.GetDim(1);
+    uint32_t numGroups = DEFAULT_NUM_GROUPS;
+    uint32_t groupSize = outFeatures / numGroups;
+    float invGroupSize = 1.0f / static_cast<float>(static_cast<int32_t>(groupSize));
+    uint32_t batchPerCore = batchSize / BLOCK_DIM;
 
-    uint32_t blockDim = BLOCK_DIM;
-    if (batchSize < blockDim) {
-        blockDim = batchSize;
-    }
-    uint32_t rowsPerCore = batchSize / blockDim;
-    uint32_t tileLength = TILE_LENGTH;
-    if (tileLength > outFeatures) {
-        tileLength = outFeatures;
-    }
-    uint32_t tilesPerRow = outFeatures / tileLength;
-
-    context->SetBlockDim(blockDim);
+    context->SetBlockDim(BLOCK_DIM);
     tiling.set_batchSize(batchSize);
     tiling.set_outFeatures(outFeatures);
-    tiling.set_rowsPerCore(rowsPerCore);
-    tiling.set_tileLength(tileLength);
-    tiling.set_tilesPerRow(tilesPerRow);
+    tiling.set_numGroups(numGroups);
+    tiling.set_groupSize(groupSize);
+    tiling.set_batchPerCore(batchPerCore);
+    tiling.set_invGroupSize(invGroupSize);
+    tiling.set_eps(DEFAULT_EPS);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -98,7 +114,6 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 }
-
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -116,7 +131,6 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 }
 }
 
-
 namespace ops {
 class GemmGroupNormSwishMultiplySwishCustom : public OpDef {
 public:
@@ -127,7 +141,17 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("w")
+        this->Input("gamma")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("beta")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("mw")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
@@ -153,114 +177,168 @@ OP_ADD(GemmGroupNormSwishMultiplySwishCustom);
 kernel_src="""
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t BUFFER_NUM = 1;
 
-class KernelSwishMulSwish {
+class KernelGemmGroupNormSwishMultiplySwish {
 public:
-    __aicore__ inline KernelSwishMulSwish() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR w, GM_ADDR y,
-                                uint32_t batchSize, uint32_t outFeatures,
-                                uint32_t rowsPerCore, uint32_t tileLength,
-                                uint32_t tilesPerRow)
+    __aicore__ inline KernelGemmGroupNormSwishMultiplySwish() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR gamma, GM_ADDR beta, GM_ADDR mw, GM_ADDR y,
+                                uint32_t batchSize, uint32_t outFeatures, uint32_t numGroups,
+                                uint32_t groupSize, uint32_t batchPerCore,
+                                float invGroupSize, float eps)
     {
         this->outFeatures = outFeatures;
-        this->tileLength = tileLength;
-        this->tilesPerRow = tilesPerRow;
-        this->totalTiles = rowsPerCore * tilesPerRow;
+        this->numGroups = numGroups;
+        this->groupSize = groupSize;
+        this->batchPerCore = batchPerCore;
+        this->invGroupSize = invGroupSize;
+        this->eps = eps;
 
         uint32_t blockIdx = AscendC::GetBlockIdx();
-        uint32_t coreOffset = blockIdx * rowsPerCore * outFeatures;
-        uint32_t coreElems = rowsPerCore * outFeatures;
+        uint64_t rowOffset = (uint64_t)blockIdx * (uint64_t)batchPerCore * (uint64_t)outFeatures;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x + coreOffset, coreElems);
-        yGm.SetGlobalBuffer((__gm__ float *)y + coreOffset, coreElems);
-        wGm.SetGlobalBuffer((__gm__ float *)w, outFeatures);
+        xGm.SetGlobalBuffer((__gm__ float *)x + rowOffset, (uint64_t)batchPerCore * outFeatures);
+        yGm.SetGlobalBuffer((__gm__ float *)y + rowOffset, (uint64_t)batchPerCore * outFeatures);
+        gammaGm.SetGlobalBuffer((__gm__ float *)gamma, outFeatures);
+        betaGm.SetGlobalBuffer((__gm__ float *)beta, outFeatures);
+        mwGm.SetGlobalBuffer((__gm__ float *)mw, outFeatures);
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLength * sizeof(float));
-        pipe.InitBuffer(inQueueW, BUFFER_NUM, tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuf, tileLength * sizeof(float));
+        pipe.InitBuffer(xInQueue, BUFFER_NUM, outFeatures * sizeof(float));
+        pipe.InitBuffer(yOutQueue, BUFFER_NUM, outFeatures * sizeof(float));
+        pipe.InitBuffer(gammaBuf, outFeatures * sizeof(float));
+        pipe.InitBuffer(betaBuf, outFeatures * sizeof(float));
+        pipe.InitBuffer(mwBuf, outFeatures * sizeof(float));
+        pipe.InitBuffer(scalarBuf, 32);
+        pipe.InitBuffer(reduceBuf, 1024);
     }
 
     __aicore__ inline void Process()
     {
-        for (uint32_t t = 0; t < this->totalTiles; t++) {
-            uint32_t xOff = t * this->tileLength;
-            uint32_t wOff = (t % this->tilesPerRow) * this->tileLength;
-            CopyIn(xOff, wOff);
-            Compute();
-            CopyOut(xOff);
+        AscendC::LocalTensor<float> gammaLocal = gammaBuf.Get<float>();
+        AscendC::LocalTensor<float> betaLocal = betaBuf.Get<float>();
+        AscendC::LocalTensor<float> mwLocal = mwBuf.Get<float>();
+        AscendC::DataCopy(gammaLocal, gammaGm, outFeatures);
+        AscendC::DataCopy(betaLocal, betaGm, outFeatures);
+        AscendC::DataCopy(mwLocal, mwGm, outFeatures);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        for (uint32_t i = 0; i < batchPerCore; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
         }
     }
 
 private:
-    __aicore__ inline void CopyIn(uint32_t xOff, uint32_t wOff)
+    __aicore__ inline void CopyIn(uint32_t i)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::LocalTensor<float> wLocal = inQueueW.AllocTensor<float>();
-        AscendC::DataCopy(xLocal, xGm[xOff], this->tileLength);
-        AscendC::DataCopy(wLocal, wGm[wOff], this->tileLength);
-        inQueueX.EnQue(xLocal);
-        inQueueW.EnQue(wLocal);
+        AscendC::LocalTensor<float> xLocal = xInQueue.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[(uint64_t)i * outFeatures], outFeatures);
+        xInQueue.EnQue(xLocal);
     }
 
-    __aicore__ inline void Compute()
+    __aicore__ inline void Compute(uint32_t i)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> wLocal = inQueueW.DeQue<float>();
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+        AscendC::LocalTensor<float> xLocal = xInQueue.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = yOutQueue.AllocTensor<float>();
+        AscendC::LocalTensor<float> gammaLocal = gammaBuf.Get<float>();
+        AscendC::LocalTensor<float> betaLocal = betaBuf.Get<float>();
+        AscendC::LocalTensor<float> mwLocal = mwBuf.Get<float>();
+        AscendC::LocalTensor<float> scalarLocal = scalarBuf.Get<float>();
+        AscendC::LocalTensor<float> reduceTmp = reduceBuf.Get<float>();
 
-        uint32_t len = this->tileLength;
+        // Phase 1: center x per group (x := x - mean_g)
+        for (uint32_t g = 0; g < numGroups; g++) {
+            uint32_t off = g * groupSize;
+            AscendC::ReduceSum<float>(scalarLocal, xLocal[off], reduceTmp, groupSize);
+            AscendC::PipeBarrier<PIPE_ALL>();
+            float sum = scalarLocal.GetValue(0);
+            float mean = sum * invGroupSize;
+            AscendC::Adds<float>(xLocal[off], xLocal[off], -mean, groupSize);
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
 
-        AscendC::Muls(tmp, xLocal, -1.0f, len);
-        AscendC::Exp(tmp, tmp, len);
-        AscendC::Adds(tmp, tmp, 1.0f, len);
-        AscendC::Reciprocal(tmp, tmp, len);
-        AscendC::Mul(xLocal, xLocal, tmp, len);
+        // Phase 2: variance per group and normalize (x := x / sqrt(var+eps))
+        AscendC::Mul<float>(yLocal, xLocal, xLocal, outFeatures);
+        AscendC::PipeBarrier<PIPE_ALL>();
 
-        AscendC::Mul(xLocal, xLocal, wLocal, len);
+        for (uint32_t g = 0; g < numGroups; g++) {
+            uint32_t off = g * groupSize;
+            AscendC::ReduceSum<float>(scalarLocal, yLocal[off], reduceTmp, groupSize);
+            AscendC::PipeBarrier<PIPE_ALL>();
+            float sumsq = scalarLocal.GetValue(0);
+            float var = sumsq * invGroupSize;
+            float varPlusEps = var + eps;
+            if (varPlusEps < eps) {
+                varPlusEps = eps;
+            }
+            AscendC::Duplicate<float>(scalarLocal, varPlusEps, 8);
+            AscendC::PipeBarrier<PIPE_ALL>();
+            AscendC::Sqrt<float>(scalarLocal, scalarLocal, 8);
+            AscendC::PipeBarrier<PIPE_ALL>();
+            float stdVal = scalarLocal.GetValue(0);
+            float invStd = 1.0f / stdVal;
+            AscendC::Muls<float>(xLocal[off], xLocal[off], invStd, groupSize);
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
 
-        AscendC::Muls(tmp, xLocal, -1.0f, len);
-        AscendC::Exp(tmp, tmp, len);
-        AscendC::Adds(tmp, tmp, 1.0f, len);
-        AscendC::Reciprocal(tmp, tmp, len);
-        AscendC::Mul(yLocal, xLocal, tmp, len);
+        // Apply gamma and beta: y = x * gamma + beta
+        AscendC::Mul<float>(yLocal, xLocal, gammaLocal, outFeatures);
+        AscendC::Add<float>(yLocal, yLocal, betaLocal, outFeatures);
 
-        outQueueY.EnQue<float>(yLocal);
-        inQueueX.FreeTensor(xLocal);
-        inQueueW.FreeTensor(wLocal);
+        // Swish 1: y = y * sigmoid(y)
+        AscendC::Muls<float>(xLocal, yLocal, -1.0f, outFeatures);
+        AscendC::Exp<float>(xLocal, xLocal, outFeatures);
+        AscendC::Adds<float>(xLocal, xLocal, 1.0f, outFeatures);
+        AscendC::Reciprocal<float>(xLocal, xLocal, outFeatures);
+        AscendC::Mul<float>(yLocal, yLocal, xLocal, outFeatures);
+
+        // Multiply by weight
+        AscendC::Mul<float>(yLocal, yLocal, mwLocal, outFeatures);
+
+        // Swish 2: y = y * sigmoid(y)
+        AscendC::Muls<float>(xLocal, yLocal, -1.0f, outFeatures);
+        AscendC::Exp<float>(xLocal, xLocal, outFeatures);
+        AscendC::Adds<float>(xLocal, xLocal, 1.0f, outFeatures);
+        AscendC::Reciprocal<float>(xLocal, xLocal, outFeatures);
+        AscendC::Mul<float>(yLocal, yLocal, xLocal, outFeatures);
+
+        xInQueue.FreeTensor(xLocal);
+        yOutQueue.EnQue(yLocal);
     }
 
-    __aicore__ inline void CopyOut(uint32_t xOff)
+    __aicore__ inline void CopyOut(uint32_t i)
     {
-        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
-        AscendC::DataCopy(yGm[xOff], yLocal, this->tileLength);
-        outQueueY.FreeTensor(yLocal);
+        AscendC::LocalTensor<float> yLocal = yOutQueue.DeQue<float>();
+        AscendC::DataCopy(yGm[(uint64_t)i * outFeatures], yLocal, outFeatures);
+        yOutQueue.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueW;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> wGm;
-    AscendC::GlobalTensor<float> yGm;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> xInQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> yOutQueue;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> gammaBuf, betaBuf, mwBuf, scalarBuf, reduceBuf;
+    AscendC::GlobalTensor<float> xGm, yGm, gammaGm, betaGm, mwGm;
     uint32_t outFeatures;
-    uint32_t tileLength;
-    uint32_t tilesPerRow;
-    uint32_t totalTiles;
+    uint32_t numGroups;
+    uint32_t groupSize;
+    uint32_t batchPerCore;
+    float invGroupSize;
+    float eps;
 };
 
 extern "C" __global__ __aicore__ void gemm_group_norm_swish_multiply_swish_custom(
-    GM_ADDR x, GM_ADDR w, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GM_ADDR x, GM_ADDR gamma, GM_ADDR beta, GM_ADDR mw, GM_ADDR y,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelSwishMulSwish op;
-    op.Init(x, w, y, tiling_data.batchSize, tiling_data.outFeatures,
-            tiling_data.rowsPerCore, tiling_data.tileLength,
-            tiling_data.tilesPerRow);
+    KernelGemmGroupNormSwishMultiplySwish op;
+    op.Init(x, gamma, beta, mw, y,
+            tiling_data.batchSize, tiling_data.outFeatures, tiling_data.numGroups,
+            tiling_data.groupSize, tiling_data.batchPerCore,
+            tiling_data.invGroupSize, tiling_data.eps);
     op.Process();
 }
 """
@@ -271,9 +349,11 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor gemm_group_norm_swish_multiply_swish_custom_impl_npu(const at::Tensor& x, const at::Tensor& w) {
+at::Tensor gemm_group_norm_swish_multiply_swish_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& gamma,
+    const at::Tensor& beta, const at::Tensor& mw) {
     at::Tensor result = at::empty_like(x);
-    EXEC_NPU_CMD(aclnnGemmGroupNormSwishMultiplySwishCustom, x, w, result);
+    EXEC_NPU_CMD(aclnnGemmGroupNormSwishMultiplySwishCustom, x, gamma, beta, mw, result);
     return result;
 }
 
@@ -282,28 +362,32 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("gemm_group_norm_swish_multiply_swish_custom", &gemm_group_norm_swish_multiply_swish_custom_impl_npu, "fused swish * mul * swish after gemm+group_norm");
+    m.def("gemm_group_norm_swish_multiply_swish_custom",
+          &gemm_group_norm_swish_multiply_swish_custom_impl_npu,
+          "fused gemm + group_norm + swish + multiply + swish");
 }
 """
 
 model_src='''
 import torch
-import torch_npu
 import torch.nn as nn
+import torch_npu
 import custom_ops_lib
 
-class ModelNew(nn.Module):
+class ModelNew(torch.nn.Module):
     def __init__(self, in_features, out_features, num_groups, multiply_weight_shape):
-        super(ModelNew, self).__init__()
+        super().__init__()
         self.gemm = nn.Linear(in_features, out_features)
         self.group_norm = nn.GroupNorm(num_groups, out_features)
         self.multiply_weight = nn.Parameter(torch.randn(multiply_weight_shape))
 
     def forward(self, x):
         x = self.gemm(x)
-        x = self.group_norm(x)
-        x = custom_ops_lib.gemm_group_norm_swish_multiply_swish_custom(
-            x.contiguous(), self.multiply_weight.contiguous()
+        x = x.contiguous()
+        return custom_ops_lib.gemm_group_norm_swish_multiply_swish_custom(
+            x,
+            self.group_norm.weight.contiguous(),
+            self.group_norm.bias.contiguous(),
+            self.multiply_weight.contiguous(),
         )
-        return x
 '''

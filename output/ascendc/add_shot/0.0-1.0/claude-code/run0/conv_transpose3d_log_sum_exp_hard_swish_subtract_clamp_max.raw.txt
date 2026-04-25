@@ -1,0 +1,343 @@
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchPerCore);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom, ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t TILE_LENGTH = 1024;
+const uint32_t MAX_BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t S = 1;
+    for (size_t i = 2; i < xShape.GetDimNum(); ++i) {
+        S *= xShape.GetDim(i);
+    }
+
+    uint32_t blockDim = MAX_BLOCK_DIM;
+    if (blockDim > N) {
+        blockDim = N;
+    }
+    while (blockDim > 1 && (N % blockDim) != 0) {
+        blockDim--;
+    }
+    uint32_t batchPerCore = N / blockDim;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_batchPerCore(batchPerCore);
+    tiling.set_channels(C);
+    tiling.set_spatialSize(S);
+    tiling.set_tileLength(TILE_LENGTH);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    if (y_shape->GetDimNum() >= 2) {
+        y_shape->SetDim(1, 1);
+    }
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom : public OpDef {
+public:
+    explicit ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelLseHsSubClamp {
+public:
+    __aicore__ inline KernelLseHsSubClamp() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+                                  uint32_t batchPerCore, uint32_t channels,
+                                  uint32_t spatialSize, uint32_t tileLength)
+    {
+        this->batchPerCore = batchPerCore;
+        this->channels = channels;
+        this->spatialSize = spatialSize;
+        this->tileLength = tileLength;
+
+        uint32_t coreIdx = AscendC::GetBlockIdx();
+        uint64_t inOff = (uint64_t)coreIdx * batchPerCore * channels * spatialSize;
+        uint64_t outOff = (uint64_t)coreIdx * batchPerCore * spatialSize;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x + inOff, (uint64_t)batchPerCore * channels * spatialSize);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias, 1);
+        yGm.SetGlobalBuffer((__gm__ float*)y + outOff, (uint64_t)batchPerCore * spatialSize);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, channels * tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, tileLength * sizeof(float));
+        pipe.InitBuffer(maxBuf, tileLength * sizeof(float));
+        pipe.InitBuffer(sumBuf, tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf, tileLength * sizeof(float));
+        pipe.InitBuffer(biasBuf, 32);
+    }
+
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<float> biasLocal = biasBuf.Get<float>();
+        AscendC::DataCopyExtParams biasCopy{(uint16_t)1, (uint32_t)sizeof(float), (uint32_t)0, (uint32_t)0, (uint32_t)0};
+        AscendC::DataCopyPadExtParams<float> biasPad{true, (uint8_t)0, (uint8_t)7, 0.0f};
+        AscendC::DataCopyPad(biasLocal, biasGm, biasCopy, biasPad);
+        event_t evt = static_cast<event_t>(0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(evt);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(evt);
+        biasVal = biasLocal.GetValue(0);
+
+        for (uint32_t b = 0; b < batchPerCore; b++) {
+            uint32_t numTiles = (spatialSize + tileLength - 1) / tileLength;
+            for (uint32_t t = 0; t < numTiles; t++) {
+                uint32_t tileStart = t * tileLength;
+                uint32_t curLen = tileLength;
+                if (tileStart + curLen > spatialSize) {
+                    curLen = spatialSize - tileStart;
+                }
+                CopyIn(b, tileStart, curLen);
+                Compute(curLen);
+                CopyOut(b, tileStart, curLen);
+            }
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint32_t b, uint32_t tileStart, uint32_t curLen)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::DataCopyExtParams params{(uint16_t)1, curLen * (uint32_t)sizeof(float), (uint32_t)0, (uint32_t)0, (uint32_t)0};
+        AscendC::DataCopyPadExtParams<float> padParams{false, (uint8_t)0, (uint8_t)0, 0.0f};
+        for (uint32_t c = 0; c < channels; c++) {
+            uint64_t srcOff = (uint64_t)b * channels * spatialSize + (uint64_t)c * spatialSize + tileStart;
+            AscendC::DataCopyPad(xLocal[c * tileLength], xGm[srcOff], params, padParams);
+        }
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Compute(uint32_t curLen)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+        AscendC::LocalTensor<float> maxT = maxBuf.Get<float>();
+        AscendC::LocalTensor<float> sumT = sumBuf.Get<float>();
+        AscendC::LocalTensor<float> tmpT = tmpBuf.Get<float>();
+
+        AscendC::Adds(maxT, xLocal[0], (float)0.0f, curLen);
+        for (uint32_t c = 1; c < channels; c++) {
+            AscendC::Max(maxT, maxT, xLocal[c * tileLength], curLen);
+        }
+
+        AscendC::Duplicate(sumT, (float)0.0f, curLen);
+        for (uint32_t c = 0; c < channels; c++) {
+            AscendC::Sub(tmpT, xLocal[c * tileLength], maxT, curLen);
+            AscendC::Exp(tmpT, tmpT, curLen);
+            AscendC::Add(sumT, sumT, tmpT, curLen);
+        }
+
+        AscendC::Ln(sumT, sumT, curLen);
+        AscendC::Add(maxT, maxT, sumT, curLen);
+
+        AscendC::Adds(tmpT, maxT, (float)3.0f, curLen);
+        AscendC::Muls(tmpT, tmpT, (float)-1.0f, curLen);
+        AscendC::Exp(tmpT, tmpT, curLen);
+        AscendC::Adds(tmpT, tmpT, (float)1.0f, curLen);
+        AscendC::Duplicate(sumT, (float)1.0f, curLen);
+        AscendC::Div(sumT, sumT, tmpT, curLen);
+        AscendC::Mul(maxT, maxT, sumT, curLen);
+        AscendC::Muls(maxT, maxT, (float)(1.0f / 6.0f), curLen);
+
+        AscendC::Adds(maxT, maxT, -biasVal, curLen);
+
+        AscendC::Mins(maxT, maxT, (float)1.0f, curLen);
+        AscendC::Maxs(yLocal, maxT, (float)-1.0f, curLen);
+
+        outQueueY.EnQue<float>(yLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(uint32_t b, uint32_t tileStart, uint32_t curLen)
+    {
+        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+        uint64_t dstOff = (uint64_t)b * spatialSize + tileStart;
+        AscendC::DataCopyExtParams params{(uint16_t)1, curLen * (uint32_t)sizeof(float), (uint32_t)0, (uint32_t)0, (uint32_t)0};
+        AscendC::DataCopyPad(yGm[dstOff], yLocal, params);
+        outQueueY.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> maxBuf, sumBuf, tmpBuf, biasBuf;
+    AscendC::GlobalTensor<float> xGm, biasGm, yGm;
+    uint32_t batchPerCore;
+    uint32_t channels;
+    uint32_t spatialSize;
+    uint32_t tileLength;
+    float biasVal;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom(
+    GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelLseHsSubClamp op;
+    op.Init(x, bias, y, tiling_data.batchPerCore, tiling_data.channels,
+            tiling_data.spatialSize, tiling_data.tileLength);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias) {
+    auto sizes = x.sizes().vec();
+    if (sizes.size() >= 2) {
+        sizes[1] = 1;
+    }
+    at::Tensor result = at::empty(sizes, x.options());
+    EXEC_NPU_CMD(aclnnConvTranspose3dLogSumExpHardSwishSubtractClampMaxCustom, x, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom", &conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom", &conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom_impl_npu, "fused logsumexp + sigmoid-swish + sub + clamp");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias_shape):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = torch.nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
+        self.bias = torch.nn.Parameter(torch.randn(1, 1, 1, 1))
+
+    def forward(self, x):
+        x = self.conv_transpose(x).contiguous()
+        bias_flat = self.bias.contiguous().view(-1)
+        x = custom_ops_lib.conv_transpose3d_log_sum_exp_hard_swish_subtract_clamp_max_custom(x, bias_flat)
+        return x
+'''

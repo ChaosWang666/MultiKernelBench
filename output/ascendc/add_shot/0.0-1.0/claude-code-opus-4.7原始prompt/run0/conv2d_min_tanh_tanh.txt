@@ -1,0 +1,358 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv2dMinTanhTanhCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv2dMinTanhTanhCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, inHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, inWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, totalOutPixels);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv2dMinTanhTanhCustom, Conv2dMinTanhTanhCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv2d_min_tanh_tanh_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv2dMinTanhTanhCustomTilingData tiling;
+
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto wShape = context->GetInputShape(1)->GetOriginShape();
+
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t inChannels = xShape.GetDim(1);
+    uint32_t inHeight = xShape.GetDim(2);
+    uint32_t inWidth = xShape.GetDim(3);
+    uint32_t outChannels = wShape.GetDim(0);
+    uint32_t kernelSize = wShape.GetDim(2);
+    uint32_t outHeight = inHeight - kernelSize + 1;
+    uint32_t outWidth = inWidth - kernelSize + 1;
+    uint32_t totalOutPixels = batchSize * outHeight * outWidth;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_inHeight(inHeight);
+    tiling.set_inWidth(inWidth);
+    tiling.set_outHeight(outHeight);
+    tiling.set_outWidth(outWidth);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_totalOutPixels(totalOutPixels);
+    tiling.set_tileNum(1);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* w_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    int64_t N = x_shape->GetDim(0);
+    int64_t H = x_shape->GetDim(2);
+    int64_t W = x_shape->GetDim(3);
+    int64_t K = w_shape->GetDim(2);
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, N);
+    y_shape->SetDim(1, 1);
+    y_shape->SetDim(2, H - K + 1);
+    y_shape->SetDim(3, W - K + 1);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv2dMinTanhTanhCustom : public OpDef {
+public:
+    explicit Conv2dMinTanhTanhCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv2dMinTanhTanhCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelConv2dMinTanhTanh {
+public:
+    __aicore__ inline KernelConv2dMinTanhTanh() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t inChannels, uint32_t outChannels,
+                                 uint32_t inHeight, uint32_t inWidth,
+                                 uint32_t outHeight, uint32_t outWidth,
+                                 uint32_t kernelSize, uint32_t totalOutPixels)
+    {
+        this->batchSize = batchSize;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->inHeight = inHeight;
+        this->inWidth = inWidth;
+        this->outHeight = outHeight;
+        this->outWidth = outWidth;
+        this->kernelSize = kernelSize;
+        this->totalOutPixels = totalOutPixels;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inChannels * inHeight * inWidth);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, outChannels * inChannels * kernelSize * kernelSize);
+        bGm.SetGlobalBuffer((__gm__ float *)bias, outChannels);
+        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize * outHeight * outWidth);
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->pixelsPerBlock = (totalOutPixels + blockNum - 1) / blockNum;
+        this->startPixel = blockIdx * this->pixelsPerBlock;
+        this->endPixel = this->startPixel + this->pixelsPerBlock;
+        if (this->endPixel > totalOutPixels) {
+            this->endPixel = totalOutPixels;
+        }
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t p = this->startPixel; p < this->endPixel; p++) {
+            uint32_t n = p / (this->outHeight * this->outWidth);
+            uint32_t hw = p % (this->outHeight * this->outWidth);
+            uint32_t oh = hw / this->outWidth;
+            uint32_t ow = hw % this->outWidth;
+
+            float minVal = 3.402823466e+38f;
+
+            for (uint32_t oc = 0; oc < this->outChannels; oc++) {
+                float sum = bGm.GetValue(oc);
+                for (uint32_t ic = 0; ic < this->inChannels; ic++) {
+                    for (uint32_t kh = 0; kh < this->kernelSize; kh++) {
+                        for (uint32_t kw = 0; kw < this->kernelSize; kw++) {
+                            uint32_t ih = oh + kh;
+                            uint32_t iw = ow + kw;
+                            uint32_t xIdx = ((n * this->inChannels + ic) * this->inHeight + ih) * this->inWidth + iw;
+                            uint32_t wIdx = ((oc * this->inChannels + ic) * this->kernelSize + kh) * this->kernelSize + kw;
+                            float xVal = xGm.GetValue(xIdx);
+                            float wVal = wGm.GetValue(wIdx);
+                            sum += xVal * wVal;
+                        }
+                    }
+                }
+                if (sum < minVal) {
+                    minVal = sum;
+                }
+            }
+
+            float t1 = tanhf_approx(minVal);
+            float t2 = tanhf_approx(t1);
+            yGm.SetValue(p, t2);
+        }
+    }
+
+private:
+    __aicore__ inline float tanhf_approx(float x) {
+        float e2x;
+        float absx = x < 0 ? -x : x;
+        if (absx > 10.0f) {
+            return x < 0 ? -1.0f : 1.0f;
+        }
+        float ex = expf_approx(x);
+        float enx = expf_approx(-x);
+        return (ex - enx) / (ex + enx);
+    }
+
+    __aicore__ inline float expf_approx(float x) {
+        if (x > 88.0f) return 1e38f;
+        if (x < -88.0f) return 0.0f;
+        float result = 1.0f;
+        float term = 1.0f;
+        for (int i = 1; i < 20; i++) {
+            term *= x / (float)i;
+            result += term;
+        }
+        return result;
+    }
+
+private:
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> wGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t inChannels;
+    uint32_t outChannels;
+    uint32_t inHeight;
+    uint32_t inWidth;
+    uint32_t outHeight;
+    uint32_t outWidth;
+    uint32_t kernelSize;
+    uint32_t totalOutPixels;
+    uint32_t pixelsPerBlock;
+    uint32_t startPixel;
+    uint32_t endPixel;
+};
+
+extern "C" __global__ __aicore__ void conv2d_min_tanh_tanh_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv2dMinTanhTanh op;
+    op.Init(x, weight, bias, y,
+            tiling_data.batchSize, tiling_data.inChannels, tiling_data.outChannels,
+            tiling_data.inHeight, tiling_data.inWidth,
+            tiling_data.outHeight, tiling_data.outWidth,
+            tiling_data.kernelSize, tiling_data.totalOutPixels);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv2d_min_tanh_tanh_custom_impl_npu(const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias) {
+    auto sizes = x.sizes();
+    auto wsizes = weight.sizes();
+    int64_t N = sizes[0];
+    int64_t H = sizes[2];
+    int64_t W = sizes[3];
+    int64_t K = wsizes[2];
+    int64_t outH = H - K + 1;
+    int64_t outW = W - K + 1;
+    at::Tensor result = at::empty({N, 1, outH, outW}, x.options());
+    EXEC_NPU_CMD(aclnnConv2dMinTanhTanhCustom, x, weight, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv2d_min_tanh_tanh_custom", &conv2d_min_tanh_tanh_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv2d_min_tanh_tanh_custom", &conv2d_min_tanh_tanh_custom_impl_npu, "conv2d + min + tanh + tanh");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super(ModelNew, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+
+    def forward(self, x):
+        weight = self.conv.weight.to(x.device).contiguous()
+        bias = self.conv.bias.to(x.device).contiguous()
+        return custom_ops_lib.conv2d_min_tanh_tanh_custom(x.contiguous(), weight, bias)
+'''
+```

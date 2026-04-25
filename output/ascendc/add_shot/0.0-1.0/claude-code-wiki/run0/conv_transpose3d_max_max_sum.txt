@@ -1,5 +1,3 @@
-Based on my review of the Wiki, I'll take a pragmatic approach: keep PyTorch's `conv_transpose3d` and `max_pool3d` (which are highly complex to re-implement), and replace the channel-wise `sum` reduction with a custom AscendC kernel that fuses over batches.
-
 project_json_src='''
 [
     {
@@ -40,8 +38,7 @@ namespace optiling {
 BEGIN_TILING_DATA_DEF(ConvTranspose3dMaxMaxSumCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, batchSize);
   TILING_DATA_FIELD_DEF(uint32_t, channels);
-  TILING_DATA_FIELD_DEF(uint32_t, innerSize);
-  TILING_DATA_FIELD_DEF(uint32_t, blockDim);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ConvTranspose3dMaxMaxSumCustom, ConvTranspose3dMaxMaxSumCustomTilingData)
@@ -57,25 +54,18 @@ namespace optiling {
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose3dMaxMaxSumCustomTilingData tiling;
-    auto shape = context->GetInputShape(0)->GetOriginShape();
-    size_t dimNum = shape.GetDimNum();
-    uint32_t batchSize = static_cast<uint32_t>(shape.GetDim(0));
-    uint32_t channels = static_cast<uint32_t>(shape.GetDim(1));
-    uint32_t innerSize = 1;
-    for (size_t i = 2; i < dimNum; i++) {
-        innerSize *= static_cast<uint32_t>(shape.GetDim(i));
-    }
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = static_cast<uint32_t>(xShape.GetDim(0));
+    uint32_t channels = static_cast<uint32_t>(xShape.GetDim(1));
+    uint32_t d = static_cast<uint32_t>(xShape.GetDim(2));
+    uint32_t h = static_cast<uint32_t>(xShape.GetDim(3));
+    uint32_t w = static_cast<uint32_t>(xShape.GetDim(4));
+    uint32_t spatialSize = d * h * w;
 
-    uint32_t blockDim = batchSize;
-    if (blockDim == 0) blockDim = 1;
-    if (blockDim > 40) blockDim = 40;
-
-    context->SetBlockDim(blockDim);
+    context->SetBlockDim(batchSize);
     tiling.set_batchSize(batchSize);
     tiling.set_channels(channels);
-    tiling.set_innerSize(innerSize);
-    tiling.set_blockDim(blockDim);
-
+    tiling.set_spatialSize(spatialSize);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -90,15 +80,12 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    size_t dimNum = x_shape->GetDimNum();
-    y_shape->SetDimNum(dimNum);
-    for (size_t i = 0; i < dimNum; i++) {
-        if (i == 1) {
-            y_shape->SetDim(i, 1);
-        } else {
-            y_shape->SetDim(i, x_shape->GetDim(i));
-        }
-    }
+    y_shape->SetDimNum(5);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, 1);
+    y_shape->SetDim(2, x_shape->GetDim(2));
+    y_shape->SetDim(3, x_shape->GetDim(3));
+    y_shape->SetDim(4, x_shape->GetDim(4));
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -146,73 +133,66 @@ constexpr int32_t BUFFER_NUM = 2;
 class KernelConvTranspose3dMaxMaxSum {
 public:
     __aicore__ inline KernelConvTranspose3dMaxMaxSum() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t channels, uint32_t innerSize, uint32_t blockDim)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t channels, uint32_t spatialSize)
     {
         this->batchSize = batchSize;
         this->channels = channels;
-        this->innerSize = innerSize;
+        this->spatialSize = spatialSize;
 
         uint32_t blockIdx = AscendC::GetBlockIdx();
-        uint32_t batchesPerCore = (batchSize + blockDim - 1) / blockDim;
-        this->batchStart = blockIdx * batchesPerCore;
-        uint32_t end = this->batchStart + batchesPerCore;
-        if (end > batchSize) end = batchSize;
-        this->batchCount = (this->batchStart < batchSize) ? (end - this->batchStart) : 0;
+        if (blockIdx >= this->batchSize) {
+            return;
+        }
 
-        xGm.SetGlobalBuffer((__gm__ float*)x, batchSize * channels * innerSize);
-        yGm.SetGlobalBuffer((__gm__ float*)y, batchSize * innerSize);
+        uint32_t batchStride = channels * spatialSize;
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + blockIdx * batchStride, batchStride);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + blockIdx * spatialSize, spatialSize);
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->innerSize * sizeof(float));
-        pipe.InitBuffer(outQueueY, 1, this->innerSize * sizeof(float));
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->spatialSize * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, 1, this->spatialSize * sizeof(DTYPE_Y));
     }
 
     __aicore__ inline void Process()
     {
-        for (uint32_t i = 0; i < this->batchCount; i++) {
-            uint32_t b = this->batchStart + i;
-            ProcessBatch(b);
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        if (blockIdx >= this->batchSize) {
+            return;
         }
-    }
 
-private:
-    __aicore__ inline void ProcessBatch(uint32_t b)
-    {
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-        AscendC::Duplicate(yLocal, (float)0, this->innerSize);
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::Duplicate(yLocal, 0.0f, this->spatialSize);
 
         for (uint32_t c = 0; c < this->channels; c++) {
-            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-            AscendC::DataCopy(xLocal, xGm[(b * this->channels + c) * this->innerSize], this->innerSize);
+            AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+            AscendC::DataCopy(xLocal, xGm[c * this->spatialSize], this->spatialSize);
             inQueueX.EnQue(xLocal);
 
-            xLocal = inQueueX.DeQue<float>();
-            AscendC::Add(yLocal, yLocal, xLocal, this->innerSize);
+            xLocal = inQueueX.DeQue<DTYPE_X>();
+            AscendC::Add(yLocal, yLocal, xLocal, this->spatialSize);
             inQueueX.FreeTensor(xLocal);
         }
 
-        outQueueY.EnQue<float>(yLocal);
-        AscendC::LocalTensor<float> yOut = outQueueY.DeQue<float>();
-        AscendC::DataCopy(yGm[b * this->innerSize], yOut, this->innerSize);
-        outQueueY.FreeTensor(yOut);
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
+        yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm, yLocal, this->spatialSize);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueY;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t batchSize;
     uint32_t channels;
-    uint32_t innerSize;
-    uint32_t batchStart;
-    uint32_t batchCount;
+    uint32_t spatialSize;
 };
 
 extern "C" __global__ __aicore__ void conv_transpose3d_max_max_sum_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelConvTranspose3dMaxMaxSum op;
-    op.Init(x, y, tiling_data.batchSize, tiling_data.channels, tiling_data.innerSize, tiling_data.blockDim);
+    op.Init(x, y, tiling_data.batchSize, tiling_data.channels, tiling_data.spatialSize);
     op.Process();
 }
 """
@@ -224,11 +204,9 @@ python_bind_src="""
 #include <torch/extension.h>
 
 at::Tensor conv_transpose3d_max_max_sum_custom_impl_npu(const at::Tensor& self) {
-    at::Tensor input = self.contiguous();
-    auto sizes = input.sizes().vec();
-    sizes[1] = 1;
-    at::Tensor result = at::empty(sizes, input.options());
-    EXEC_NPU_CMD(aclnnConvTranspose3dMaxMaxSumCustom, input, result);
+    auto sizes = self.sizes();
+    at::Tensor result = at::empty({sizes[0], 1, sizes[2], sizes[3], sizes[4]}, self.options());
+    EXEC_NPU_CMD(aclnnConvTranspose3dMaxMaxSumCustom, self, result);
     return result;
 }
 
@@ -237,14 +215,14 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv_transpose3d_max_max_sum_custom", &conv_transpose3d_max_max_sum_custom_impl_npu, "sum over channels after conv_transpose3d and two max pools");
+    m.def("conv_transpose3d_max_max_sum_custom", &conv_transpose3d_max_max_sum_custom_impl_npu, "fused maxpool-maxpool-sum channel reduction");
 }
 """
 
 model_src='''
 import torch
-import torch.nn as nn
 import torch_npu
+import torch.nn as nn
 import custom_ops_lib
 
 class ModelNew(nn.Module):
@@ -258,7 +236,6 @@ class ModelNew(nn.Module):
         x = self.conv_transpose(x)
         x = self.max_pool1(x)
         x = self.max_pool2(x)
-        x = x.contiguous()
-        x = custom_ops_lib.conv_transpose3d_max_max_sum_custom(x)
+        x = custom_ops_lib.conv_transpose3d_max_max_sum_custom(x.contiguous())
         return x
 '''

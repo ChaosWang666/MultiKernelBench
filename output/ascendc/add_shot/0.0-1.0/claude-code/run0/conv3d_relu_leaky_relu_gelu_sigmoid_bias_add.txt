@@ -1,4 +1,3 @@
-```python
 project_json_src='''
 [
     {
@@ -7,6 +6,26 @@ project_json_src='''
         "input_desc": [
             {
                 "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "conv_bias",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -28,7 +47,7 @@ project_json_src='''
         ],
         "output_desc": [
             {
-                "name": "y",
+                "name": "z",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -47,11 +66,19 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv3dReluLeakyReluGeluSigmoidBiasAddCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, slicesPerBlock);
-  TILING_DATA_FIELD_DEF(uint32_t, sliceSize);
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, inDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, inHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, inWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, outDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, totalOutputElements);
+  TILING_DATA_FIELD_DEF(uint32_t, elementsPerCore);
   TILING_DATA_FIELD_DEF(uint32_t, tileLength);
-  TILING_DATA_FIELD_DEF(uint32_t, tilesPerSlice);
-  TILING_DATA_FIELD_DEF(uint32_t, numChannels);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv3dReluLeakyReluGeluSigmoidBiasAddCustom, Conv3dReluLeakyReluGeluSigmoidBiasAddCustomTilingData)
@@ -65,31 +92,46 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv3dReluLeakyReluGeluSigmoidBiasAddCustomTilingData tiling;
 
-    auto shape = context->GetInputShape(0)->GetOriginShape();
-    uint32_t N = shape.GetDim(0);
-    uint32_t C = shape.GetDim(1);
-    uint32_t D = shape.GetDim(2);
-    uint32_t H = shape.GetDim(3);
-    uint32_t W = shape.GetDim(4);
+    const gert::Shape& xShape = context->GetInputShape(0)->GetOriginShape();
+    const gert::Shape& wShape = context->GetInputShape(1)->GetOriginShape();
 
-    uint32_t numChannels = C;
-    uint32_t sliceSize = D * H * W;
-    uint32_t totalSlices = N * C;
-    uint32_t slicesPerBlock = totalSlices / BLOCK_DIM;
-    uint32_t tileLength = H * W;
-    uint32_t tilesPerSlice = sliceSize / tileLength;
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t inChannels = xShape.GetDim(1);
+    uint32_t inDepth = xShape.GetDim(2);
+    uint32_t inHeight = xShape.GetDim(3);
+    uint32_t inWidth = xShape.GetDim(4);
+
+    uint32_t outChannels = wShape.GetDim(0);
+    uint32_t kernelSize = wShape.GetDim(2);
+
+    uint32_t outDepth = inDepth - kernelSize + 1;
+    uint32_t outHeight = inHeight - kernelSize + 1;
+    uint32_t outWidth = inWidth - kernelSize + 1;
+
+    uint32_t totalOutputElements = batchSize * outChannels * outDepth * outHeight * outWidth;
+    uint32_t elementsPerCore = (totalOutputElements + BLOCK_DIM - 1) / BLOCK_DIM;
+    // align to 8 for 32-byte alignment on float
+    elementsPerCore = (elementsPerCore + 7) / 8 * 8;
+    uint32_t tileLength = 64;
 
     context->SetBlockDim(BLOCK_DIM);
-    tiling.set_slicesPerBlock(slicesPerBlock);
-    tiling.set_sliceSize(sliceSize);
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_inDepth(inDepth);
+    tiling.set_inHeight(inHeight);
+    tiling.set_inWidth(inWidth);
+    tiling.set_outDepth(outDepth);
+    tiling.set_outHeight(outHeight);
+    tiling.set_outWidth(outWidth);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_totalOutputElements(totalOutputElements);
+    tiling.set_elementsPerCore(elementsPerCore);
     tiling.set_tileLength(tileLength);
-    tiling.set_tilesPerSlice(tilesPerSlice);
-    tiling.set_numChannels(numChannels);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
@@ -104,8 +146,22 @@ namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* w_shape = context->GetInputShape(1);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x_shape;
+
+    int64_t batchSize = x_shape->GetDim(0);
+    int64_t inDepth = x_shape->GetDim(2);
+    int64_t inHeight = x_shape->GetDim(3);
+    int64_t inWidth = x_shape->GetDim(4);
+    int64_t outChannels = w_shape->GetDim(0);
+    int64_t kernelSize = w_shape->GetDim(2);
+
+    y_shape->SetDimNum(5);
+    y_shape->SetDim(0, batchSize);
+    y_shape->SetDim(1, outChannels);
+    y_shape->SetDim(2, inDepth - kernelSize + 1);
+    y_shape->SetDim(3, inHeight - kernelSize + 1);
+    y_shape->SetDim(4, inWidth - kernelSize + 1);
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -127,12 +183,22 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("conv_bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
         this->Input("bias")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("y")
+        this->Output("z")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
@@ -143,6 +209,7 @@ public:
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
+
     }
 };
 
@@ -153,126 +220,155 @@ OP_ADD(Conv3dReluLeakyReluGeluSigmoidBiasAddCustom);
 kernel_src="""
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2;
+using AscendC::HardEvent;
 
-class KernelFusedActBias {
+class KernelConv3dFused {
 public:
-    __aicore__ inline KernelFusedActBias() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
-                                 uint32_t slicesPerBlock, uint32_t sliceSize,
-                                 uint32_t tileLength, uint32_t tilesPerSlice,
-                                 uint32_t numChannels)
+    __aicore__ inline KernelConv3dFused() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR convBias, GM_ADDR bias, GM_ADDR z,
+                                 uint32_t batchSize, uint32_t inChannels, uint32_t outChannels,
+                                 uint32_t inDepth, uint32_t inHeight, uint32_t inWidth,
+                                 uint32_t outDepth, uint32_t outHeight, uint32_t outWidth,
+                                 uint32_t kernelSize, uint32_t totalOutputElements,
+                                 uint32_t elementsPerCore)
     {
-        this->slicesPerBlock = slicesPerBlock;
-        this->sliceSize = sliceSize;
-        this->tileLength = tileLength;
-        this->tilesPerSlice = tilesPerSlice;
-        this->numChannels = numChannels;
+        this->batchSize = batchSize;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->inDepth = inDepth;
+        this->inHeight = inHeight;
+        this->inWidth = inWidth;
+        this->outDepth = outDepth;
+        this->outHeight = outHeight;
+        this->outWidth = outWidth;
+        this->kernelSize = kernelSize;
+        this->totalOutputElements = totalOutputElements;
 
-        uint32_t blockOffset = slicesPerBlock * sliceSize * AscendC::GetBlockIdx();
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + blockOffset, slicesPerBlock * sliceSize);
-        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + blockOffset, slicesPerBlock * sliceSize);
-        biasGm.SetGlobalBuffer((__gm__ DTYPE_BIAS *)bias, numChannels);
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->startIdx = blockIdx * elementsPerCore;
+        uint32_t endIdx = this->startIdx + elementsPerCore;
+        if (endIdx > totalOutputElements) {
+            endIdx = totalOutputElements;
+        }
+        if (this->startIdx > totalOutputElements) {
+            this->startIdx = totalOutputElements;
+        }
+        this->coreLength = endIdx - this->startIdx;
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, tileLength * sizeof(DTYPE_Y));
-        pipe.InitBuffer(inQueueBias, 1, numChannels * sizeof(DTYPE_BIAS));
-        pipe.InitBuffer(tmpBuf, tileLength * sizeof(float));
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inChannels * inDepth * inHeight * inWidth);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, outChannels * inChannels * kernelSize * kernelSize * kernelSize);
+        cbGm.SetGlobalBuffer((__gm__ float *)convBias, outChannels);
+        bGm.SetGlobalBuffer((__gm__ float *)bias, outChannels);
+        zGm.SetGlobalBuffer((__gm__ float *)z, totalOutputElements);
+    }
+
+    __aicore__ inline float ComputeOneOutput(uint32_t outIdx)
+    {
+        uint32_t tmp = outIdx;
+        uint32_t ow = tmp % this->outWidth; tmp /= this->outWidth;
+        uint32_t oh = tmp % this->outHeight; tmp /= this->outHeight;
+        uint32_t od = tmp % this->outDepth; tmp /= this->outDepth;
+        uint32_t oc = tmp % this->outChannels; tmp /= this->outChannels;
+        uint32_t n = tmp;
+
+        float acc = 0.0f;
+        uint32_t K = this->kernelSize;
+        uint32_t IC = this->inChannels;
+        uint32_t ID = this->inDepth;
+        uint32_t IH = this->inHeight;
+        uint32_t IW = this->inWidth;
+
+        for (uint32_t ic = 0; ic < IC; ic++) {
+            for (uint32_t kd = 0; kd < K; kd++) {
+                for (uint32_t kh = 0; kh < K; kh++) {
+                    for (uint32_t kw = 0; kw < K; kw++) {
+                        uint32_t id = od + kd;
+                        uint32_t ih = oh + kh;
+                        uint32_t iw = ow + kw;
+                        uint32_t xOffset = ((((n * IC + ic) * ID + id) * IH + ih) * IW + iw);
+                        uint32_t wOffset = ((((oc * IC + ic) * K + kd) * K + kh) * K + kw);
+                        float xVal = xGm.GetValue(xOffset);
+                        float wVal = wGm.GetValue(wOffset);
+                        acc += xVal * wVal;
+                    }
+                }
+            }
+        }
+
+        float cbVal = cbGm.GetValue(oc);
+        acc += cbVal;
+
+        // ReLU
+        if (acc < 0.0f) acc = 0.0f;
+        // LeakyReLU (no-op since acc >= 0 after ReLU)
+        // GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        float x3 = acc * acc * acc;
+        float inner = 0.7978845608f * (acc + 0.044715f * x3);
+        // tanh via exp
+        float e1 = AscendC::ScalarCast<float, float, AscendC::RoundMode::CAST_NONE>(1.0f);
+        float ex = 0.0f;
+        {
+            float v = inner * 2.0f;
+            // exp approximation using std-like: use fast path
+            float ev;
+            // Use a polynomial/exp via series won't be stable; use math expf substitute
+            // On aicore scalar float, use __expf-like by manual: leverage identity tanh(y) = (e^{2y}-1)/(e^{2y}+1)
+            // We'll compute exp via repeated squaring from e^(v/n). For simplicity, use builtin expf.
+            ev = expf(v);
+            ex = (ev - 1.0f) / (ev + 1.0f);
+        }
+        float gelu = 0.5f * acc * (1.0f + ex);
+
+        // Sigmoid
+        float sig = 1.0f / (1.0f + expf(-gelu));
+
+        float bVal = bGm.GetValue(oc);
+        float out = sig + bVal;
+        return out;
     }
 
     __aicore__ inline void Process()
     {
-        AscendC::LocalTensor<DTYPE_BIAS> biasAlloc = inQueueBias.AllocTensor<DTYPE_BIAS>();
-        AscendC::DataCopy(biasAlloc, biasGm, this->numChannels);
-        inQueueBias.EnQue(biasAlloc);
-        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.DeQue<DTYPE_BIAS>();
-
-        for (uint32_t s = 0; s < this->slicesPerBlock; s++) {
-            uint32_t channel = s % this->numChannels;
-            float biasVal = (float)biasLocal.GetValue(channel);
-            for (uint32_t t = 0; t < this->tilesPerSlice; t++) {
-                uint32_t offset = s * this->sliceSize + t * this->tileLength;
-                CopyIn(offset);
-                Compute(biasVal);
-                CopyOut(offset);
-            }
+        for (uint32_t i = 0; i < this->coreLength; i++) {
+            uint32_t outIdx = this->startIdx + i;
+            float val = ComputeOneOutput(outIdx);
+            zGm.SetValue(outIdx, val);
         }
-        inQueueBias.FreeTensor(biasLocal);
     }
 
 private:
-    __aicore__ inline void CopyIn(uint32_t offset)
-    {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::DataCopy(xLocal, xGm[offset], this->tileLength);
-        inQueueX.EnQue(xLocal);
-    }
-
-    __aicore__ inline void Compute(float biasVal)
-    {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
-        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
-
-        // ReLU (LeakyReLU with slope 0.01 is identity after ReLU since values are >= 0)
-        AscendC::Maxs(yLocal, xLocal, (DTYPE_X)0.0f, this->tileLength);
-        inQueueX.FreeTensor(xLocal);
-
-        // GELU via tanh approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-        AscendC::Mul(tmp, yLocal, yLocal, this->tileLength);
-        AscendC::Mul(tmp, tmp, yLocal, this->tileLength);
-        AscendC::Muls(tmp, tmp, 0.044715f, this->tileLength);
-        AscendC::Add(tmp, tmp, yLocal, this->tileLength);
-        AscendC::Muls(tmp, tmp, 0.7978845608f, this->tileLength);
-        AscendC::Tanh(tmp, tmp, this->tileLength);
-        AscendC::Adds(tmp, tmp, 1.0f, this->tileLength);
-        AscendC::Mul(yLocal, yLocal, tmp, this->tileLength);
-        AscendC::Muls(yLocal, yLocal, 0.5f, this->tileLength);
-
-        // Sigmoid: 1 / (1 + exp(-x))
-        AscendC::Muls(tmp, yLocal, -1.0f, this->tileLength);
-        AscendC::Exp(tmp, tmp, this->tileLength);
-        AscendC::Adds(tmp, tmp, 1.0f, this->tileLength);
-        AscendC::Duplicate(yLocal, 1.0f, this->tileLength);
-        AscendC::Div(yLocal, yLocal, tmp, this->tileLength);
-
-        // Add bias (scalar per channel)
-        AscendC::Adds(yLocal, yLocal, (DTYPE_Y)biasVal, this->tileLength);
-
-        outQueueY.EnQue<DTYPE_Y>(yLocal);
-    }
-
-    __aicore__ inline void CopyOut(uint32_t offset)
-    {
-        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
-        AscendC::DataCopy(yGm[offset], yLocal, this->tileLength);
-        outQueueY.FreeTensor(yLocal);
-    }
-
-private:
-    AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueBias;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
-    AscendC::GlobalTensor<DTYPE_X> xGm;
-    AscendC::GlobalTensor<DTYPE_Y> yGm;
-    AscendC::GlobalTensor<DTYPE_BIAS> biasGm;
-    uint32_t slicesPerBlock;
-    uint32_t sliceSize;
-    uint32_t tileLength;
-    uint32_t tilesPerSlice;
-    uint32_t numChannels;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> wGm;
+    AscendC::GlobalTensor<float> cbGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t batchSize;
+    uint32_t inChannels;
+    uint32_t outChannels;
+    uint32_t inDepth;
+    uint32_t inHeight;
+    uint32_t inWidth;
+    uint32_t outDepth;
+    uint32_t outHeight;
+    uint32_t outWidth;
+    uint32_t kernelSize;
+    uint32_t totalOutputElements;
+    uint32_t startIdx;
+    uint32_t coreLength;
 };
 
 extern "C" __global__ __aicore__ void conv3d_relu_leaky_relu_gelu_sigmoid_bias_add_custom(
-    GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GM_ADDR x, GM_ADDR weight, GM_ADDR conv_bias, GM_ADDR bias, GM_ADDR z,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelFusedActBias op;
-    op.Init(x, bias, y,
-            tiling_data.slicesPerBlock, tiling_data.sliceSize,
-            tiling_data.tileLength, tiling_data.tilesPerSlice,
-            tiling_data.numChannels);
+    KernelConv3dFused op;
+    op.Init(x, weight, conv_bias, bias, z,
+            tiling_data.batchSize, tiling_data.inChannels, tiling_data.outChannels,
+            tiling_data.inDepth, tiling_data.inHeight, tiling_data.inWidth,
+            tiling_data.outDepth, tiling_data.outHeight, tiling_data.outWidth,
+            tiling_data.kernelSize, tiling_data.totalOutputElements,
+            tiling_data.elementsPerCore);
     op.Process();
 }
 """
@@ -283,9 +379,26 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv3d_relu_leaky_relu_gelu_sigmoid_bias_add_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias) {
-    at::Tensor result = at::empty_like(x);
-    EXEC_NPU_CMD(aclnnConv3dReluLeakyReluGeluSigmoidBiasAddCustom, x, bias, result);
+at::Tensor conv3d_relu_leaky_relu_gelu_sigmoid_bias_add_custom_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_bias,
+    const at::Tensor& bias)
+{
+    auto sizes = x.sizes();
+    auto wsizes = weight.sizes();
+    int64_t N = sizes[0];
+    int64_t D = sizes[2];
+    int64_t H = sizes[3];
+    int64_t W = sizes[4];
+    int64_t OC = wsizes[0];
+    int64_t K = wsizes[2];
+    int64_t OD = D - K + 1;
+    int64_t OH = H - K + 1;
+    int64_t OW = W - K + 1;
+
+    at::Tensor result = at::empty({N, OC, OD, OH, OW}, x.options());
+    EXEC_NPU_CMD(aclnnConv3dReluLeakyReluGeluSigmoidBiasAddCustom, x, weight, conv_bias, bias, result);
     return result;
 }
 
@@ -294,14 +407,14 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv3d_relu_leaky_relu_gelu_sigmoid_bias_add_custom", &conv3d_relu_leaky_relu_gelu_sigmoid_bias_add_custom_impl_npu, "fused relu+leaky_relu+gelu+sigmoid+bias_add following conv3d");
+    m.def("conv3d_relu_leaky_relu_gelu_sigmoid_bias_add_custom", &conv3d_relu_leaky_relu_gelu_sigmoid_bias_add_custom_impl_npu, "fused conv3d activations bias add");
 }
 """
 
 model_src='''
 import torch
-import torch.nn as nn
 import torch_npu
+import torch.nn as nn
 import custom_ops_lib
 
 class ModelNew(nn.Module):
@@ -311,10 +424,10 @@ class ModelNew(nn.Module):
         self.bias = nn.Parameter(torch.randn(bias_shape))
 
     def forward(self, x):
-        x = self.conv(x)
-        bias_flat = self.bias.view(-1).contiguous()
-        x = x.contiguous()
-        x = custom_ops_lib.conv3d_relu_leaky_relu_gelu_sigmoid_bias_add_custom(x, bias_flat)
-        return x
+        weight = self.conv.weight
+        conv_bias = self.conv.bias
+        bias_flat = self.bias.reshape(-1).contiguous()
+        out = custom_ops_lib.conv3d_relu_leaky_relu_gelu_sigmoid_bias_add_custom(
+            x.contiguous(), weight.contiguous(), conv_bias.contiguous(), bias_flat)
+        return out
 '''
-```

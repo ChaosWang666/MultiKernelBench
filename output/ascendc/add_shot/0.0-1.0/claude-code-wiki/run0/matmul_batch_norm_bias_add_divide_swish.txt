@@ -23,21 +23,11 @@ project_json_src='''
                 "type": [
                     "float"
                 ]
-            },
-            {
-                "name": "divide_val",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
             }
         ],
         "output_desc": [
             {
-                "name": "z",
+                "name": "y",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -68,9 +58,10 @@ host_operator_src="""
 #include "matmul_batch_norm_bias_add_divide_swish_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 4096;
+const uint32_t TILE_NUM = 32;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     MatmulBatchNormBiasAddDivideSwishCustomTilingData tiling;
@@ -86,12 +77,13 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
+
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x1_shape = context->GetInputShape(0);
+    const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x1_shape;
+    *y_shape = *x_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -101,6 +93,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class MatmulBatchNormBiasAddDivideSwishCustom : public OpDef {
@@ -117,12 +110,7 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("divide_val")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
@@ -145,24 +133,25 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelBiasAddDivideSwish {
+class KernelMatmulBatchNormBiasAddDivideSwish {
 public:
-    __aicore__ inline KernelBiasAddDivideSwish() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR divideVal, GM_ADDR z, uint32_t totalLength, uint32_t tileNum)
+    __aicore__ inline KernelMatmulBatchNormBiasAddDivideSwish() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
         this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        biasGm.SetGlobalBuffer((__gm__ float *)bias, 1);
-        divideValGm.SetGlobalBuffer((__gm__ float *)divideVal, 1);
-        zGm.SetGlobalBuffer((__gm__ float *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        biasGm.SetGlobalBuffer((__gm__ DTYPE_BIAS *)bias + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuffer, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(DTYPE_BIAS));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(sigBuf, this->tileLength * sizeof(float));
     }
+
     __aicore__ inline void Process()
     {
         int32_t loopCount = this->tileNum * BUFFER_NUM;
@@ -176,58 +165,55 @@ public:
 private:
     __aicore__ inline void CopyIn(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.AllocTensor<DTYPE_BIAS>();
         AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(biasLocal, biasGm[progress * this->tileLength], this->tileLength);
         inQueueX.EnQue(xLocal);
+        inQueueBias.EnQue(biasLocal);
     }
+
     __aicore__ inline void Compute(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
-        AscendC::LocalTensor<float> tmpLocal = tmpBuffer.Get<float>();
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_BIAS> biasLocal = inQueueBias.DeQue<DTYPE_BIAS>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<float> sigLocal = sigBuf.Get<float>();
 
-        float biasVal = biasGm.GetValue(0);
-        AscendC::Adds(zLocal, xLocal, biasVal, this->tileLength);
+        AscendC::Add(yLocal, xLocal, biasLocal, this->tileLength);
+        AscendC::Sigmoid(sigLocal, yLocal, this->tileLength);
+        AscendC::Mul(yLocal, yLocal, sigLocal, this->tileLength);
 
-        float divVal = divideValGm.GetValue(0);
-        float invDiv = 1.0f / divVal;
-        AscendC::Muls(zLocal, zLocal, invDiv, this->tileLength);
-
-        AscendC::Muls(tmpLocal, zLocal, -1.0f, this->tileLength);
-        AscendC::Exp(tmpLocal, tmpLocal, this->tileLength);
-        AscendC::Adds(tmpLocal, tmpLocal, 1.0f, this->tileLength);
-        AscendC::Reciprocal(tmpLocal, tmpLocal, this->tileLength);
-
-        AscendC::Mul(zLocal, zLocal, tmpLocal, this->tileLength);
-
-        outQueueZ.EnQue<float>(zLocal);
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
+        inQueueBias.FreeTensor(biasLocal);
     }
+
     __aicore__ inline void CopyOut(int32_t progress)
     {
-        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
-        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
-        outQueueZ.FreeTensor(zLocal);
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuffer;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> biasGm;
-    AscendC::GlobalTensor<float> divideValGm;
-    AscendC::GlobalTensor<float> zGm;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueBias;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> sigBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_BIAS> biasGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
 };
 
-extern "C" __global__ __aicore__ void matmul_batch_norm_bias_add_divide_swish_custom(GM_ADDR x, GM_ADDR bias, GM_ADDR divide_val, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void matmul_batch_norm_bias_add_divide_swish_custom(
+    GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelBiasAddDivideSwish op;
-    op.Init(x, bias, divide_val, z, tiling_data.totalLength, tiling_data.tileNum);
+    KernelMatmulBatchNormBiasAddDivideSwish op;
+    op.Init(x, bias, y, tiling_data.totalLength, tiling_data.tileNum);
     op.Process();
 }
 """
@@ -238,9 +224,9 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor matmul_batch_norm_bias_add_divide_swish_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias, const at::Tensor& divide_val) {
+at::Tensor matmul_batch_norm_bias_add_divide_swish_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias) {
     at::Tensor result = at::empty_like(x);
-    EXEC_NPU_CMD(aclnnMatmulBatchNormBiasAddDivideSwishCustom, x, bias, divide_val, result);
+    EXEC_NPU_CMD(aclnnMatmulBatchNormBiasAddDivideSwishCustom, x, bias, result);
     return result;
 }
 
@@ -249,14 +235,14 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("matmul_batch_norm_bias_add_divide_swish_custom", &matmul_batch_norm_bias_add_divide_swish_custom_impl_npu, "fused bias add, divide, and swish");
+    m.def("matmul_batch_norm_bias_add_divide_swish_custom", &matmul_batch_norm_bias_add_divide_swish_custom_impl_npu, "fused (x + bias)/dv * sigmoid((x + bias)/dv)");
 }
 """
 
 model_src='''
 import torch
-import torch.nn as nn
 import torch_npu
+import torch.nn as nn
 import custom_ops_lib
 
 class ModelNew(nn.Module):
@@ -270,7 +256,12 @@ class ModelNew(nn.Module):
     def forward(self, x):
         x = self.matmul(x)
         x = self.bn(x)
-        divide_val_tensor = torch.tensor([self.divide_value], dtype=x.dtype, device=x.device)
-        x = custom_ops_lib.matmul_batch_norm_bias_add_divide_swish_custom(x, self.bias, divide_val_tensor)
-        return x
+        if self.divide_value != 1.0:
+            inv_dv = 1.0 / self.divide_value
+            x = x * inv_dv
+            bias = self.bias * inv_dv
+        else:
+            bias = self.bias
+        bias_expanded = bias.expand_as(x).contiguous()
+        return custom_ops_lib.matmul_batch_norm_bias_add_divide_swish_custom(x, bias_expanded)
 '''

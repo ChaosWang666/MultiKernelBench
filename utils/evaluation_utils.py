@@ -30,11 +30,16 @@ def extract_first_code(output_string: str, code_language_types: list[str]) -> st
 
     return None
 
-def eval_single(response_txt:str, op, language='ascendc'):
-    # Import the AscendC backend if not yet registered
-    if 'ascendc' not in BACKEND_REGISTRY:
-        importlib.import_module("backends.ascendc_backend")
-    backend = BACKEND_REGISTRY['ascendc']
+def eval_single(response_txt:str, op, language):
+    # Try to dynamically import the backend if it's not yet registered
+    if language not in BACKEND_REGISTRY:
+        try:
+            importlib.import_module(f"backends.{language}_backend")
+        except ImportError as e:
+            raise ValueError(f"Unsupported language/platform: {language} (module not found)") from e
+    backend = BACKEND_REGISTRY.get(language)
+    if backend is None:
+        raise ValueError(f"Unsupported language/platform: {language}")
     
     hardware = backend.get_hardware_name()
 
@@ -66,14 +71,14 @@ def eval_single(response_txt:str, op, language='ascendc'):
     backend.cleanup()
     return result
 
-def eval_all(out_dir, op_tested=dataset.keys()):
+def eval_all(out_dir, language, op_tested=dataset.keys()):
     result = {}
-
+    
     for op in op_tested:
         print(f"[INFO] eval op {op}")
         with open(os.path.join(out_dir, f'{op}.txt'), 'r') as saved_log:
             response_txt = saved_log.read()
-        result[op] = eval_single(response_txt, op)
+        result[op] = eval_single(response_txt, op, language)
         
     with open(os.path.join(out_dir, 'result.json'), 'w') as f:
         json.dump(result, f, indent=2)
@@ -82,12 +87,13 @@ def eval_all(out_dir, op_tested=dataset.keys()):
 if __name__ == '__main__':
     runs = 1
     model = 'deepseek-chat'
+    language = 'cuda'
     op_tested = list(dataset.keys())
     op_tested = ['ltsm_hn', 'conv3d_leaky_relu_sum_clamp_gelu','square_matrix_multiplication','l2_norm','adam','sgd']
     select_shot = False
     for run in range(runs):
         if not select_shot:
-            out_dir = f'output/ascendc/add_shot/{temperature}-{top_p}/{model}/run{run}'
+            out_dir = f'output/{language}/add_shot/{temperature}-{top_p}/{model}/run{run}'
         else:
-            out_dir = f'output/ascendc/selected_shot/{temperature}-{top_p}/{model}/run{run}'
-        eval_all(out_dir, op_tested)
+            out_dir = f'output/{language}/selected_shot/{temperature}-{top_p}/{model}/run{run}'
+        eval_all(out_dir, language, op_tested)

@@ -1,4 +1,3 @@
-```python
 project_json_src='''
 [
     {
@@ -14,69 +13,11 @@ project_json_src='''
                 "type": [
                     "float"
                 ]
-            },
+            }
+        ],
+        "output_desc": [
             {
-                "name": "weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "linear_bias",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bn_weight",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bn_bias",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bn_mean",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "bn_var",
-                "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
-            },
-            {
-                "name": "extra_bias",
+                "name": "z",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -86,16 +27,16 @@ project_json_src='''
                 ]
             }
         ],
-        "output_desc": [
+        "attr": [
             {
-                "name": "y",
+                "name": "a",
                 "param_type": "required",
-                "format": [
-                    "ND"
-                ],
-                "type": [
-                    "float"
-                ]
+                "type": "float"
+            },
+            {
+                "name": "b",
+                "param_type": "required",
+                "type": "float"
             }
         ]
     }
@@ -107,11 +48,10 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(MatmulBatchNormBiasAddDivideSwishCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
-  TILING_DATA_FIELD_DEF(uint32_t, inFeatures);
-  TILING_DATA_FIELD_DEF(uint32_t, outFeatures);
-  TILING_DATA_FIELD_DEF(float, divideValue);
-  TILING_DATA_FIELD_DEF(float, bnEps);
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(float, a);
+  TILING_DATA_FIELD_DEF(float, b);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(MatmulBatchNormBiasAddDivideSwishCustom, MatmulBatchNormBiasAddDivideSwishCustomTilingData)
@@ -122,41 +62,39 @@ host_operator_src="""
 #include "matmul_batch_norm_bias_add_divide_swish_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 32;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     MatmulBatchNormBiasAddDivideSwishCustomTilingData tiling;
-    auto xShape = context->GetInputShape(0)->GetOriginShape();
-    auto wShape = context->GetInputShape(1)->GetOriginShape();
-    uint32_t batchSize = xShape.GetDim(0);
-    uint32_t inFeatures = xShape.GetDim(1);
-    uint32_t outFeatures = wShape.GetDim(0);
-
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
     context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_inFeatures(inFeatures);
-    tiling.set_outFeatures(outFeatures);
-    tiling.set_divideValue(1.0f);
-    tiling.set_bnEps(1e-5f);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
+
+    auto attrs = context->GetAttrs();
+    const float* aPtr = attrs->GetAttrPointer<float>(0);
+    const float* bPtr = attrs->GetAttrPointer<float>(1);
+    tiling.set_a(*aPtr);
+    tiling.set_b(*bPtr);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
-    currentWorkspace[0] = 32 * 1024 * 1024;
+    currentWorkspace[0] = 0;
     return ge::GRAPH_SUCCESS;
 }
 }
 
+
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* xShape = context->GetInputShape(0);
-    const gert::Shape* wShape = context->GetInputShape(1);
-    gert::Shape* yShape = context->GetOutputShape(0);
-    yShape->SetDimNum(2);
-    yShape->SetDim(0, xShape->GetDim(0));
-    yShape->SetDim(1, wShape->GetDim(0));
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -167,24 +105,31 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 }
 }
 
+
 namespace ops {
 class MatmulBatchNormBiasAddDivideSwishCustom : public OpDef {
 public:
     explicit MatmulBatchNormBiasAddDivideSwishCustom(const char* name) : OpDef(name)
     {
-        this->Input("x").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("weight").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("linear_bias").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("bn_weight").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("bn_bias").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("bn_mean").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("bn_var").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("extra_bias").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("y").ParamType(REQUIRED).DataType({ge::DT_FLOAT}).Format({ge::FORMAT_ND}).UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("a").AttrType(REQUIRED).Float();
+        this->Attr("b").AttrType(REQUIRED).Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
-        this->AICore().SetTiling(optiling::TilingFunc);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
+
     }
 };
 
@@ -195,149 +140,84 @@ OP_ADD(MatmulBatchNormBiasAddDivideSwishCustom);
 kernel_src="""
 #include "kernel_operator.h"
 
-class KernelFused {
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelFusedSwish {
 public:
-    __aicore__ inline KernelFused() {}
-    __aicore__ inline void Init(GM_ADDR y, GM_ADDR bnW, GM_ADDR bnB, GM_ADDR bnM, GM_ADDR bnV, GM_ADDR extraB, GM_ADDR out,
-                                uint32_t batchSize, uint32_t outFeatures, float divideValue, float bnEps)
+    __aicore__ inline KernelFusedSwish() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t tileNum, float a, float b)
     {
-        this->batchSize = batchSize;
-        this->outFeatures = outFeatures;
-        this->divideValue = divideValue;
-        this->bnEps = bnEps;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->a = a;
+        this->b = b;
 
-        uint32_t totalElems = batchSize * outFeatures;
-        uint32_t blockNum = AscendC::GetBlockNum();
-        uint32_t blockIdx = AscendC::GetBlockIdx();
-
-        this->totalElems = totalElems;
-        this->blockNum = blockNum;
-        this->blockIdx = blockIdx;
-
-        uint32_t rowsPerBlock = (batchSize + blockNum - 1) / blockNum;
-        uint32_t rowStart = blockIdx * rowsPerBlock;
-        uint32_t rowEnd = rowStart + rowsPerBlock;
-        if (rowEnd > batchSize) rowEnd = batchSize;
-        if (rowStart > batchSize) rowStart = batchSize;
-        this->rowStart = rowStart;
-        this->rowEnd = rowEnd;
-        this->myRows = rowEnd - rowStart;
-
-        yGm.SetGlobalBuffer((__gm__ float *)y, totalElems);
-        bnWGm.SetGlobalBuffer((__gm__ float *)bnW, outFeatures);
-        bnBGm.SetGlobalBuffer((__gm__ float *)bnB, outFeatures);
-        bnMGm.SetGlobalBuffer((__gm__ float *)bnM, outFeatures);
-        bnVGm.SetGlobalBuffer((__gm__ float *)bnV, outFeatures);
-        extraBGm.SetGlobalBuffer((__gm__ float *)extraB, 1);
-        outGm.SetGlobalBuffer((__gm__ float *)out, totalElems);
-
-        pipe.InitBuffer(inQueueY, 1, outFeatures * sizeof(float));
-        pipe.InitBuffer(outQueue, 1, outFeatures * sizeof(float));
-        pipe.InitBuffer(bufBnW, outFeatures * sizeof(float));
-        pipe.InitBuffer(bufBnB, outFeatures * sizeof(float));
-        pipe.InitBuffer(bufBnM, outFeatures * sizeof(float));
-        pipe.InitBuffer(bufBnV, outFeatures * sizeof(float));
-        pipe.InitBuffer(bufScale, outFeatures * sizeof(float));
-        pipe.InitBuffer(bufShift, outFeatures * sizeof(float));
-        pipe.InitBuffer(bufTmp, outFeatures * sizeof(float));
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
     }
-
     __aicore__ inline void Process()
     {
-        if (this->myRows == 0) return;
-
-        AscendC::LocalTensor<float> bnWLocal = bufBnW.Get<float>();
-        AscendC::LocalTensor<float> bnBLocal = bufBnB.Get<float>();
-        AscendC::LocalTensor<float> bnMLocal = bufBnM.Get<float>();
-        AscendC::LocalTensor<float> bnVLocal = bufBnV.Get<float>();
-        AscendC::LocalTensor<float> scaleLocal = bufScale.Get<float>();
-        AscendC::LocalTensor<float> shiftLocal = bufShift.Get<float>();
-        AscendC::LocalTensor<float> tmpLocal = bufTmp.Get<float>();
-
-        AscendC::DataCopy(bnWLocal, bnWGm, outFeatures);
-        AscendC::DataCopy(bnBLocal, bnBGm, outFeatures);
-        AscendC::DataCopy(bnMLocal, bnMGm, outFeatures);
-        AscendC::DataCopy(bnVLocal, bnVGm, outFeatures);
-
-        AscendC::PipeBarrier<PIPE_ALL>();
-
-        // scale = bnW / sqrt(bnV + eps)
-        AscendC::Adds(tmpLocal, bnVLocal, bnEps, outFeatures);
-        AscendC::Sqrt(tmpLocal, tmpLocal, outFeatures);
-        AscendC::Div(scaleLocal, bnWLocal, tmpLocal, outFeatures);
-
-        // shift = bnB - bnM * scale
-        AscendC::Mul(tmpLocal, bnMLocal, scaleLocal, outFeatures);
-        AscendC::Sub(shiftLocal, bnBLocal, tmpLocal, outFeatures);
-
-        // extra bias (shape = 1, broadcast scalar)
-        float extraBiasVal = extraBGm.GetValue(0);
-
-        // incorporate extra bias and divide into shift:
-        // result = ((y * scale + shift) + extraBias) / divideValue
-        //        = y * (scale/div) + (shift + extraBias)/div
-        float invDiv = 1.0f / divideValue;
-        AscendC::Muls(scaleLocal, scaleLocal, invDiv, outFeatures);
-        AscendC::Adds(shiftLocal, shiftLocal, extraBiasVal, outFeatures);
-        AscendC::Muls(shiftLocal, shiftLocal, invDiv, outFeatures);
-
-        AscendC::PipeBarrier<PIPE_ALL>();
-
-        for (uint32_t r = 0; r < myRows; r++) {
-            uint32_t rowIdx = rowStart + r;
-            AscendC::LocalTensor<float> yLocal = inQueueY.AllocTensor<float>();
-            AscendC::DataCopy(yLocal, yGm[rowIdx * outFeatures], outFeatures);
-            inQueueY.EnQue(yLocal);
-
-            AscendC::LocalTensor<float> yIn = inQueueY.DeQue<float>();
-            AscendC::LocalTensor<float> outLocal = outQueue.AllocTensor<float>();
-
-            // outLocal = yIn * scale + shift
-            AscendC::Mul(outLocal, yIn, scaleLocal, outFeatures);
-            AscendC::Add(outLocal, outLocal, shiftLocal, outFeatures);
-
-            // swish: outLocal = outLocal * sigmoid(outLocal)
-            AscendC::LocalTensor<float> sigTmp = bufTmp.Get<float>();
-            // sigmoid(x) = 1 / (1 + exp(-x))
-            AscendC::Muls(sigTmp, outLocal, -1.0f, outFeatures);
-            AscendC::Exp(sigTmp, sigTmp, outFeatures);
-            AscendC::Adds(sigTmp, sigTmp, 1.0f, outFeatures);
-            // outLocal = outLocal / sigTmp  (this is x * sigmoid(x) since sigTmp = 1+exp(-x))
-            AscendC::Div(outLocal, outLocal, sigTmp, outFeatures);
-
-            outQueue.EnQue<float>(outLocal);
-            inQueueY.FreeTensor(yIn);
-
-            AscendC::LocalTensor<float> outDq = outQueue.DeQue<float>();
-            AscendC::DataCopy(outGm[rowIdx * outFeatures], outDq, outFeatures);
-            outQueue.FreeTensor(outDq);
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
         }
     }
 
 private:
-    AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueY;
-    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueue;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> bufBnW, bufBnB, bufBnM, bufBnV, bufScale, bufShift, bufTmp;
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
 
-    AscendC::GlobalTensor<float> yGm, bnWGm, bnBGm, bnMGm, bnVGm, extraBGm, outGm;
-    uint32_t batchSize, outFeatures, totalElems, blockNum, blockIdx;
-    uint32_t rowStart, rowEnd, myRows;
-    float divideValue, bnEps;
+        AscendC::Muls(xLocal, xLocal, this->a, this->tileLength);
+        AscendC::Adds(xLocal, xLocal, this->b, this->tileLength);
+
+        AscendC::Muls(tmpLocal, xLocal, (float)(-1.0f), this->tileLength);
+        AscendC::Exp(tmpLocal, tmpLocal, this->tileLength);
+        AscendC::Adds(tmpLocal, tmpLocal, (float)(1.0f), this->tileLength);
+        AscendC::Div(zLocal, xLocal, tmpLocal, this->tileLength);
+
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
+        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    float a;
+    float b;
 };
 
-extern "C" __global__ __aicore__ void matmul_batch_norm_bias_add_divide_swish_custom(
-    GM_ADDR x, GM_ADDR weight, GM_ADDR linear_bias,
-    GM_ADDR bn_weight, GM_ADDR bn_bias, GM_ADDR bn_mean, GM_ADDR bn_var,
-    GM_ADDR extra_bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
-{
+extern "C" __global__ __aicore__ void matmul_batch_norm_bias_add_divide_swish_custom(GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    // Note: matmul + linear_bias is expected to be computed on host side and passed through workspace/y.
-    // Here we treat input 'y' as pre-computed matmul result passed in via the linear path.
-    KernelFused op;
-    op.Init(x, bn_weight, bn_bias, bn_mean, bn_var, extra_bias, y,
-            tiling_data.batchSize, tiling_data.outFeatures,
-            tiling_data.divideValue, tiling_data.bnEps);
+    KernelFusedSwish op;
+    op.Init(x, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.a, tiling_data.b);
     op.Process();
 }
 """
@@ -348,27 +228,10 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor matmul_batch_norm_bias_add_divide_swish_custom_impl_npu(
-    const at::Tensor& x,
-    const at::Tensor& weight,
-    const at::Tensor& linear_bias,
-    const at::Tensor& bn_weight,
-    const at::Tensor& bn_bias,
-    const at::Tensor& bn_mean,
-    const at::Tensor& bn_var,
-    const at::Tensor& extra_bias,
-    double divide_value)
-{
-    // Compute matmul + linear bias using torch (on NPU)
-    at::Tensor linear_out = at::matmul(x, weight.t()) + linear_bias;
-    at::Tensor result = at::empty_like(linear_out);
-    EXEC_NPU_CMD(aclnnMatmulBatchNormBiasAddDivideSwishCustom,
-                 x, weight, linear_bias,
-                 bn_weight, bn_bias, bn_mean, bn_var,
-                 extra_bias, linear_out);
-    // linear_out is modified in place to become the final result in our kernel design,
-    // but since we pass it as 'y' input/output, the kernel reads from and writes to it.
-    return linear_out;
+at::Tensor matmul_batch_norm_bias_add_divide_swish_custom_impl_npu(const at::Tensor& x, double a, double b) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnMatmulBatchNormBiasAddDivideSwishCustom, x, (float)a, (float)b, result);
+    return result;
 }
 
 TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
@@ -376,45 +239,31 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("matmul_batch_norm_bias_add_divide_swish_custom",
-          &matmul_batch_norm_bias_add_divide_swish_custom_impl_npu,
-          "Fused Matmul + BN + Bias + Divide + Swish");
+    m.def("matmul_batch_norm_bias_add_divide_swish_custom", &matmul_batch_norm_bias_add_divide_swish_custom_impl_npu, "fused (x+bias)/div * sigmoid((x+bias)/div)");
 }
 """
 
 model_src='''
 import torch
+import torch.nn as nn
 import torch_npu
 import custom_ops_lib
 
 class ModelNew(torch.nn.Module):
     def __init__(self, in_features, out_features, bn_eps=1e-5, bn_momentum=0.1, bias_shape=(1,), divide_value=1.0):
         super(ModelNew, self).__init__()
-        self.matmul = torch.nn.Linear(in_features, out_features)
-        self.bn = torch.nn.BatchNorm1d(out_features, eps=bn_eps, momentum=bn_momentum)
-        self.bias = torch.nn.Parameter(torch.randn(bias_shape))
+        self.matmul = nn.Linear(in_features, out_features)
+        self.bn = nn.BatchNorm1d(out_features, eps=bn_eps, momentum=bn_momentum)
+        self.bias = nn.Parameter(torch.randn(bias_shape))
         self.divide_value = divide_value
 
     def forward(self, x):
-        if self.training:
-            # Update BN running stats in training mode via PyTorch's BN
-            x = self.matmul(x)
-            x = self.bn(x)
-            x = x + self.bias
-            x = x / self.divide_value
-            x = x * torch.sigmoid(x)
-            return x
-        else:
-            return custom_ops_lib.matmul_batch_norm_bias_add_divide_swish_custom(
-                x,
-                self.matmul.weight,
-                self.matmul.bias,
-                self.bn.weight,
-                self.bn.bias,
-                self.bn.running_mean,
-                self.bn.running_var,
-                self.bias,
-                float(self.divide_value),
-            )
+        x = self.matmul(x)
+        x = self.bn(x)
+        inv_divide = 1.0 / float(self.divide_value)
+        a = inv_divide
+        b = float(self.bias.detach().cpu().item()) * inv_divide
+        x = x.contiguous()
+        x = custom_ops_lib.matmul_batch_norm_bias_add_divide_swish_custom(x, a, b)
+        return x
 '''
-```

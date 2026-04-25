@@ -1,0 +1,299 @@
+project_json_src='''
+[
+    {
+        "op": "GemmReluDivideCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+#include "tiling/tiling_api.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GemmReluDivideCustomTilingData)
+    TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, cubeTilingData);
+    TILING_DATA_FIELD_DEF(float, invDivisor);
+    TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GemmReluDivideCustom, GemmReluDivideCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "gemm_relu_divide_custom_tiling.h"
+#include "register/op_def_registry.h"
+#include "tiling/platform/platform_ascendc.h"
+#include "tiling/tiling_api.h"
+
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    GemmReluDivideCustomTilingData tiling;
+
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+
+    auto shapeA = context->GetInputShape(0)->GetOriginShape();
+    auto shapeB = context->GetInputShape(1)->GetOriginShape();
+
+    int32_t M = shapeA.GetDim(0);
+    int32_t K = shapeA.GetDim(1);
+    int32_t N = shapeB.GetDim(0);
+
+    matmul_tiling::MultiCoreMatmulTiling cubeTiling(ascendcPlatform);
+    uint32_t aicCoreNum = ascendcPlatform.GetCoreNumAic();
+    cubeTiling.SetDim(aicCoreNum);
+    cubeTiling.SetAType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                        matmul_tiling::DataType::DT_FLOAT, false);
+    cubeTiling.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                        matmul_tiling::DataType::DT_FLOAT, true);
+    cubeTiling.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                        matmul_tiling::DataType::DT_FLOAT);
+    cubeTiling.SetBiasType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                           matmul_tiling::DataType::DT_FLOAT);
+    cubeTiling.SetShape(M, N, K);
+    cubeTiling.SetOrgShape(M, N, K);
+    cubeTiling.SetBias(true);
+    cubeTiling.SetBufferSpace(-1, -1, -1);
+
+    if (cubeTiling.GetTiling(tiling.cubeTilingData) == -1) {
+        return ge::GRAPH_FAILED;
+    }
+
+    tiling.set_invDivisor(0.5f);
+    tiling.set_totalLength(static_cast<uint32_t>(M * N));
+
+    context->SetBlockDim(aicCoreNum);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
+                        context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+
+    size_t userWorkspaceSize = 0;
+    size_t systemWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = userWorkspaceSize + systemWorkspaceSize;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* w_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, w_shape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class GemmReluDivideCustom : public OpDef {
+public:
+    explicit GemmReluDivideCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(GemmReluDivideCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+#include "lib/matmul_intf.h"
+
+extern "C" __global__ __aicore__ void gemm_relu_divide_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tilingData, tiling);
+
+    AscendC::TPipe pipe;
+
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> weightGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> yGm;
+    xGm.SetGlobalBuffer((__gm__ float *)x);
+    weightGm.SetGlobalBuffer((__gm__ float *)weight);
+    biasGm.SetGlobalBuffer((__gm__ float *)bias);
+    yGm.SetGlobalBuffer((__gm__ float *)y);
+
+    using aType = matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float, false>;
+    using bType = matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float, true>;
+    using cType = matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float, false>;
+    using biasType = matmul::MatmulType<AscendC::TPosition::GM, matmul::CubeFormat::ND, float, false>;
+
+    matmul::Matmul<aType, bType, cType, biasType> mm;
+    REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), mm, &tilingData.cubeTilingData);
+    mm.Init(&tilingData.cubeTilingData, &pipe);
+
+    if ASCEND_IS_AIC {
+        mm.SetTensorA(xGm);
+        mm.SetTensorB(weightGm);
+        mm.SetBias(biasGm);
+        mm.IterateAll(yGm);
+        mm.End();
+    }
+
+    AscendC::SyncAll();
+
+    if ASCEND_IS_AIV {
+        const int32_t totalLen = static_cast<int32_t>(tilingData.totalLength);
+        const int32_t blkNum = static_cast<int32_t>(AscendC::GetBlockNum());
+        const int32_t blkIdx = static_cast<int32_t>(AscendC::GetBlockIdx());
+        const int32_t perBlk = totalLen / blkNum;
+        const int32_t offset = blkIdx * perBlk;
+
+        constexpr int32_t TILE_LEN = 8192;
+        const int32_t loops = perBlk / TILE_LEN;
+        const float invDiv = tilingData.invDivisor;
+
+        AscendC::TQue<AscendC::TPosition::VECIN, 2> inQ;
+        AscendC::TQue<AscendC::TPosition::VECOUT, 2> outQ;
+        pipe.InitBuffer(inQ, 2, TILE_LEN * sizeof(float));
+        pipe.InitBuffer(outQ, 2, TILE_LEN * sizeof(float));
+
+        for (int32_t i = 0; i < loops; i++) {
+            AscendC::LocalTensor<float> inL = inQ.AllocTensor<float>();
+            AscendC::DataCopy(inL, yGm[offset + i * TILE_LEN], TILE_LEN);
+            inQ.EnQue(inL);
+
+            AscendC::LocalTensor<float> inD = inQ.DeQue<float>();
+            AscendC::LocalTensor<float> outL = outQ.AllocTensor<float>();
+            AscendC::Relu(outL, inD, TILE_LEN);
+            AscendC::Muls(outL, outL, invDiv, TILE_LEN);
+            outQ.EnQue(outL);
+            inQ.FreeTensor(inD);
+
+            AscendC::LocalTensor<float> outD = outQ.DeQue<float>();
+            AscendC::DataCopy(yGm[offset + i * TILE_LEN], outD, TILE_LEN);
+            outQ.FreeTensor(outD);
+        }
+    }
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gemm_relu_divide_custom_impl_npu(const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias) {
+    auto M = x.size(0);
+    auto N = weight.size(0);
+    at::Tensor result = at::empty({M, N}, x.options());
+    EXEC_NPU_CMD(aclnnGemmReluDivideCustom, x, weight, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gemm_relu_divide_custom", &gemm_relu_divide_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_relu_divide_custom", &gemm_relu_divide_custom_impl_npu, "gemm + relu + divide");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_features, out_features, divisor):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        self.divisor = divisor
+
+    def forward(self, x):
+        return custom_ops_lib.gemm_relu_divide_custom(x, self.linear.weight, self.linear.bias)
+'''

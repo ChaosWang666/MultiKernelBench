@@ -74,7 +74,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     float multiplyValue = *(attrs->GetFloat(1));
 
     uint32_t bufferNum = 2;
-    uint32_t tileLength = 1024;
+    uint32_t tileLength = 1600;
     uint32_t blockLength = totalLength / BLOCK_DIM;
     uint32_t tileNum = blockLength / (tileLength * bufferNum);
     if (tileNum == 0) {
@@ -165,7 +165,8 @@ public:
         zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
         pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
-        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
     }
     __aicore__ inline void Process()
     {
@@ -188,21 +189,27 @@ private:
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
         AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::LocalTensor<float> t1 = tmpBuf.Get<float>();
+        AscendC::LocalTensor<float> t1 = tmpBuf1.Get<float>();
+        AscendC::LocalTensor<float> t2 = tmpBuf2.Get<float>();
 
         AscendC::Adds(xLocal, xLocal, (DTYPE_X)this->addValue, this->tileLength);
         AscendC::Mins(xLocal, xLocal, (DTYPE_X)0.0f, this->tileLength);
 
-        // gelu(x) = x / (1 + exp(-2 * sqrt(2/pi) * (x + 0.044715 * x^3)))
         AscendC::Mul(t1, xLocal, xLocal, this->tileLength);
         AscendC::Mul(t1, t1, xLocal, this->tileLength);
         AscendC::Muls(t1, t1, (float)0.044715f, this->tileLength);
-        AscendC::Add(t1, xLocal, t1, this->tileLength);
-        AscendC::Muls(t1, t1, (float)(-1.5957691216057308f), this->tileLength);
+        AscendC::Add(t1, t1, xLocal, this->tileLength);
+        AscendC::Muls(t1, t1, (float)0.7978845608028654f, this->tileLength);
+        AscendC::Muls(t1, t1, (float)2.0f, this->tileLength);
         AscendC::Exp(t1, t1, this->tileLength);
         AscendC::Adds(t1, t1, (float)1.0f, this->tileLength);
-        AscendC::Div(zLocal, xLocal, t1, this->tileLength);
-
+        AscendC::Reciprocal(t2, t1, this->tileLength);
+        AscendC::Muls(t2, t2, (float)2.0f, this->tileLength);
+        AscendC::Muls(t2, t2, (float)-1.0f, this->tileLength);
+        AscendC::Adds(t2, t2, (float)1.0f, this->tileLength);
+        AscendC::Adds(t2, t2, (float)1.0f, this->tileLength);
+        AscendC::Muls(t2, t2, (float)0.5f, this->tileLength);
+        AscendC::Mul(zLocal, xLocal, t2, this->tileLength);
         AscendC::Muls(zLocal, zLocal, (DTYPE_Z)this->multiplyValue, this->tileLength);
 
         outQueueZ.EnQue<DTYPE_Z>(zLocal);
@@ -219,7 +226,8 @@ private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf2;
     AscendC::GlobalTensor<DTYPE_X> xGm;
     AscendC::GlobalTensor<DTYPE_Z> zGm;
     uint32_t blockLength;
@@ -243,12 +251,11 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv_transpose2d_add_min_gelu_multiply_custom_impl_npu(const at::Tensor& self, double add_value, double multiply_value) {
-    at::Tensor selfContig = self.contiguous();
-    at::Tensor result = at::empty_like(selfContig);
-    float addValueF = static_cast<float>(add_value);
-    float multiplyValueF = static_cast<float>(multiply_value);
-    EXEC_NPU_CMD(aclnnConvTranspose2dAddMinGeluMultiplyCustom, selfContig, addValueF, multiplyValueF, result);
+at::Tensor conv_transpose2d_add_min_gelu_multiply_custom_impl_npu(const at::Tensor& x, double add_value, double multiply_value) {
+    at::Tensor result = at::empty_like(x);
+    float addVal = static_cast<float>(add_value);
+    float mulVal = static_cast<float>(multiply_value);
+    EXEC_NPU_CMD(aclnnConvTranspose2dAddMinGeluMultiplyCustom, x, addVal, mulVal, result);
     return result;
 }
 
@@ -257,14 +264,14 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv_transpose2d_add_min_gelu_multiply_custom", &conv_transpose2d_add_min_gelu_multiply_custom_impl_npu, "fused add min gelu multiply");
+    m.def("conv_transpose2d_add_min_gelu_multiply_custom", &conv_transpose2d_add_min_gelu_multiply_custom_impl_npu, "fused add + min(.,0) + gelu + multiply after conv_transpose2d");
 }
 """
 
 model_src='''
 import torch
-import torch.nn as nn
 import torch_npu
+import torch.nn as nn
 import custom_ops_lib
 
 class ModelNew(nn.Module):
@@ -277,6 +284,5 @@ class ModelNew(nn.Module):
     def forward(self, x):
         x = self.conv_transpose(x)
         x = x.contiguous()
-        x = custom_ops_lib.conv_transpose2d_add_min_gelu_multiply_custom(x, self.add_value, self.multiply_value)
-        return x
+        return custom_ops_lib.conv_transpose2d_add_min_gelu_multiply_custom(x, self.add_value, self.multiply_value)
 '''

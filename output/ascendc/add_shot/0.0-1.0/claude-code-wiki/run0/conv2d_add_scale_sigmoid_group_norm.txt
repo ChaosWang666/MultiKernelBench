@@ -1,5 +1,3 @@
-I have enough information from the wiki and existing examples. Let me produce the final output.
-
 project_json_src='''
 [
     {
@@ -9,50 +7,44 @@ project_json_src='''
             {
                 "name": "x",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             },
             {
                 "name": "bias",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             },
             {
                 "name": "scale",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
-            },
-            {
-                "name": "gamma",
-                "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
-            },
-            {
-                "name": "beta",
-                "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             }
         ],
         "output_desc": [
             {
-                "name": "z",
+                "name": "y",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
-            }
-        ],
-        "attr": [
-            {
-                "name": "num_groups",
-                "type": "int"
-            },
-            {
-                "name": "eps",
-                "type": "float"
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             }
         ]
     }
@@ -64,12 +56,12 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv2dAddScaleSigmoidGroupNormCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, totalChunks);
   TILING_DATA_FIELD_DEF(uint32_t, channels);
-  TILING_DATA_FIELD_DEF(uint32_t, hw);
-  TILING_DATA_FIELD_DEF(uint32_t, numGroups);
-  TILING_DATA_FIELD_DEF(uint32_t, channelsPerGroup);
-  TILING_DATA_FIELD_DEF(float, eps);
+  TILING_DATA_FIELD_DEF(uint32_t, spatial);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, tailLength);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv2dAddScaleSigmoidGroupNormCustom, Conv2dAddScaleSigmoidGroupNormCustomTilingData)
@@ -81,31 +73,52 @@ host_operator_src="""
 #include "register/op_def_registry.h"
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 40;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv2dAddScaleSigmoidGroupNormCustomTilingData tiling;
+
     auto xShape = context->GetInputShape(0)->GetOriginShape();
-    uint32_t batchSize = xShape.GetDim(0);
-    uint32_t channels = xShape.GetDim(1);
-    uint32_t height = xShape.GetDim(2);
-    uint32_t width = xShape.GetDim(3);
-    uint32_t hw = height * width;
+    uint32_t N = static_cast<uint32_t>(xShape.GetDim(0));
+    uint32_t C = static_cast<uint32_t>(xShape.GetDim(1));
+    uint32_t H = static_cast<uint32_t>(xShape.GetDim(2));
+    uint32_t W = static_cast<uint32_t>(xShape.GetDim(3));
+    uint32_t spatial = H * W;
+    uint32_t totalChunks = N * C;
 
-    auto attrs = context->GetAttrs();
-    const int64_t* num_groups_ptr = attrs->GetAttrPointer<int64_t>(0);
-    const float* eps_ptr = attrs->GetAttrPointer<float>(1);
-    uint32_t numGroups = static_cast<uint32_t>(*num_groups_ptr);
-    float eps = *eps_ptr;
-    uint32_t channelsPerGroup = channels / numGroups;
+    uint32_t blockDim = 32;
+    if (totalChunks < blockDim) {
+        blockDim = totalChunks;
+    } else {
+        while (blockDim > 1 && (totalChunks % blockDim) != 0) {
+            blockDim--;
+        }
+    }
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
 
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_batchSize(batchSize);
-    tiling.set_channels(channels);
-    tiling.set_hw(hw);
-    tiling.set_numGroups(numGroups);
-    tiling.set_channelsPerGroup(channelsPerGroup);
-    tiling.set_eps(eps);
+    uint32_t tileLength = 8192;
+    if (tileLength > spatial) {
+        tileLength = ((spatial + 7) / 8) * 8;
+        if (tileLength == 0) {
+            tileLength = 8;
+        }
+    }
+
+    uint32_t tileNum = (spatial + tileLength - 1) / tileLength;
+    if (tileNum == 0) {
+        tileNum = 1;
+    }
+    uint32_t tailLength = spatial - (tileNum - 1) * tileLength;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_totalChunks(totalChunks);
+    tiling.set_channels(C);
+    tiling.set_spatial(spatial);
+    tiling.set_tileLength(tileLength);
+    tiling.set_tileNum(tileNum);
+    tiling.set_tailLength(tailLength);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -122,7 +135,8 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
     *y_shape = *x_shape;
     return GRAPH_SUCCESS;
 }
-static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext* context)
 {
     const auto inputDataType = context->GetInputDataType(0);
     context->SetOutputDataType(0, inputDataType);
@@ -150,26 +164,16 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("gamma")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("beta")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("num_groups").AttrType(REQUIRED).Int();
-        this->Attr("eps").AttrType(REQUIRED).Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
-        this->AICore().SetTiling(optiling::TilingFunc);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
     }
 };
@@ -182,230 +186,128 @@ kernel_src="""
 #include "kernel_operator.h"
 
 constexpr int32_t BUFFER_NUM = 2;
-constexpr uint32_t TILE_LEN = 2048;
-constexpr uint32_t MAX_CHANNELS = 64;
 
-class KernelFusedGN {
+class KernelFused {
 public:
-    __aicore__ inline KernelFusedGN() {}
-
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR scale,
-                                GM_ADDR gamma, GM_ADDR beta, GM_ADDR z,
-                                uint32_t batchSize, uint32_t channels,
-                                uint32_t hw, uint32_t numGroups,
-                                uint32_t channelsPerGroup, float eps)
+    __aicore__ inline KernelFused() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR scale, GM_ADDR y,
+                                uint32_t totalChunks, uint32_t channels, uint32_t spatial,
+                                uint32_t tileLength, uint32_t tileNum, uint32_t tailLength)
     {
-        this->batchSize = batchSize;
         this->channels = channels;
-        this->hw = hw;
-        this->numGroups = numGroups;
-        this->channelsPerGroup = channelsPerGroup;
-        this->eps = eps;
+        this->spatial = spatial;
+        this->tileLength = tileLength;
+        this->tileNum = tileNum;
+        this->tailLength = tailLength;
 
-        uint32_t totalPairs = batchSize * numGroups;
-        uint32_t blockIdx = AscendC::GetBlockIdx();
-        uint32_t blockNum = AscendC::GetBlockNum();
-        uint32_t pairsPerBlock = (totalPairs + blockNum - 1) / blockNum;
-        this->startPair = blockIdx * pairsPerBlock;
-        uint32_t endPair = this->startPair + pairsPerBlock;
-        if (endPair > totalPairs) endPair = totalPairs;
-        this->numPairs = (this->startPair < totalPairs) ? (endPair - this->startPair) : 0;
+        uint32_t blockDim = AscendC::GetBlockNum();
+        this->chunksPerCore = totalChunks / blockDim;
+        this->startChunk = this->chunksPerCore * static_cast<uint32_t>(AscendC::GetBlockIdx());
 
-        xGm.SetGlobalBuffer((__gm__ float *)x);
-        biasGm.SetGlobalBuffer((__gm__ float *)bias, channels);
-        scaleGm.SetGlobalBuffer((__gm__ float *)scale, channels);
-        gammaGm.SetGlobalBuffer((__gm__ float *)gamma, channels);
-        betaGm.SetGlobalBuffer((__gm__ float *)beta, channels);
-        zGm.SetGlobalBuffer((__gm__ float *)z);
+        xGm.SetGlobalBuffer((__gm__ float *)x + this->startChunk * this->spatial,
+                            this->chunksPerCore * this->spatial);
+        yGm.SetGlobalBuffer((__gm__ float *)y + this->startChunk * this->spatial,
+                            this->chunksPerCore * this->spatial);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, this->channels);
+        scaleGm.SetGlobalBuffer((__gm__ float *)scale, this->channels);
 
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, TILE_LEN * sizeof(float));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, TILE_LEN * sizeof(float));
-        pipe.InitBuffer(paramsBuf, 4 * MAX_CHANNELS * sizeof(float));
-        pipe.InitBuffer(sigBuf, TILE_LEN * sizeof(float));
-        pipe.InitBuffer(tmpBuf, TILE_LEN * sizeof(float));
-        pipe.InitBuffer(reduceBuf, 32 * 1024);
-        pipe.InitBuffer(scalarBuf, 32);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
     }
 
     __aicore__ inline void Process()
     {
-        if (numPairs == 0) return;
+        for (uint32_t i = 0; i < this->chunksPerCore; ++i) {
+            uint32_t globalChunk = this->startChunk + i;
+            uint32_t ch = globalChunk % this->channels;
+            float b = biasGm.GetValue(ch);
+            float s = scaleGm.GetValue(ch);
 
-        AscendC::LocalTensor<float> paramsLocal = paramsBuf.Get<float>();
-
-        AscendC::DataCopyExtParams cp;
-        cp.blockCount = 1;
-        cp.blockLen = channels * sizeof(float);
-        cp.srcStride = 0;
-        cp.dstStride = 0;
-        AscendC::DataCopyPadExtParams<float> pp;
-        pp.isPad = false;
-        pp.leftPadding = 0;
-        pp.rightPadding = 0;
-        pp.paddingValue = 0.0f;
-
-        AscendC::DataCopyPad(paramsLocal[0], biasGm, cp, pp);
-        AscendC::DataCopyPad(paramsLocal[MAX_CHANNELS], scaleGm, cp, pp);
-        AscendC::DataCopyPad(paramsLocal[2 * MAX_CHANNELS], gammaGm, cp, pp);
-        AscendC::DataCopyPad(paramsLocal[3 * MAX_CHANNELS], betaGm, cp, pp);
-
-        AscendC::PipeBarrier<PIPE_ALL>();
-
-        for (uint32_t i = 0; i < numPairs; i++) {
-            uint32_t pairIdx = startPair + i;
-            uint32_t n = pairIdx / numGroups;
-            uint32_t g = pairIdx % numGroups;
-            ProcessPair(n, g);
+            for (uint32_t t = 0; t < this->tileNum; ++t) {
+                uint32_t curLen = (t == this->tileNum - 1) ? this->tailLength : this->tileLength;
+                uint32_t offset = i * this->spatial + t * this->tileLength;
+                CopyIn(offset, curLen);
+                Compute(b, s, curLen);
+                CopyOut(offset, curLen);
+            }
         }
     }
 
 private:
-    __aicore__ inline void ProcessPair(uint32_t n, uint32_t g)
+    __aicore__ inline void CopyIn(uint32_t offset, uint32_t len)
     {
-        AscendC::LocalTensor<float> paramsLocal = paramsBuf.Get<float>();
-        AscendC::LocalTensor<float> sigLocal = sigBuf.Get<float>();
-        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
-        AscendC::LocalTensor<float> reduceTmp = reduceBuf.Get<float>();
-        AscendC::LocalTensor<float> scalarLocal = scalarBuf.Get<float>();
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
 
-        uint32_t groupSize = channelsPerGroup * hw;
-        uint32_t baseChannel = g * channelsPerGroup;
-        uint64_t sampleOffset = (uint64_t)n * channels * hw + (uint64_t)baseChannel * hw;
+        AscendC::DataCopyExtParams params;
+        params.blockCount = 1;
+        params.blockLen = static_cast<uint32_t>(len * sizeof(float));
+        params.srcStride = 0;
+        params.dstStride = 0;
 
-        float sum = 0.0f;
-        float sumsq = 0.0f;
+        AscendC::DataCopyPadExtParams<float> pad;
+        pad.isPad = false;
+        pad.leftPadding = 0;
+        pad.rightPadding = 0;
+        pad.paddingValue = 0.0f;
 
-        for (uint32_t c_off = 0; c_off < channelsPerGroup; c_off++) {
-            float b = paramsLocal.GetValue(baseChannel + c_off);
-            float s = paramsLocal.GetValue(MAX_CHANNELS + baseChannel + c_off);
-            uint64_t channelOffset = sampleOffset + (uint64_t)c_off * hw;
+        AscendC::DataCopyPad(xLocal, xGm[offset], params, pad);
+        inQueueX.EnQue(xLocal);
+    }
 
-            for (uint32_t tileStart = 0; tileStart < hw; tileStart += TILE_LEN) {
-                uint32_t tileLen = (tileStart + TILE_LEN <= hw) ? TILE_LEN : (hw - tileStart);
+    __aicore__ inline void Compute(float b, float s, uint32_t len)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
 
-                AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-                AscendC::DataCopyExtParams cp;
-                cp.blockCount = 1;
-                cp.blockLen = tileLen * sizeof(float);
-                cp.srcStride = 0;
-                cp.dstStride = 0;
-                AscendC::DataCopyPadExtParams<float> pp;
-                pp.isPad = false;
-                pp.leftPadding = 0;
-                pp.rightPadding = 0;
-                pp.paddingValue = 0.0f;
-                AscendC::DataCopyPad(xLocal, xGm[channelOffset + tileStart], cp, pp);
-                inQueueX.EnQue(xLocal);
+        AscendC::Adds(xLocal, xLocal, b, len);
+        AscendC::Muls(xLocal, xLocal, s, len);
+        AscendC::Muls(yLocal, xLocal, -1.0f, len);
+        AscendC::Exp(yLocal, yLocal, len);
+        AscendC::Adds(yLocal, yLocal, 1.0f, len);
+        AscendC::Reciprocal(yLocal, yLocal, len);
 
-                AscendC::LocalTensor<float> xIn = inQueueX.DeQue<float>();
+        outQueueY.EnQue<float>(yLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
 
-                AscendC::Adds<float>(sigLocal, xIn, b, tileLen);
-                AscendC::Muls<float>(sigLocal, sigLocal, -s, tileLen);
-                AscendC::Exp<float>(sigLocal, sigLocal, tileLen);
-                AscendC::Adds<float>(sigLocal, sigLocal, 1.0f, tileLen);
-                AscendC::Reciprocal<float>(sigLocal, sigLocal, tileLen);
+    __aicore__ inline void CopyOut(uint32_t offset, uint32_t len)
+    {
+        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
 
-                inQueueX.FreeTensor(xIn);
+        AscendC::DataCopyExtParams params;
+        params.blockCount = 1;
+        params.blockLen = static_cast<uint32_t>(len * sizeof(float));
+        params.srcStride = 0;
+        params.dstStride = 0;
 
-                AscendC::ReduceSum<float>(scalarLocal, sigLocal, reduceTmp, tileLen);
-                AscendC::PipeBarrier<PIPE_ALL>();
-                sum += scalarLocal.GetValue(0);
-
-                AscendC::Mul<float>(tmpLocal, sigLocal, sigLocal, tileLen);
-                AscendC::ReduceSum<float>(scalarLocal, tmpLocal, reduceTmp, tileLen);
-                AscendC::PipeBarrier<PIPE_ALL>();
-                sumsq += scalarLocal.GetValue(0);
-            }
-        }
-
-        float mean = sum / (float)groupSize;
-        float var = sumsq / (float)groupSize - mean * mean;
-        float varPlusEps = var + eps;
-        if (varPlusEps < 0.0f) varPlusEps = eps;
-
-        AscendC::Duplicate<float>(scalarLocal, varPlusEps, 8);
-        AscendC::PipeBarrier<PIPE_ALL>();
-        AscendC::Sqrt<float>(scalarLocal, scalarLocal, 8);
-        AscendC::PipeBarrier<PIPE_ALL>();
-        float stdVal = scalarLocal.GetValue(0);
-        float invStd = 1.0f / stdVal;
-
-        for (uint32_t c_off = 0; c_off < channelsPerGroup; c_off++) {
-            float b = paramsLocal.GetValue(baseChannel + c_off);
-            float s = paramsLocal.GetValue(MAX_CHANNELS + baseChannel + c_off);
-            float gam = paramsLocal.GetValue(2 * MAX_CHANNELS + baseChannel + c_off);
-            float bet = paramsLocal.GetValue(3 * MAX_CHANNELS + baseChannel + c_off);
-
-            float scale_factor = invStd * gam;
-            float bias_factor = bet - mean * scale_factor;
-
-            uint64_t channelOffset = sampleOffset + (uint64_t)c_off * hw;
-
-            for (uint32_t tileStart = 0; tileStart < hw; tileStart += TILE_LEN) {
-                uint32_t tileLen = (tileStart + TILE_LEN <= hw) ? TILE_LEN : (hw - tileStart);
-
-                AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-                AscendC::DataCopyExtParams cp;
-                cp.blockCount = 1;
-                cp.blockLen = tileLen * sizeof(float);
-                cp.srcStride = 0;
-                cp.dstStride = 0;
-                AscendC::DataCopyPadExtParams<float> pp;
-                pp.isPad = false;
-                pp.leftPadding = 0;
-                pp.rightPadding = 0;
-                pp.paddingValue = 0.0f;
-                AscendC::DataCopyPad(xLocal, xGm[channelOffset + tileStart], cp, pp);
-                inQueueX.EnQue(xLocal);
-
-                AscendC::LocalTensor<float> xIn = inQueueX.DeQue<float>();
-
-                AscendC::Adds<float>(sigLocal, xIn, b, tileLen);
-                AscendC::Muls<float>(sigLocal, sigLocal, -s, tileLen);
-                AscendC::Exp<float>(sigLocal, sigLocal, tileLen);
-                AscendC::Adds<float>(sigLocal, sigLocal, 1.0f, tileLen);
-                AscendC::Reciprocal<float>(sigLocal, sigLocal, tileLen);
-
-                inQueueX.FreeTensor(xIn);
-
-                AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
-                AscendC::Muls<float>(sigLocal, sigLocal, scale_factor, tileLen);
-                AscendC::Adds<float>(zLocal, sigLocal, bias_factor, tileLen);
-                outQueueZ.EnQue(zLocal);
-
-                AscendC::LocalTensor<float> zOut = outQueueZ.DeQue<float>();
-                AscendC::DataCopyExtParams cpOut;
-                cpOut.blockCount = 1;
-                cpOut.blockLen = tileLen * sizeof(float);
-                cpOut.srcStride = 0;
-                cpOut.dstStride = 0;
-                AscendC::DataCopyPad(zGm[channelOffset + tileStart], zOut, cpOut);
-                outQueueZ.FreeTensor(zOut);
-            }
-        }
+        AscendC::DataCopyPad(yGm[offset], yLocal, params);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> paramsBuf, sigBuf, tmpBuf, reduceBuf, scalarBuf;
-    AscendC::GlobalTensor<float> xGm, biasGm, scaleGm, gammaGm, betaGm, zGm;
-    uint32_t batchSize, channels, hw, numGroups, channelsPerGroup;
-    uint32_t startPair, numPairs;
-    float eps;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<float> biasGm;
+    AscendC::GlobalTensor<float> scaleGm;
+    uint32_t channels;
+    uint32_t spatial;
+    uint32_t tileLength;
+    uint32_t tileNum;
+    uint32_t tailLength;
+    uint32_t chunksPerCore;
+    uint32_t startChunk;
 };
 
 extern "C" __global__ __aicore__ void conv2d_add_scale_sigmoid_group_norm_custom(
-    GM_ADDR x, GM_ADDR bias, GM_ADDR scale, GM_ADDR gamma, GM_ADDR beta,
-    GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
-{
+    GM_ADDR x, GM_ADDR bias, GM_ADDR scale, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelFusedGN op;
-    op.Init(x, bias, scale, gamma, beta, z,
-            tiling_data.batchSize, tiling_data.channels,
-            tiling_data.hw, tiling_data.numGroups,
-            tiling_data.channelsPerGroup, tiling_data.eps);
+    KernelFused op;
+    op.Init(x, bias, scale, y,
+            tiling_data.totalChunks, tiling_data.channels, tiling_data.spatial,
+            tiling_data.tileLength, tiling_data.tileNum, tiling_data.tailLength);
     op.Process();
 }
 """
@@ -417,14 +319,9 @@ python_bind_src="""
 #include <torch/extension.h>
 
 at::Tensor conv2d_add_scale_sigmoid_group_norm_custom_impl_npu(
-    const at::Tensor& x, const at::Tensor& bias, const at::Tensor& scale,
-    const at::Tensor& gamma, const at::Tensor& beta,
-    int64_t num_groups, double eps)
-{
+    const at::Tensor& x, const at::Tensor& bias, const at::Tensor& scale) {
     at::Tensor result = at::empty_like(x);
-    float eps_f = static_cast<float>(eps);
-    EXEC_NPU_CMD(aclnnConv2dAddScaleSigmoidGroupNormCustom,
-                 x, bias, scale, gamma, beta, num_groups, eps_f, result);
+    EXEC_NPU_CMD(aclnnConv2dAddScaleSigmoidGroupNormCustom, x, bias, scale, result);
     return result;
 }
 
@@ -435,7 +332,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("conv2d_add_scale_sigmoid_group_norm_custom",
           &conv2d_add_scale_sigmoid_group_norm_custom_impl_npu,
-          "fused conv2d post-processing (bias+scale+sigmoid+group_norm)");
+          "fused bias add + scale + sigmoid on NPU");
 }
 """
 
@@ -445,24 +342,21 @@ import torch.nn as nn
 import torch_npu
 import custom_ops_lib
 
-class ModelNew(nn.Module):
+
+class ModelNew(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, num_groups, bias_shape, scale_shape):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
         self.bias = nn.Parameter(torch.randn(bias_shape))
         self.scale = nn.Parameter(torch.randn(scale_shape))
         self.group_norm = nn.GroupNorm(num_groups, out_channels)
-        self.num_groups = num_groups
-        self.eps = 1e-5
 
     def forward(self, x):
         x = self.conv(x)
         x = x.contiguous()
-        bias_flat = self.bias.reshape(-1).contiguous()
-        scale_flat = self.scale.reshape(-1).contiguous()
-        gamma = self.group_norm.weight.contiguous()
-        beta = self.group_norm.bias.contiguous()
-        return custom_ops_lib.conv2d_add_scale_sigmoid_group_norm_custom(
-            x, bias_flat, scale_flat, gamma, beta, self.num_groups, self.eps
-        )
+        b = self.bias.view(-1).contiguous()
+        s = self.scale.view(-1).contiguous()
+        x = custom_ops_lib.conv2d_add_scale_sigmoid_group_norm_custom(x, b, s)
+        x = self.group_norm(x)
+        return x
 '''

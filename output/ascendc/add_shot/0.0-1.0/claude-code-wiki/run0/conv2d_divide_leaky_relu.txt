@@ -26,13 +26,6 @@ project_json_src='''
                     "float"
                 ]
             }
-        ],
-        "attr": [
-            {
-                "name": "divisor",
-                "type": "float",
-                "default_value": 1.0
-            }
         ]
     }
 ]
@@ -45,7 +38,8 @@ namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv2dDivideLeakyReluCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, totalLength);
   TILING_DATA_FIELD_DEF(uint32_t, tileNum);
-  TILING_DATA_FIELD_DEF(float, divisor);
+  TILING_DATA_FIELD_DEF(float, invDivisor);
+  TILING_DATA_FIELD_DEF(float, negativeSlope);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv2dDivideLeakyReluCustom, Conv2dDivideLeakyReluCustomTilingData)
@@ -59,41 +53,17 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t BUFFER_NUM_H = 2;
-const uint32_t MAX_TILE_LENGTH = 8192;
-
+const uint32_t TILE_NUM = 252;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
+
     Conv2dDivideLeakyReluCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
-
-    uint32_t blockDim = BLOCK_DIM;
-    while (blockDim > 1 && totalLength % blockDim != 0) {
-        blockDim--;
-    }
-    context->SetBlockDim(blockDim);
-
-    uint32_t blockLength = totalLength / blockDim;
-    uint32_t minTileNum = (blockLength + MAX_TILE_LENGTH * BUFFER_NUM_H - 1) / (MAX_TILE_LENGTH * BUFFER_NUM_H);
-    if (minTileNum == 0) {
-        minTileNum = 1;
-    }
-
-    uint32_t tileNum = minTileNum;
-    while (tileNum * BUFFER_NUM_H <= blockLength && blockLength % (tileNum * BUFFER_NUM_H) != 0) {
-        tileNum++;
-    }
-    if (tileNum * BUFFER_NUM_H > blockLength) {
-        tileNum = 1;
-    }
-
-    auto attrs = context->GetAttrs();
-    const float* divisorPtr = attrs->GetAttrPointer<float>(0);
-    float divisor = (divisorPtr != nullptr) ? *divisorPtr : 1.0f;
-
+    context->SetBlockDim(BLOCK_DIM);
     tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(tileNum);
-    tiling.set_divisor(divisor);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.set_invDivisor(0.5f);
+    tiling.set_negativeSlope(0.01f);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -135,13 +105,13 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("divisor").AttrType(REQUIRED).Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
+
     }
 };
 
@@ -157,18 +127,19 @@ constexpr int32_t BUFFER_NUM = 2;
 class KernelConv2dDivideLeakyRelu {
 public:
     __aicore__ inline KernelConv2dDivideLeakyRelu() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t tileNum, float divisor)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t tileNum, float invDivisor, float negativeSlope)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
         this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
-        this->invDivisor = (DTYPE_X)(1.0f / divisor);
-        this->negSlope = (DTYPE_X)0.01f;
+        this->invDivisor = invDivisor;
+        this->negativeSlope = negativeSlope;
 
         xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
         pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
     }
     __aicore__ inline void Process()
     {
@@ -191,8 +162,10 @@ private:
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
         AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
         AscendC::Muls(zLocal, xLocal, this->invDivisor, this->tileLength);
-        AscendC::LeakyRelu(zLocal, zLocal, this->negSlope, this->tileLength);
+        AscendC::Muls(tmpLocal, zLocal, this->negativeSlope, this->tileLength);
+        AscendC::Max(zLocal, zLocal, tmpLocal, this->tileLength);
         outQueueZ.EnQue<DTYPE_Z>(zLocal);
         inQueueX.FreeTensor(xLocal);
     }
@@ -207,19 +180,20 @@ private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
     AscendC::GlobalTensor<DTYPE_X> xGm;
     AscendC::GlobalTensor<DTYPE_Z> zGm;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
-    DTYPE_X invDivisor;
-    DTYPE_X negSlope;
+    float invDivisor;
+    float negativeSlope;
 };
 
 extern "C" __global__ __aicore__ void conv2d_divide_leaky_relu_custom(GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelConv2dDivideLeakyRelu op;
-    op.Init(x, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.divisor);
+    op.Init(x, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.invDivisor, tiling_data.negativeSlope);
     op.Process();
 }
 """
@@ -230,10 +204,9 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv2d_divide_leaky_relu_custom_impl_npu(const at::Tensor& self, double divisor) {
+at::Tensor conv2d_divide_leaky_relu_custom_impl_npu(const at::Tensor& self) {
     at::Tensor result = at::empty_like(self);
-    float divisor_f = static_cast<float>(divisor);
-    EXEC_NPU_CMD(aclnnConv2dDivideLeakyReluCustom, self, divisor_f, result);
+    EXEC_NPU_CMD(aclnnConv2dDivideLeakyReluCustom, self, result);
     return result;
 }
 
@@ -242,25 +215,24 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv2d_divide_leaky_relu_custom", &conv2d_divide_leaky_relu_custom_impl_npu, "conv2d divide leaky_relu fused");
+    m.def("conv2d_divide_leaky_relu_custom", &conv2d_divide_leaky_relu_custom_impl_npu, "fused divide + leaky_relu after conv2d");
 }
 """
 
 model_src='''
 import torch
-import torch.nn as nn
 import torch_npu
+import torch.nn as nn
 import custom_ops_lib
 
 class ModelNew(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, divisor):
-        super(ModelNew, self).__init__()
+        super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
-        self.divisor = float(divisor)
+        self.divisor = divisor
 
     def forward(self, x):
         x = self.conv(x)
         x = x.contiguous()
-        x = custom_ops_lib.conv2d_divide_leaky_relu_custom(x, self.divisor)
-        return x
+        return custom_ops_lib.conv2d_divide_leaky_relu_custom(x)
 '''

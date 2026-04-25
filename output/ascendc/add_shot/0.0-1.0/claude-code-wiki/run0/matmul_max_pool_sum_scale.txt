@@ -1,5 +1,3 @@
-Now I have all I need. Outputting the complete code.
-
 project_json_src='''
 [
     {
@@ -28,13 +26,6 @@ project_json_src='''
                     "float"
                 ]
             }
-        ],
-        "attr_desc": [
-            {
-                "name": "scale_factor",
-                "param_type": "required",
-                "type": "float"
-            }
         ]
     }
 ]
@@ -47,7 +38,9 @@ namespace optiling {
 BEGIN_TILING_DATA_DEF(MatmulMaxPoolSumScaleCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, batchSize);
   TILING_DATA_FIELD_DEF(uint32_t, outFeatures);
-  TILING_DATA_FIELD_DEF(uint32_t, tileLen);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+  TILING_DATA_FIELD_DEF(uint32_t, batchPerBlock);
   TILING_DATA_FIELD_DEF(float, scaleFactor);
 END_TILING_DATA_DEF;
 
@@ -59,31 +52,32 @@ host_operator_src="""
 #include "matmul_max_pool_sum_scale_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_LEN = 4096;
+const uint32_t BLOCK_DIM = 16;
+const uint32_t TILE_NUM = 32;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     MatmulMaxPoolSumScaleCustomTilingData tiling;
-    const gert::Shape* x_shape = context->GetInputShape(0);
-    uint32_t batchSize = x_shape->GetDim(0);
-    uint32_t outFeatures = x_shape->GetDim(1);
 
-    const float* scaleFactor = context->GetAttrs()->GetAttrPointer<float>(0);
+    const gert::Shape& xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = static_cast<uint32_t>(xShape.GetDim(0));
+    uint32_t outFeatures = static_cast<uint32_t>(xShape.GetDim(1));
 
     uint32_t blockDim = BLOCK_DIM;
     if (batchSize < blockDim) {
         blockDim = batchSize;
     }
-    if (blockDim == 0) {
-        blockDim = 1;
-    }
+    uint32_t batchPerBlock = batchSize / blockDim;
+    uint32_t tileLength = outFeatures / TILE_NUM;
 
     context->SetBlockDim(blockDim);
     tiling.set_batchSize(batchSize);
     tiling.set_outFeatures(outFeatures);
-    tiling.set_tileLen(TILE_LEN);
-    tiling.set_scaleFactor(*scaleFactor);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.set_tileLength(tileLength);
+    tiling.set_batchPerBlock(batchPerBlock);
+    tiling.set_scaleFactor(0.5f);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
@@ -92,6 +86,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -110,6 +105,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 }
 }
 
+
 namespace ops {
 class MatmulMaxPoolSumScaleCustom : public OpDef {
 public:
@@ -125,9 +121,6 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("scale_factor")
-            .AttrType(REQUIRED)
-            .Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
@@ -145,128 +138,116 @@ kernel_src="""
 #include "kernel_operator.h"
 
 constexpr int32_t BUFFER_NUM = 2;
-constexpr int32_t MAX_TILE_LEN = 4096;
-constexpr int32_t FP32_PER_REPEAT = 64;
-constexpr uint64_t MASK_EVEN_FP32 = 0x5555555555555555ULL;
+constexpr int32_t MIN_OUT_BYTES = 32;
 
-class KernelMaxPoolSumScale {
+class KernelMatmulMaxPoolSumScale {
 public:
-    __aicore__ inline KernelMaxPoolSumScale() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize,
-                                 uint32_t outFeatures, uint32_t tileLen, float scaleFactor)
+    __aicore__ inline KernelMatmulMaxPoolSumScale() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                uint32_t batchSize,
+                                uint32_t outFeatures,
+                                uint32_t tileNum,
+                                uint32_t tileLength,
+                                uint32_t batchPerBlock,
+                                float scaleFactor)
     {
         this->batchSize = batchSize;
         this->outFeatures = outFeatures;
-        this->tileLen = tileLen;
+        this->tileNum = tileNum;
+        this->tileLength = tileLength;
+        this->batchPerBlock = batchPerBlock;
         this->scaleFactor = scaleFactor;
 
         uint32_t blockIdx = AscendC::GetBlockIdx();
-        uint32_t blockNum = AscendC::GetBlockNum();
-        uint32_t baseRows = batchSize / blockNum;
-        uint32_t extra = batchSize % blockNum;
-        if (blockIdx < extra) {
-            this->rowsThisBlock = baseRows + 1;
-            this->rowStart = blockIdx * (baseRows + 1);
-        } else {
-            this->rowsThisBlock = baseRows;
-            this->rowStart = extra * (baseRows + 1) + (blockIdx - extra) * baseRows;
-        }
+        uint32_t xOffset = blockIdx * batchPerBlock * outFeatures;
+        uint32_t yOffset = blockIdx * batchPerBlock;
 
-        if (this->rowsThisBlock == 0) {
-            return;
-        }
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + xOffset, batchPerBlock * outFeatures);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + yOffset, batchPerBlock);
 
-        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * outFeatures);
-        yGm.SetGlobalBuffer((__gm__ float *)y, batchSize);
-
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, (MAX_TILE_LEN + 16) * sizeof(float));
-        pipe.InitBuffer(maxBuf, MAX_TILE_LEN * sizeof(float));
-        pipe.InitBuffer(sumBuf, 32);
-        pipe.InitBuffer(reduceTmpBuf, 16 * 1024);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, 1, MIN_OUT_BYTES);
     }
 
     __aicore__ inline void Process()
     {
-        if (this->rowsThisBlock == 0) {
-            return;
+        AscendC::LocalTensor<DTYPE_Y> resLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        uint32_t outSlots = MIN_OUT_BYTES / sizeof(DTYPE_Y);
+        for (uint32_t i = 0; i < outSlots; i++) {
+            resLocal.SetValue(i, (DTYPE_Y)0);
         }
-        for (uint32_t i = 0; i < this->rowsThisBlock; i++) {
-            ProcessRow(this->rowStart + i);
+
+        for (uint32_t b = 0; b < this->batchPerBlock; b++) {
+            float batchSum = 0.0f;
+            for (uint32_t t = 0; t < this->tileNum; t++) {
+                CopyIn(b, t);
+                batchSum += ComputeTile();
+            }
+            resLocal.SetValue(b, batchSum * this->scaleFactor);
         }
+
+        outQueueY.EnQue<DTYPE_Y>(resLocal);
+        CopyOut();
     }
 
 private:
-    __aicore__ inline void ProcessRow(uint32_t batchIdx)
+    __aicore__ inline void CopyIn(uint32_t b, uint32_t t)
     {
-        float rowSum = 0.0f;
-        uint32_t rowBase = batchIdx * this->outFeatures;
-        uint32_t numTiles = this->outFeatures / this->tileLen;
-
-        for (uint32_t t = 0; t < numTiles; t++) {
-            CopyIn(rowBase + t * this->tileLen);
-            float tileSum = ComputeTileSum();
-            rowSum += tileSum;
-        }
-
-        yGm.SetValue(batchIdx, rowSum * this->scaleFactor);
-    }
-
-    __aicore__ inline void CopyIn(uint32_t srcOffset)
-    {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::DataCopy(xLocal, xGm[srcOffset], this->tileLen);
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        uint32_t offset = b * this->outFeatures + t * this->tileLength;
+        AscendC::DataCopy(xLocal, xGm[offset], this->tileLength);
         inQueueX.EnQue(xLocal);
     }
 
-    __aicore__ inline float ComputeTileSum()
+    __aicore__ inline float ComputeTile()
     {
-        AscendC::LocalTensor<float> xData = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> maxLocal = maxBuf.Get<float>();
-        AscendC::LocalTensor<float> sumLocal = sumBuf.Get<float>();
-        AscendC::LocalTensor<float> tmpLocal = reduceTmpBuf.Get<float>();
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
 
-        AscendC::Duplicate<float>(maxLocal, 0.0f, this->tileLen);
-        AscendC::PipeBarrier<PIPE_V>();
+        float sum = 0.0f;
+        uint32_t pairs = this->tileLength / 2;
+        for (uint32_t i = 0; i < pairs; i++) {
+            float a = xLocal.GetValue(2 * i);
+            float b = xLocal.GetValue(2 * i + 1);
+            float m = (a > b) ? a : b;
+            sum += m;
+        }
 
-        AscendC::BinaryRepeatParams params;
-        params.dstBlkStride = 1;
-        params.src0BlkStride = 1;
-        params.src1BlkStride = 1;
-        params.dstRepStride = 8;
-        params.src0RepStride = 8;
-        params.src1RepStride = 8;
+        inQueueX.FreeTensor(xLocal);
+        return sum;
+    }
 
-        uint32_t repeats = this->tileLen / FP32_PER_REPEAT;
-        AscendC::Max<float>(maxLocal, xData, xData[1], MASK_EVEN_FP32, repeats, params);
-        AscendC::PipeBarrier<PIPE_V>();
-
-        AscendC::ReduceSum<float>(sumLocal, maxLocal, tmpLocal, this->tileLen);
-        inQueueX.FreeTensor(xData);
-
-        AscendC::PipeBarrier<PIPE_ALL>();
-        return sumLocal.GetValue(0);
+    __aicore__ inline void CopyOut()
+    {
+        AscendC::LocalTensor<DTYPE_Y> resLocal = outQueueY.DeQue<DTYPE_Y>();
+        uint32_t outSlots = MIN_OUT_BYTES / sizeof(DTYPE_Y);
+        AscendC::DataCopy(yGm, resLocal, outSlots);
+        outQueueY.FreeTensor(resLocal);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> maxBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> sumBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceTmpBuf;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueY;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t batchSize;
     uint32_t outFeatures;
-    uint32_t tileLen;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    uint32_t batchPerBlock;
     float scaleFactor;
-    uint32_t rowStart;
-    uint32_t rowsThisBlock;
 };
 
 extern "C" __global__ __aicore__ void matmul_max_pool_sum_scale_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelMaxPoolSumScale op;
-    op.Init(x, y, tiling_data.batchSize, tiling_data.outFeatures, tiling_data.tileLen, tiling_data.scaleFactor);
+    KernelMatmulMaxPoolSumScale op;
+    op.Init(x, y,
+            tiling_data.batchSize,
+            tiling_data.outFeatures,
+            tiling_data.tileNum,
+            tiling_data.tileLength,
+            tiling_data.batchPerBlock,
+            tiling_data.scaleFactor);
     op.Process();
 }
 """
@@ -277,10 +258,10 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor matmul_max_pool_sum_scale_custom_impl_npu(const at::Tensor& x, double scale_factor) {
-    int64_t batch_size = x.size(0);
-    at::Tensor result = at::empty({batch_size}, x.options());
-    EXEC_NPU_CMD(aclnnMatmulMaxPoolSumScaleCustom, x, static_cast<float>(scale_factor), result);
+at::Tensor matmul_max_pool_sum_scale_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes();
+    at::Tensor result = at::empty({sizes[0]}, self.options());
+    EXEC_NPU_CMD(aclnnMatmulMaxPoolSumScaleCustom, self, result);
     return result;
 }
 
@@ -289,25 +270,24 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("matmul_max_pool_sum_scale_custom", &matmul_max_pool_sum_scale_custom_impl_npu, "fused max_pool + sum + scale");
+    m.def("matmul_max_pool_sum_scale_custom", &matmul_max_pool_sum_scale_custom_impl_npu, "linear out -> maxpool1d(k=2) -> sum -> scale(0.5)");
 }
 """
 
 model_src='''
 import torch
-import torch.nn as nn
 import torch_npu
+import torch.nn as nn
 import custom_ops_lib
 
 class ModelNew(nn.Module):
     def __init__(self, in_features, out_features, kernel_size, scale_factor):
-        super(ModelNew, self).__init__()
+        super().__init__()
         self.matmul = nn.Linear(in_features, out_features)
-        self.scale_factor = float(scale_factor)
+        self.scale_factor = scale_factor
 
     def forward(self, x):
         x = self.matmul(x)
-        x = x.contiguous()
-        x = custom_ops_lib.matmul_max_pool_sum_scale_custom(x, self.scale_factor)
+        x = custom_ops_lib.matmul_max_pool_sum_scale_custom(x.contiguous())
         return x
 '''

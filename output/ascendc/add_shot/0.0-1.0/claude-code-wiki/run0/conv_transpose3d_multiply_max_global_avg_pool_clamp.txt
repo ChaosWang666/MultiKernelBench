@@ -26,14 +26,6 @@ project_json_src='''
                     "float"
                 ]
             }
-        ],
-        "attr": [
-            {
-                "name": "scale",
-                "param_type": "optional",
-                "type": "float",
-                "default_value": "0.5"
-            }
         ]
     }
 ]
@@ -44,11 +36,13 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(ConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, totalChannels);
-  TILING_DATA_FIELD_DEF(uint32_t, depth);
-  TILING_DATA_FIELD_DEF(uint32_t, height);
-  TILING_DATA_FIELD_DEF(uint32_t, width);
-  TILING_DATA_FIELD_DEF(float, scale);
+  TILING_DATA_FIELD_DEF(uint32_t, outerLen);
+  TILING_DATA_FIELD_DEF(uint32_t, reduceLen);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLen);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, tailLen);
+  TILING_DATA_FIELD_DEF(uint32_t, outerPerCore);
+  TILING_DATA_FIELD_DEF(float, invReduce);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustom, ConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustomTilingData)
@@ -59,55 +53,71 @@ host_operator_src="""
 #include "conv_transpose3d_multiply_max_global_avg_pool_clamp_custom_tiling.h"
 #include "register/op_def_registry.h"
 
-namespace optiling {
-const uint32_t MAX_BLOCK_DIM = 32;
 
+namespace optiling {
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustomTilingData tiling;
-    const gert::StorageShape* x_storage = context->GetInputShape(0);
-    const gert::Shape x_shape = x_storage->GetStorageShape();
-    uint32_t batch = x_shape.GetDim(0);
-    uint32_t channels = x_shape.GetDim(1);
-    uint32_t depth = x_shape.GetDim(2);
-    uint32_t height = x_shape.GetDim(3);
-    uint32_t width = x_shape.GetDim(4);
 
-    uint32_t totalChannels = batch * channels;
-    uint32_t blockDim = totalChannels < MAX_BLOCK_DIM ? totalChannels : MAX_BLOCK_DIM;
+    const gert::Shape& x_shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = static_cast<uint32_t>(x_shape.GetDim(0));
+    uint32_t C = static_cast<uint32_t>(x_shape.GetDim(1));
+    uint32_t D = static_cast<uint32_t>(x_shape.GetDim(2));
+    uint32_t H = static_cast<uint32_t>(x_shape.GetDim(3));
+    uint32_t W = static_cast<uint32_t>(x_shape.GetDim(4));
 
-    const float* scaleAttr = context->GetAttrs()->GetAttrPointer<float>(0);
+    uint32_t outerLen = N * C;
+    uint32_t reduceLen = D * H * W;
 
-    tiling.set_totalChannels(totalChannels);
-    tiling.set_depth(depth);
-    tiling.set_height(height);
-    tiling.set_width(width);
-    tiling.set_scale(*scaleAttr);
+    uint32_t blockDim = 32;
+    while (blockDim > outerLen && blockDim > 1) { blockDim /= 2; }
+    if (blockDim < 1) { blockDim = 1; }
+    uint32_t outerPerCore = (outerLen + blockDim - 1) / blockDim;
+
+    const uint32_t TILE_LEN = 2048;
+    uint32_t tileLen = TILE_LEN;
+    uint32_t tileNum = (reduceLen + tileLen - 1) / tileLen;
+    uint32_t tailLen = reduceLen - (tileNum - 1) * tileLen;
+    if (tailLen == tileLen) { tailLen = 0; }
+
+    float invReduce = 1.0f / static_cast<float>(static_cast<int32_t>(reduceLen));
 
     context->SetBlockDim(blockDim);
-    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
-                        context->GetRawTilingData()->GetCapacity());
+    tiling.set_outerLen(outerLen);
+    tiling.set_reduceLen(reduceLen);
+    tiling.set_tileLen(tileLen);
+    tiling.set_tileNum(tileNum);
+    tiling.set_tailLen(tailLen);
+    tiling.set_outerPerCore(outerPerCore);
+    tiling.set_invReduce(invReduce);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
-    size_t* currentWorkspace = context->GetWorkspaceSizes(1);
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
     currentWorkspace[0] = 0;
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x_shape;
+    int64_t outerLen = static_cast<int64_t>(x_shape->GetDim(0)) * static_cast<int64_t>(x_shape->GetDim(1));
+    y_shape->SetDimNum(1);
+    y_shape->SetDim(0, outerLen);
     return GRAPH_SUCCESS;
 }
-static ge::graphStatus InferDataType(gert::InferDataTypeContext* context)
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-    context->SetOutputDataType(0, context->GetInputDataType(0));
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class ConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustom : public OpDef {
@@ -124,13 +134,13 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("scale").AttrType(OPTIONAL).Float(0.5);
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
+
     }
 };
 
@@ -141,133 +151,160 @@ OP_ADD(ConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustom);
 kernel_src="""
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 1;
-constexpr uint32_t POOL_K = 2;
+constexpr int32_t BUFFER_NUM = 2;
 
-class KernelFusedScaleMaxpoolAvgpoolClamp {
+class KernelConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustom {
 public:
-    __aicore__ inline KernelFusedScaleMaxpoolAvgpoolClamp() {}
+    __aicore__ inline KernelConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustom() {}
+
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
-                                uint32_t totalChannels, uint32_t depth,
-                                uint32_t height, uint32_t width, float scale)
+                                uint32_t outerLen, uint32_t reduceLen,
+                                uint32_t tileLen, uint32_t tileNum,
+                                uint32_t tailLen, uint32_t outerPerCore,
+                                float invReduce)
     {
-        this->D = depth;
-        this->H = height;
-        this->W = width;
-        this->scale = scale;
-        this->Waligned = (W + 7) / 8 * 8;
-        this->Dout = D / POOL_K;
-        this->Hout = H / POOL_K;
-        this->Wout = W / POOL_K;
-        this->numBlocks = Dout * Hout * Wout;
-        this->spatialSize = D * H * W;
+        this->outerLen = outerLen;
+        this->reduceLen = reduceLen;
+        this->tileLen = tileLen;
+        this->tileNum = tileNum;
+        this->tailLen = tailLen;
+        this->outerPerCore = outerPerCore;
+        this->invReduce = invReduce;
 
-        uint32_t blockNum = AscendC::GetBlockNum();
         uint32_t blockIdx = AscendC::GetBlockIdx();
-        uint32_t channelsPerCore = totalChannels / blockNum;
-        uint32_t extraChannels = totalChannels % blockNum;
+        this->startOuter = blockIdx * outerPerCore;
 
-        if (blockIdx < extraChannels) {
-            this->myChannels = channelsPerCore + 1;
-            this->startChannel = blockIdx * (channelsPerCore + 1);
-        } else {
-            this->myChannels = channelsPerCore;
-            this->startChannel = extraChannels * (channelsPerCore + 1) +
-                                 (blockIdx - extraChannels) * channelsPerCore;
-        }
+        uint64_t gmInOffset = static_cast<uint64_t>(this->startOuter) * static_cast<uint64_t>(reduceLen);
+        uint64_t gmInSize = static_cast<uint64_t>(outerPerCore) * static_cast<uint64_t>(reduceLen);
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + gmInOffset, gmInSize);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->startOuter, outerPerCore);
 
-        xGm.SetGlobalBuffer((__gm__ float*)x + (uint64_t)startChannel * spatialSize,
-                             myChannels * spatialSize);
-        yGm.SetGlobalBuffer((__gm__ float*)y + startChannel, myChannels);
+        uint32_t outBufBytes = outerPerCore * sizeof(DTYPE_Y);
+        outBufBytes = ((outBufBytes + 31) / 32) * 32;
+        if (outBufBytes < 32) { outBufBytes = 32; }
 
-        pipe.InitBuffer(inQueue, BUFFER_NUM, 4 * Waligned * sizeof(float));
-        pipe.InitBuffer(tmpBuf, 2 * Waligned * sizeof(float));
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLen * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, 1, outBufBytes);
+        pipe.InitBuffer(accumBuf, tileLen * sizeof(DTYPE_X));
+        pipe.InitBuffer(reduceWorkBuf, tileLen * sizeof(DTYPE_X));
     }
 
     __aicore__ inline void Process()
     {
-        if (myChannels == 0) return;
+        AscendC::LocalTensor<DTYPE_Y> outLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<DTYPE_X> accum = accumBuf.Get<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_X> reduceWork = reduceWorkBuf.Get<DTYPE_X>();
 
-        for (uint32_t ch = 0; ch < myChannels; ch++) {
-            float blockSum = 0.0f;
-            uint32_t chOffset = ch * spatialSize;
+        for (uint32_t i = 0; i < this->outerPerCore; i++) {
+            AscendC::Duplicate<DTYPE_X>(accum, static_cast<DTYPE_X>(0), this->tileLen);
 
-            for (uint32_t d = 0; d < Dout; d++) {
-                for (uint32_t h = 0; h < Hout; h++) {
-                    CopyIn(chOffset, d, h);
-                    blockSum += Compute();
+            for (uint32_t t = 0; t < this->tileNum; t++) {
+                uint32_t curLen;
+                if (t == this->tileNum - 1 && this->tailLen > 0) {
+                    curLen = this->tailLen;
+                } else {
+                    curLen = this->tileLen;
                 }
+                CopyIn(i, t, curLen);
+                Accumulate(curLen, accum);
             }
 
-            float avg = blockSum / static_cast<float>(numBlocks);
-            if (avg < 0.0f) avg = 0.0f;
-            if (avg > 1.0f) avg = 1.0f;
-            yGm.SetValue(ch, avg);
+            AscendC::ReduceSum<DTYPE_X>(outLocal[i], accum, reduceWork, this->tileLen);
         }
+
+        AscendC::Muls<DTYPE_Y>(outLocal, outLocal,
+                               static_cast<DTYPE_Y>(this->invReduce),
+                               this->outerPerCore);
+
+        AscendC::LocalTensor<DTYPE_Y> scratch = accumBuf.Get<DTYPE_Y>();
+        AscendC::Duplicate<DTYPE_Y>(scratch, static_cast<DTYPE_Y>(1.0f), this->outerPerCore);
+        AscendC::Min<DTYPE_Y>(outLocal, outLocal, scratch, this->outerPerCore);
+        AscendC::Duplicate<DTYPE_Y>(scratch, static_cast<DTYPE_Y>(0.0f), this->outerPerCore);
+        AscendC::Max<DTYPE_Y>(outLocal, outLocal, scratch, this->outerPerCore);
+
+        outQueueY.EnQue<DTYPE_Y>(outLocal);
+        CopyOut();
     }
 
 private:
-    __aicore__ inline void CopyIn(uint32_t chOffset, uint32_t d, uint32_t h)
+    __aicore__ inline void CopyIn(uint32_t outerIdx, uint32_t tileIdx, uint32_t curLen)
     {
-        AscendC::LocalTensor<float> inLocal = inQueue.AllocTensor<float>();
-        uint32_t d0 = d * POOL_K;
-        uint32_t h0 = h * POOL_K;
-        uint32_t baseOff = chOffset + d0 * H * W;
-        AscendC::DataCopy(inLocal[0],                  xGm[baseOff + h0 * W],       Waligned);
-        AscendC::DataCopy(inLocal[Waligned],           xGm[baseOff + (h0 + 1) * W], Waligned);
-        AscendC::DataCopy(inLocal[2 * Waligned],       xGm[baseOff + H * W + h0 * W],       Waligned);
-        AscendC::DataCopy(inLocal[3 * Waligned],       xGm[baseOff + H * W + (h0 + 1) * W], Waligned);
-        inQueue.EnQue(inLocal);
-    }
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        uint64_t offset = static_cast<uint64_t>(outerIdx) * static_cast<uint64_t>(this->reduceLen) +
+                          static_cast<uint64_t>(tileIdx) * static_cast<uint64_t>(this->tileLen);
 
-    __aicore__ inline float Compute()
-    {
-        AscendC::LocalTensor<float> inLocal = inQueue.DeQue<float>();
-        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+        if ((curLen * sizeof(DTYPE_X)) % 32 == 0) {
+            AscendC::DataCopy(xLocal, xGm[offset], curLen);
+        } else {
+            AscendC::DataCopyParams copyParams;
+            copyParams.blockCount = 1;
+            copyParams.blockLen = static_cast<uint16_t>(curLen * sizeof(DTYPE_X));
+            copyParams.srcStride = 0;
+            copyParams.dstStride = 0;
 
-        AscendC::Muls(inLocal[0],              inLocal[0],              scale, Waligned);
-        AscendC::Muls(inLocal[Waligned],       inLocal[Waligned],       scale, Waligned);
-        AscendC::Muls(inLocal[2 * Waligned],   inLocal[2 * Waligned],   scale, Waligned);
-        AscendC::Muls(inLocal[3 * Waligned],   inLocal[3 * Waligned],   scale, Waligned);
+            AscendC::DataCopyPadParams padParams;
+            padParams.isPad = true;
+            padParams.leftPadding = 0;
+            padParams.rightPadding = 0;
+            padParams.paddingValue = 0;
 
-        AscendC::Max(tmp[0],        inLocal[0],            inLocal[Waligned],       Waligned);
-        AscendC::Max(tmp[Waligned], inLocal[2 * Waligned], inLocal[3 * Waligned],   Waligned);
-        AscendC::Max(tmp[0],        tmp[0],                tmp[Waligned],           Waligned);
-
-        float pairSum = 0.0f;
-        for (uint32_t w = 0; w < Wout; w++) {
-            float v0 = tmp.GetValue(2 * w);
-            float v1 = tmp.GetValue(2 * w + 1);
-            pairSum += (v0 > v1) ? v0 : v1;
+            AscendC::DataCopyPad(xLocal, xGm[offset], copyParams, padParams);
         }
 
-        inQueue.FreeTensor(inLocal);
-        return pairSum;
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Accumulate(uint32_t curLen, AscendC::LocalTensor<DTYPE_X>& accum)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::Add<DTYPE_X>(accum, accum, xLocal, curLen);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut()
+    {
+        AscendC::LocalTensor<DTYPE_Y> outLocal = outQueueY.DeQue<DTYPE_Y>();
+        if ((this->outerPerCore * sizeof(DTYPE_Y)) % 32 == 0) {
+            AscendC::DataCopy(yGm, outLocal, this->outerPerCore);
+        } else {
+            AscendC::DataCopyParams copyParams;
+            copyParams.blockCount = 1;
+            copyParams.blockLen = static_cast<uint16_t>(this->outerPerCore * sizeof(DTYPE_Y));
+            copyParams.srcStride = 0;
+            copyParams.dstStride = 0;
+            AscendC::DataCopyPad(yGm, outLocal, copyParams);
+        }
+        outQueueY.FreeTensor(outLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
-
-    uint32_t D, H, W, Waligned;
-    uint32_t Dout, Hout, Wout;
-    uint32_t numBlocks;
-    uint32_t spatialSize;
-    uint32_t myChannels;
-    uint32_t startChannel;
-    float scale;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> accumBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceWorkBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    uint32_t outerLen;
+    uint32_t reduceLen;
+    uint32_t tileLen;
+    uint32_t tileNum;
+    uint32_t tailLen;
+    uint32_t outerPerCore;
+    uint32_t startOuter;
+    float invReduce;
 };
 
 extern "C" __global__ __aicore__ void conv_transpose3d_multiply_max_global_avg_pool_clamp_custom(
     GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
 {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelFusedScaleMaxpoolAvgpoolClamp op;
-    op.Init(x, y, tiling_data.totalChannels, tiling_data.depth,
-            tiling_data.height, tiling_data.width, tiling_data.scale);
+    KernelConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustom op;
+    op.Init(x, y,
+            tiling_data.outerLen, tiling_data.reduceLen,
+            tiling_data.tileLen, tiling_data.tileNum,
+            tiling_data.tailLen, tiling_data.outerPerCore,
+            tiling_data.invReduce);
     op.Process();
 }
 """
@@ -278,38 +315,48 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor fused_pool_impl_npu(const at::Tensor& x, double scale) {
-    auto sizes = x.sizes();
-    int64_t B = sizes[0];
+at::Tensor conv_transpose3d_multiply_max_global_avg_pool_clamp_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes();
+    int64_t N = sizes[0];
     int64_t C = sizes[1];
-    at::Tensor result = at::empty({B, C, 1, 1, 1}, x.options());
-    EXEC_NPU_CMD(aclnnConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustom, x, scale, result);
+    auto result = at::empty({N * C}, self.options());
+    EXEC_NPU_CMD(aclnnConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustom, self, result);
     return result;
 }
 
 TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
-    m.impl("conv_transpose3d_multiply_max_global_avg_pool_clamp_custom", &fused_pool_impl_npu);
+    m.impl("conv_transpose3d_multiply_max_global_avg_pool_clamp_custom",
+           &conv_transpose3d_multiply_max_global_avg_pool_clamp_custom_impl_npu);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("conv_transpose3d_multiply_max_global_avg_pool_clamp_custom",
-          &fused_pool_impl_npu, "fused scale maxpool avgpool clamp");
+          &conv_transpose3d_multiply_max_global_avg_pool_clamp_custom_impl_npu,
+          "Fused scaled-maxpool3d -> global avg pool -> clamp custom op");
 }
 """
 
 model_src='''
 import torch
-import torch.nn as nn
 import torch_npu
+import torch.nn as nn
 import custom_ops_lib
+
 
 class ModelNew(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, scale, maxpool_kernel_size):
         super(ModelNew, self).__init__()
         self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
         self.scale = scale
+        self.maxpool = nn.MaxPool3d(kernel_size=maxpool_kernel_size)
 
     def forward(self, x):
         x = self.conv_transpose(x)
-        return custom_ops_lib.conv_transpose3d_multiply_max_global_avg_pool_clamp_custom(x, self.scale)
+        x = x * self.scale
+        x = self.maxpool(x)
+        x = x.contiguous()
+        N = x.shape[0]
+        C = x.shape[1]
+        y = custom_ops_lib.conv_transpose3d_multiply_max_global_avg_pool_clamp_custom(x)
+        return y.view(N, C, 1, 1, 1)
 '''

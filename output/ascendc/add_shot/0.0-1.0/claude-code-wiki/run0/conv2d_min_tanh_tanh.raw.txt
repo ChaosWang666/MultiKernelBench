@@ -1,0 +1,320 @@
+I've gathered enough context. Writing the solution now — the kernel fuses min-along-channel + tanh + tanh while leaving conv2d to torch.
+
+project_json_src='''
+[
+    {
+        "op": "Conv2dMinTanhTanhCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv2dMinTanhTanhCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, N);
+  TILING_DATA_FIELD_DEF(uint32_t, C);
+  TILING_DATA_FIELD_DEF(uint32_t, H);
+  TILING_DATA_FIELD_DEF(uint32_t, W);
+  TILING_DATA_FIELD_DEF(uint32_t, rowsPerCore);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv2dMinTanhTanhCustom, Conv2dMinTanhTanhCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv2d_min_tanh_tanh_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv2dMinTanhTanhCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t H = xShape.GetDim(2);
+    uint32_t W = xShape.GetDim(3);
+
+    uint32_t totalRows = N * H;
+    uint32_t rowsPerCore = (totalRows + BLOCK_DIM - 1) / BLOCK_DIM;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_N(N);
+    tiling.set_C(C);
+    tiling.set_H(H);
+    tiling.set_W(W);
+    tiling.set_rowsPerCore(rowsPerCore);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, 1);
+    y_shape->SetDim(2, x_shape->GetDim(2));
+    y_shape->SetDim(3, x_shape->GetDim(3));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv2dMinTanhTanhCustom : public OpDef {
+public:
+    explicit Conv2dMinTanhTanhCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv2dMinTanhTanhCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConv2dMinTanhTanh {
+public:
+    __aicore__ inline KernelConv2dMinTanhTanh() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                 uint32_t N_, uint32_t C_, uint32_t H_, uint32_t W_,
+                                 uint32_t rowsPerCore_)
+    {
+        this->N = N_;
+        this->C = C_;
+        this->H = H_;
+        this->W = W_;
+        this->rowsPerCore = rowsPerCore_;
+
+        uint32_t bytesPerRow = W_ * sizeof(DTYPE_X);
+        uint32_t alignedBytes = (bytesPerRow + 31) / 32 * 32;
+        this->alignedW = alignedBytes / sizeof(DTYPE_X);
+
+        uint32_t coreIdx = AscendC::GetBlockIdx();
+        this->startRow = coreIdx * rowsPerCore_;
+
+        uint64_t totalX = (uint64_t)N_ * C_ * H_ * W_;
+        uint64_t totalY = (uint64_t)N_ * H_ * W_;
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X*)x, totalX);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y*)y, totalY);
+
+        pipe.InitBuffer(inQueue, BUFFER_NUM, this->alignedW * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueue, 1, this->alignedW * sizeof(DTYPE_Y));
+        pipe.InitBuffer(minBuf, this->alignedW * sizeof(DTYPE_X));
+        pipe.InitBuffer(tmpBuf, this->alignedW * sizeof(DTYPE_X));
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t totalRows = this->N * this->H;
+        for (uint32_t r = 0; r < this->rowsPerCore; r++) {
+            uint32_t globalRow = this->startRow + r;
+            if (globalRow >= totalRows) {
+                break;
+            }
+            uint32_t n = globalRow / this->H;
+            uint32_t h = globalRow - n * this->H;
+            ProcessRow(n, h);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessRow(uint32_t n, uint32_t h)
+    {
+        AscendC::LocalTensor<DTYPE_X> minT = minBuf.Get<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_X> tmpT = tmpBuf.Get<DTYPE_X>();
+
+        uint64_t channelStride = (uint64_t)this->H * this->W;
+        uint64_t rowOffsetIn = (uint64_t)n * this->C * channelStride + (uint64_t)h * this->W;
+        uint64_t rowOffsetOut = (uint64_t)n * this->H * this->W + (uint64_t)h * this->W;
+
+        AscendC::DataCopyExtParams inCopyParams;
+        inCopyParams.blockCount = 1;
+        inCopyParams.blockLen = this->W * sizeof(DTYPE_X);
+        inCopyParams.srcStride = 0;
+        inCopyParams.dstStride = 0;
+
+        AscendC::DataCopyPadExtParams<DTYPE_X> padParams;
+        padParams.isPad = false;
+        padParams.leftPadding = 0;
+        padParams.rightPadding = 0;
+        padParams.paddingValue = 0;
+
+        {
+            AscendC::LocalTensor<DTYPE_X> in0 = inQueue.AllocTensor<DTYPE_X>();
+            AscendC::DataCopyPad(in0, xGm[rowOffsetIn], inCopyParams, padParams);
+            inQueue.EnQue(in0);
+            in0 = inQueue.DeQue<DTYPE_X>();
+            AscendC::Adds(minT, in0, (DTYPE_X)0.0f, this->W);
+            inQueue.FreeTensor(in0);
+        }
+
+        for (uint32_t c = 1; c < this->C; c++) {
+            AscendC::LocalTensor<DTYPE_X> inC = inQueue.AllocTensor<DTYPE_X>();
+            AscendC::DataCopyPad(inC, xGm[rowOffsetIn + (uint64_t)c * channelStride], inCopyParams, padParams);
+            inQueue.EnQue(inC);
+            inC = inQueue.DeQue<DTYPE_X>();
+            AscendC::Min(minT, minT, inC, this->W);
+            inQueue.FreeTensor(inC);
+        }
+
+        AscendC::Muls(tmpT, minT, (DTYPE_X)2.0f, this->W);
+        AscendC::Exp(tmpT, tmpT, this->W);
+        AscendC::Adds(minT, tmpT, (DTYPE_X)(-1.0f), this->W);
+        AscendC::Adds(tmpT, tmpT, (DTYPE_X)1.0f, this->W);
+        AscendC::Div(minT, minT, tmpT, this->W);
+
+        AscendC::LocalTensor<DTYPE_Y> outLocal = outQueue.AllocTensor<DTYPE_Y>();
+        AscendC::Muls(tmpT, minT, (DTYPE_X)2.0f, this->W);
+        AscendC::Exp(tmpT, tmpT, this->W);
+        AscendC::Adds(outLocal, tmpT, (DTYPE_X)(-1.0f), this->W);
+        AscendC::Adds(tmpT, tmpT, (DTYPE_X)1.0f, this->W);
+        AscendC::Div(outLocal, outLocal, tmpT, this->W);
+        outQueue.EnQue<DTYPE_Y>(outLocal);
+
+        outLocal = outQueue.DeQue<DTYPE_Y>();
+        AscendC::DataCopyExtParams outCopyParams;
+        outCopyParams.blockCount = 1;
+        outCopyParams.blockLen = this->W * sizeof(DTYPE_Y);
+        outCopyParams.srcStride = 0;
+        outCopyParams.dstStride = 0;
+        AscendC::DataCopyPad(yGm[rowOffsetOut], outLocal, outCopyParams);
+        outQueue.FreeTensor(outLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueue;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> minBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+
+    uint32_t N;
+    uint32_t C;
+    uint32_t H;
+    uint32_t W;
+    uint32_t alignedW;
+    uint32_t rowsPerCore;
+    uint32_t startRow;
+};
+
+extern "C" __global__ __aicore__ void conv2d_min_tanh_tanh_custom(
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv2dMinTanhTanh op;
+    op.Init(x, y,
+            tiling_data.N, tiling_data.C, tiling_data.H, tiling_data.W,
+            tiling_data.rowsPerCore);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv2d_min_tanh_tanh_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes();
+    int64_t N = sizes[0];
+    int64_t H = sizes[2];
+    int64_t W = sizes[3];
+    at::Tensor result = at::empty({N, 1, H, W}, self.options());
+    EXEC_NPU_CMD(aclnnConv2dMinTanhTanhCustom, self, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv2d_min_tanh_tanh_custom", &conv2d_min_tanh_tanh_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv2d_min_tanh_tanh_custom", &conv2d_min_tanh_tanh_custom_impl_npu, "min over channels + tanh + tanh");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+
+    def forward(self, x):
+        x = self.conv(x)
+        return custom_ops_lib.conv2d_min_tanh_tanh_custom(x.contiguous())
+'''

@@ -1,5 +1,3 @@
-Based on my analysis of the Wiki, I'll implement a custom AscendC kernel for the Mish-like activation (`x * tanh(softplus(x))`), keeping Conv2d and BatchNorm2d as PyTorch operations (since they require learned parameters). I'll use the numerically clean identity: `tanh(softplus(x)) = (u² + 2u) / (u² + 2u + 2)` where `u = exp(x)`, avoiding separate Ln and Tanh computations.
-
 project_json_src='''
 [
     {
@@ -53,26 +51,14 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t BUFFER_NUM_H = 2;
-const uint32_t TILE_LENGTH_TARGET = 512;
+const uint32_t TILE_NUM = 504;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv2dActivationBatchNormCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
     context->SetBlockDim(BLOCK_DIM);
-
-    uint32_t blockLength = totalLength / BLOCK_DIM;
-    uint32_t tileLength = TILE_LENGTH_TARGET;
-    while (tileLength > 8 && (blockLength % (tileLength * BUFFER_NUM_H) != 0)) {
-        tileLength /= 2;
-    }
-    uint32_t tileNum = blockLength / (tileLength * BUFFER_NUM_H);
-    if (tileNum == 0) {
-        tileNum = 1;
-    }
-
     tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(tileNum);
+    tiling.set_tileNum(TILE_NUM);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -132,9 +118,9 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelMish {
+class KernelConv2dActivationBatchNorm {
 public:
-    __aicore__ inline KernelMish() {}
+    __aicore__ inline KernelConv2dActivationBatchNorm() {}
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
@@ -143,11 +129,10 @@ public:
 
         xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-
         pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
         pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
-        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(DTYPE_X));
     }
     __aicore__ inline void Process()
     {
@@ -170,15 +155,23 @@ private:
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
         AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
-        AscendC::LocalTensor<float> u = tmpBuf1.Get<float>();
-        AscendC::LocalTensor<float> tmp = tmpBuf2.Get<float>();
+        AscendC::LocalTensor<DTYPE_X> t1 = tmpBuf1.Get<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_X> t2 = tmpBuf2.Get<DTYPE_X>();
 
-        AscendC::Exp(u, xLocal, this->tileLength);
-        AscendC::Adds(tmp, u, (float)2.0, this->tileLength);
-        AscendC::Mul(u, u, tmp, this->tileLength);
-        AscendC::Adds(tmp, u, (float)2.0, this->tileLength);
-        AscendC::Div(u, u, tmp, this->tileLength);
-        AscendC::Mul(yLocal, xLocal, u, this->tileLength);
+        // softplus(x) = ln(1 + exp(x))
+        AscendC::Exp(t1, xLocal, this->tileLength);
+        AscendC::Adds(t1, t1, (DTYPE_X)1.0f, this->tileLength);
+        AscendC::Ln(t1, t1, this->tileLength);
+
+        // tanh(z) = (exp(2z) - 1) / (exp(2z) + 1) where z = softplus(x) >= 0
+        AscendC::Muls(t1, t1, (DTYPE_X)2.0f, this->tileLength);
+        AscendC::Exp(t1, t1, this->tileLength);
+        AscendC::Adds(t2, t1, (DTYPE_X)1.0f, this->tileLength);
+        AscendC::Adds(t1, t1, (DTYPE_X)(-1.0f), this->tileLength);
+        AscendC::Div(t1, t1, t2, this->tileLength);
+
+        // Mish(x) = x * tanh(softplus(x))
+        AscendC::Mul(yLocal, xLocal, t1, this->tileLength);
 
         outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
@@ -194,7 +187,8 @@ private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf2;
     AscendC::GlobalTensor<DTYPE_X> xGm;
     AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t blockLength;
@@ -202,11 +196,9 @@ private:
     uint32_t tileLength;
 };
 
-extern "C" __global__ __aicore__ void conv2d_activation_batch_norm_custom(
-    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
-{
+extern "C" __global__ __aicore__ void conv2d_activation_batch_norm_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelMish op;
+    KernelConv2dActivationBatchNorm op;
     op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum);
     op.Process();
 }
@@ -219,9 +211,8 @@ python_bind_src="""
 #include <torch/extension.h>
 
 at::Tensor conv2d_activation_batch_norm_custom_impl_npu(const at::Tensor& self) {
-    at::Tensor contig = self.contiguous();
-    at::Tensor result = at::empty_like(contig);
-    EXEC_NPU_CMD(aclnnConv2dActivationBatchNormCustom, contig, result);
+    at::Tensor result = at::empty_like(self);
+    EXEC_NPU_CMD(aclnnConv2dActivationBatchNormCustom, self, result);
     return result;
 }
 
@@ -236,19 +227,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
 model_src='''
 import torch
-import torch.nn as nn
 import torch_npu
 import custom_ops_lib
 
-class ModelNew(nn.Module):
+class ModelNew(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, eps=1e-5, momentum=0.1):
-        super(ModelNew, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
-        self.bn = nn.BatchNorm2d(out_channels, eps=eps, momentum=momentum)
+        super().__init__()
+        self.conv = torch.nn.Conv2d(in_channels, out_channels, kernel_size)
+        self.bn = torch.nn.BatchNorm2d(out_channels, eps=eps, momentum=momentum)
 
     def forward(self, x):
         x = self.conv(x)
-        x = custom_ops_lib.conv2d_activation_batch_norm_custom(x)
+        x = custom_ops_lib.conv2d_activation_batch_norm_custom(x.contiguous())
         x = self.bn(x)
         return x
 '''

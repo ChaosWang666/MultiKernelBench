@@ -75,9 +75,11 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     GemmAddReluCustomTilingData tilingData;
 
-    uint32_t M = context->GetInputShape(0)->GetOriginShape().GetDim(0);
-    uint32_t K = context->GetInputShape(0)->GetOriginShape().GetDim(1);
-    uint32_t N = context->GetInputShape(1)->GetOriginShape().GetDim(0);
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto wShape = context->GetInputShape(1)->GetOriginShape();
+    uint32_t M = xShape.GetDim(0);
+    uint32_t K = xShape.GetDim(1);
+    uint32_t N = wShape.GetDim(0);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
 
@@ -116,8 +118,10 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
                              context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tilingData.GetDataSize());
 
-    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
-    currentWorkspace[0] = 32 * 1024 * 1024;
+    size_t sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
+    size_t userWorkspaceSize = 32 * 1024 * 1024;
+    size_t* currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = sysWorkspaceSize + userWorkspaceSize;
     return ge::GRAPH_SUCCESS;
 }
 }
@@ -187,29 +191,39 @@ kernel_src="""
 using namespace AscendC;
 using namespace matmul;
 
+constexpr int32_t BUFFER_NUM = 2;
 constexpr uint32_t RELU_TILE_LEN = 8192;
+constexpr uint32_t FP32_ALIGN = 8;
 
 class KernelGemmAddRelu {
 public:
     __aicore__ inline KernelGemmAddRelu() {}
 
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
-                                 GM_ADDR workspace, const TCubeTiling& mmTiling) {
+                                 const TCubeTiling& mmTiling) {
         this->tiling = mmTiling;
 
-        xGm.SetGlobalBuffer((__gm__ float*)x, mmTiling.M * mmTiling.Ka);
-        wGm.SetGlobalBuffer((__gm__ float*)weight, mmTiling.N * mmTiling.Kb);
-        biasGm.SetGlobalBuffer((__gm__ float*)bias, mmTiling.N);
-        yGm.SetGlobalBuffer((__gm__ float*)y, mmTiling.M * mmTiling.N);
+        uint64_t xLen = static_cast<uint64_t>(mmTiling.M) * static_cast<uint64_t>(mmTiling.Ka);
+        uint64_t wLen = static_cast<uint64_t>(mmTiling.N) * static_cast<uint64_t>(mmTiling.Kb);
+        uint64_t yLen = static_cast<uint64_t>(mmTiling.M) * static_cast<uint64_t>(mmTiling.N);
 
-        pipe.InitBuffer(inQueue, 2, RELU_TILE_LEN * sizeof(float));
-        pipe.InitBuffer(outQueue, 2, RELU_TILE_LEN * sizeof(float));
+        xGm.SetGlobalBuffer((__gm__ float*)x, xLen);
+        wGm.SetGlobalBuffer((__gm__ float*)weight, wLen);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias, mmTiling.N);
+        yGm.SetGlobalBuffer((__gm__ float*)y, yLen);
+
+        pipe.InitBuffer(inQueue, BUFFER_NUM, RELU_TILE_LEN * sizeof(float));
+        pipe.InitBuffer(outQueue, BUFFER_NUM, RELU_TILE_LEN * sizeof(float));
     }
 
     __aicore__ inline void Process() {
-        RunMatmul();
+        if (ASCEND_IS_AIC) {
+            RunMatmul();
+        }
         SyncAll();
-        RunRelu();
+        if (ASCEND_IS_AIV) {
+            RunRelu();
+        }
     }
 
     TPipe pipe;
@@ -241,10 +255,11 @@ private:
             curN = tiling.N - nIdx * tiling.singleCoreN;
         }
 
-        int32_t offsetA = mIdx * tiling.singleCoreM * tiling.Ka;
-        int32_t offsetB = nIdx * tiling.singleCoreN * tiling.Kb;
-        int32_t offsetC = mIdx * tiling.singleCoreM * tiling.N + nIdx * tiling.singleCoreN;
-        int32_t offsetBias = nIdx * tiling.singleCoreN;
+        int64_t offsetA = static_cast<int64_t>(mIdx) * tiling.singleCoreM * tiling.Ka;
+        int64_t offsetB = static_cast<int64_t>(nIdx) * tiling.singleCoreN * tiling.Kb;
+        int64_t offsetC = static_cast<int64_t>(mIdx) * tiling.singleCoreM * tiling.N
+                           + static_cast<int64_t>(nIdx) * tiling.singleCoreN;
+        int64_t offsetBias = static_cast<int64_t>(nIdx) * tiling.singleCoreN;
 
         matmulObj.SetTensorA(xGm[offsetA]);
         matmulObj.SetTensorB(wGm[offsetB]);
@@ -255,32 +270,43 @@ private:
     }
 
     __aicore__ inline void RunRelu() {
-        uint32_t blockIdx = GetBlockIdx();
-        uint32_t numBlocks = GetBlockNum();
-        uint32_t totalSize = tiling.M * tiling.N;
+        int32_t blockIdx = GetBlockIdx();
+        int32_t numBlocks = GetBlockNum();
+        int32_t totalSize = static_cast<int32_t>(tiling.M) * static_cast<int32_t>(tiling.N);
 
-        uint32_t baseChunk = totalSize / numBlocks;
-        uint32_t remainder = totalSize % numBlocks;
+        int32_t totalGroups = totalSize / static_cast<int32_t>(FP32_ALIGN);
+        int32_t tailElems = totalSize - totalGroups * static_cast<int32_t>(FP32_ALIGN);
 
-        uint32_t myChunk;
-        uint32_t myStart;
+        int32_t baseGroups = totalGroups / numBlocks;
+        int32_t remainder = totalGroups % numBlocks;
+
+        int32_t myGroups;
+        int32_t myStartGroup;
         if (blockIdx < remainder) {
-            myChunk = baseChunk + 1;
-            myStart = blockIdx * myChunk;
+            myGroups = baseGroups + 1;
+            myStartGroup = blockIdx * myGroups;
         } else {
-            myChunk = baseChunk;
-            myStart = remainder * (baseChunk + 1) + (blockIdx - remainder) * baseChunk;
+            myGroups = baseGroups;
+            myStartGroup = remainder * (baseGroups + 1) + (blockIdx - remainder) * baseGroups;
         }
 
-        if (myChunk == 0) {
+        int32_t myStart = myStartGroup * static_cast<int32_t>(FP32_ALIGN);
+        int32_t myChunk = myGroups * static_cast<int32_t>(FP32_ALIGN);
+
+        if (blockIdx == numBlocks - 1) {
+            myChunk += tailElems;
+        }
+
+        if (myChunk <= 0) {
             return;
         }
 
-        uint32_t processed = 0;
+        int32_t processed = 0;
         while (processed < myChunk) {
-            uint32_t remain = myChunk - processed;
-            uint32_t thisTile = (remain < RELU_TILE_LEN) ? remain : RELU_TILE_LEN;
-            uint32_t curOffset = myStart + processed;
+            int32_t remain = myChunk - processed;
+            int32_t thisTile = (remain < static_cast<int32_t>(RELU_TILE_LEN))
+                                   ? remain : static_cast<int32_t>(RELU_TILE_LEN);
+            int32_t curOffset = myStart + processed;
 
             LocalTensor<float> xLocal = inQueue.AllocTensor<float>();
             DataCopy(xLocal, yGm[curOffset], thisTile);
@@ -305,8 +331,8 @@ private:
     GlobalTensor<float> biasGm;
     GlobalTensor<float> yGm;
     TCubeTiling tiling;
-    TQue<TPosition::VECIN, 2> inQueue;
-    TQue<TPosition::VECOUT, 2> outQueue;
+    TQue<TPosition::VECIN, BUFFER_NUM> inQueue;
+    TQue<TPosition::VECOUT, BUFFER_NUM> outQueue;
 };
 
 extern "C" __global__ __aicore__ void gemm_add_relu_custom(
@@ -317,7 +343,7 @@ extern "C" __global__ __aicore__ void gemm_add_relu_custom(
 
     KernelGemmAddRelu op;
     REGIST_MATMUL_OBJ(&op.pipe, GetSysWorkSpacePtr(), op.matmulObj, &tiling_data.cubeTilingData);
-    op.Init(x, weight, bias, y, workspace, tiling_data.cubeTilingData);
+    op.Init(x, weight, bias, y, tiling_data.cubeTilingData);
     op.Process();
 }
 """
@@ -343,7 +369,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("gemm_add_relu_custom", &gemm_add_relu_custom_impl_npu, "GEMM + Bias + ReLU fused kernel");
+    m.def("gemm_add_relu_custom", &gemm_add_relu_custom_impl_npu, "Fused GEMM + Bias + ReLU");
 }
 """
 

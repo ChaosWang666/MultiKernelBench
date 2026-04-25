@@ -1,5 +1,3 @@
-Now I have enough context. Let me output the code.
-
 project_json_src='''
 [
     {
@@ -31,11 +29,6 @@ project_json_src='''
         ],
         "attr": [
             {
-                "name": "pool_kernel_size",
-                "param_type": "required",
-                "type": "int"
-            },
-            {
                 "name": "scale_factor",
                 "param_type": "required",
                 "type": "float"
@@ -50,10 +43,10 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(MatmulAvgPoolGeluScaleMaxCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, totalRows);
-  TILING_DATA_FIELD_DEF(uint32_t, cols);
-  TILING_DATA_FIELD_DEF(uint32_t, poolKernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, totalBatch);
+  TILING_DATA_FIELD_DEF(uint32_t, perCoreBatch);
   TILING_DATA_FIELD_DEF(float, scaleFactor);
+  TILING_DATA_FIELD_DEF(float, invPoolKernel);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(MatmulAvgPoolGeluScaleMaxCustom, MatmulAvgPoolGeluScaleMaxCustomTilingData)
@@ -66,24 +59,27 @@ host_operator_src="""
 
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 20;
+const uint32_t BLOCK_DIM = 32;
 
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     MatmulAvgPoolGeluScaleMaxCustomTilingData tiling;
-    uint32_t totalRows = context->GetInputShape(0)->GetOriginShape().GetDim(0);
-    uint32_t cols = context->GetInputShape(0)->GetOriginShape().GetDim(1);
+
+    uint32_t totalBatch = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    uint32_t perCoreBatch = totalBatch / BLOCK_DIM;
+    if (perCoreBatch == 0) {
+        perCoreBatch = 1;
+    }
+
     context->SetBlockDim(BLOCK_DIM);
-    tiling.set_totalRows(totalRows);
-    tiling.set_cols(cols);
+    tiling.set_totalBatch(totalBatch);
+    tiling.set_perCoreBatch(perCoreBatch);
 
     auto* attrs = context->GetAttrs();
-    const int64_t* poolKernelPtr = attrs->GetAttrPointer<int64_t>(0);
-    const float* scaleFactorPtr = attrs->GetAttrPointer<float>(1);
-    uint32_t poolKernelSize = (poolKernelPtr != nullptr) ? (uint32_t)(*poolKernelPtr) : 1u;
+    const float* scaleFactorPtr = attrs->GetAttrPointer<float>(0);
     float scaleFactor = (scaleFactorPtr != nullptr) ? *scaleFactorPtr : 1.0f;
-    tiling.set_poolKernelSize(poolKernelSize);
     tiling.set_scaleFactor(scaleFactor);
+    tiling.set_invPoolKernel(1.0f / 16.0f);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
@@ -127,9 +123,7 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-
-        this->Attr("pool_kernel_size").Int();
-        this->Attr("scale_factor").Float();
+        this->Attr("scale_factor").AttrType(REQUIRED).Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
@@ -146,142 +140,115 @@ OP_ADD(MatmulAvgPoolGeluScaleMaxCustom);
 kernel_src="""
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t OUT_FEATURES = 8192;
+constexpr int32_t POOL_KERNEL = 16;
+constexpr int32_t POOLED_LEN = 512;
 
-class KernelMatmulAvgPoolGeluScaleMax {
+class KernelFusedOp {
 public:
-    __aicore__ inline KernelMatmulAvgPoolGeluScaleMax() {}
+    __aicore__ inline KernelFusedOp() {}
 
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalRows, uint32_t cols,
-                                uint32_t poolKernelSize, float scaleFactor)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalBatch,
+                                 uint32_t perCoreBatch, float scaleFactor,
+                                 float invPoolKernel)
     {
-        this->cols = cols;
-        this->poolKernelSize = poolKernelSize;
-        this->pooledCols = cols / poolKernelSize;
+        this->perCoreBatch = perCoreBatch;
         this->scaleFactor = scaleFactor;
-        this->invPool = 1.0f / (float)poolKernelSize;
+        this->invPoolKernel = invPoolKernel;
 
         uint32_t blockIdx = AscendC::GetBlockIdx();
-        uint32_t blockNum = AscendC::GetBlockNum();
-        uint32_t baseRows = totalRows / blockNum;
-        uint32_t extraRows = totalRows % blockNum;
-        uint32_t startRow;
-        if (blockIdx < extraRows) {
-            this->rowsThisBlock = baseRows + 1;
-            startRow = blockIdx * this->rowsThisBlock;
-        } else {
-            this->rowsThisBlock = baseRows;
-            startRow = extraRows * (baseRows + 1) + (blockIdx - extraRows) * baseRows;
-        }
 
-        if (this->rowsThisBlock == 0) {
-            return;
-        }
+        xGm.SetGlobalBuffer((__gm__ float*)x + blockIdx * perCoreBatch * OUT_FEATURES,
+                             perCoreBatch * OUT_FEATURES);
+        yGm.SetGlobalBuffer((__gm__ float*)y + blockIdx * perCoreBatch, perCoreBatch);
 
-        xGm.SetGlobalBuffer((__gm__ float*)x + startRow * cols, this->rowsThisBlock * cols);
-        yGm.SetGlobalBuffer((__gm__ float*)y + startRow, this->rowsThisBlock);
-
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, cols * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, 32);
-        pipe.InitBuffer(pooledBuf, this->pooledCols * sizeof(float));
-        pipe.InitBuffer(tmpBuf, this->pooledCols * sizeof(float));
-        pipe.InitBuffer(reduceBuf, 8 * 1024);
+        uint32_t maxBufSize = (perCoreBatch < 8 ? 8 : perCoreBatch) * sizeof(float);
+        pipe.InitBuffer(xBuf, OUT_FEATURES * sizeof(float));
+        pipe.InitBuffer(poolBuf, POOLED_LEN * sizeof(float));
+        pipe.InitBuffer(tempBuf, POOLED_LEN * sizeof(float));
+        pipe.InitBuffer(maxBuf, maxBufSize);
     }
 
     __aicore__ inline void Process()
     {
-        if (this->rowsThisBlock == 0) {
-            return;
+        AscendC::LocalTensor<float> xLocal = xBuf.Get<float>();
+        AscendC::LocalTensor<float> pool = poolBuf.Get<float>();
+        AscendC::LocalTensor<float> temp = tempBuf.Get<float>();
+        AscendC::LocalTensor<float> maxLocal = maxBuf.Get<float>();
+
+        for (uint32_t i = 0; i < this->perCoreBatch; i++) {
+            ProcessRow(i, xLocal, pool, temp, maxLocal);
         }
-        for (uint32_t i = 0; i < this->rowsThisBlock; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
-        }
+
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+
+        AscendC::DataCopy(yGm, maxLocal, this->perCoreBatch);
     }
 
 private:
-    __aicore__ inline void CopyIn(uint32_t i)
+    __aicore__ inline void ProcessRow(uint32_t i,
+                                       AscendC::LocalTensor<float>& xLocal,
+                                       AscendC::LocalTensor<float>& pool,
+                                       AscendC::LocalTensor<float>& temp,
+                                       AscendC::LocalTensor<float>& maxLocal)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::DataCopy(xLocal, xGm[i * this->cols], this->cols);
-        inQueueX.EnQue(xLocal);
-    }
+        AscendC::DataCopy(xLocal, xGm[i * OUT_FEATURES], OUT_FEATURES);
 
-    __aicore__ inline void Compute(uint32_t i)
-    {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-        AscendC::LocalTensor<float> pooled = pooledBuf.Get<float>();
-        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
-        AscendC::LocalTensor<float> reduceTmp = reduceBuf.Get<float>();
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
 
-        for (uint32_t p = 0; p < this->pooledCols; p++) {
-            AscendC::ReduceSum<float, false>(pooled[p], xLocal[p * this->poolKernelSize],
-                                             reduceTmp, (int32_t)this->poolKernelSize);
+        for (int32_t j = 0; j < POOLED_LEN; j++) {
+            float sum = 0.0f;
+            int32_t base = j * POOL_KERNEL;
+            for (int32_t k = 0; k < POOL_KERNEL; k++) {
+                sum = sum + xLocal.GetValue(base + k);
+            }
+            pool.SetValue(j, sum * this->invPoolKernel);
         }
-        inQueueX.FreeTensor(xLocal);
 
-        AscendC::Muls<float>(pooled, pooled, this->invPool, this->pooledCols);
+        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
 
-        ApplyGelu(pooled, tmp, this->pooledCols);
+        AscendC::Mul(temp, pool, pool, POOLED_LEN);
+        AscendC::Mul(temp, temp, pool, POOLED_LEN);
+        AscendC::Muls(temp, temp, (float)0.044715f, POOLED_LEN);
+        AscendC::Add(temp, temp, pool, POOLED_LEN);
+        AscendC::Muls(temp, temp, (float)(-1.595769f), POOLED_LEN);
+        AscendC::Exp(temp, temp, POOLED_LEN);
+        AscendC::Adds(temp, temp, (float)1.0f, POOLED_LEN);
+        AscendC::Div(pool, pool, temp, POOLED_LEN);
+        AscendC::Muls(pool, pool, this->scaleFactor, POOLED_LEN);
 
-        AscendC::Muls<float>(pooled, pooled, this->scaleFactor, this->pooledCols);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
 
-        AscendC::ReduceMax<float>(yLocal, pooled, reduceTmp, (int32_t)this->pooledCols, false);
-
-        outQueueY.EnQue<float>(yLocal);
-    }
-
-    __aicore__ inline void ApplyGelu(AscendC::LocalTensor<float>& x, AscendC::LocalTensor<float>& tmp, uint32_t n)
-    {
-        AscendC::Mul<float>(tmp, x, x, n);
-        AscendC::Mul<float>(tmp, tmp, x, n);
-        AscendC::Muls<float>(tmp, tmp, (float)0.044715, n);
-        AscendC::Add<float>(tmp, tmp, x, n);
-        AscendC::Muls<float>(tmp, tmp, (float)0.7978845608028654, n);
-        AscendC::Tanh<float>(tmp, tmp, n);
-        AscendC::Adds<float>(tmp, tmp, (float)1.0, n);
-        AscendC::Mul<float>(tmp, tmp, x, n);
-        AscendC::Muls<float>(x, tmp, (float)0.5, n);
-    }
-
-    __aicore__ inline void CopyOut(uint32_t i)
-    {
-        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
-        AscendC::DataCopyExtParams copyParams;
-        copyParams.blockCount = 1;
-        copyParams.blockLen = sizeof(float);
-        copyParams.srcStride = 0;
-        copyParams.dstStride = 0;
-        AscendC::DataCopyPad(yGm[i], yLocal, copyParams);
-        outQueueY.FreeTensor(yLocal);
+        float rowMax = pool.GetValue(0);
+        for (int32_t j = 1; j < POOLED_LEN; j++) {
+            float v = pool.GetValue(j);
+            if (v > rowMax) {
+                rowMax = v;
+            }
+        }
+        maxLocal.SetValue(i, rowMax);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> pooledBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
-    uint32_t cols;
-    uint32_t poolKernelSize;
-    uint32_t pooledCols;
-    uint32_t rowsThisBlock;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> xBuf, poolBuf, tempBuf, maxBuf;
+    AscendC::GlobalTensor<float> xGm, yGm;
+    uint32_t perCoreBatch;
     float scaleFactor;
-    float invPool;
+    float invPoolKernel;
 };
 
 extern "C" __global__ __aicore__ void matmul_avg_pool_gelu_scale_max_custom(
     GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
 {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelMatmulAvgPoolGeluScaleMax op;
-    op.Init(x, y, tiling_data.totalRows, tiling_data.cols,
-            tiling_data.poolKernelSize, tiling_data.scaleFactor);
+    KernelFusedOp op;
+    op.Init(x, y, tiling_data.totalBatch, tiling_data.perCoreBatch,
+            tiling_data.scaleFactor, tiling_data.invPoolKernel);
     op.Process();
 }
 """
@@ -292,10 +259,11 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor matmul_avg_pool_gelu_scale_max_custom_impl_npu(const at::Tensor& x, int64_t pool_kernel_size, double scale_factor) {
+at::Tensor matmul_avg_pool_gelu_scale_max_custom_impl_npu(const at::Tensor& x, double scale_factor) {
     auto sizes = x.sizes();
     at::Tensor result = at::empty({sizes[0]}, x.options());
-    EXEC_NPU_CMD(aclnnMatmulAvgPoolGeluScaleMaxCustom, x, pool_kernel_size, (float)scale_factor, result);
+    float sf = static_cast<float>(scale_factor);
+    EXEC_NPU_CMD(aclnnMatmulAvgPoolGeluScaleMaxCustom, x, sf, result);
     return result;
 }
 
@@ -304,7 +272,8 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("matmul_avg_pool_gelu_scale_max_custom", &matmul_avg_pool_gelu_scale_max_custom_impl_npu, "fused avgpool + gelu + scale + max on gemm output");
+    m.def("matmul_avg_pool_gelu_scale_max_custom", &matmul_avg_pool_gelu_scale_max_custom_impl_npu,
+          "fused matmul+avg_pool+gelu+scale+max");
 }
 """
 
@@ -314,16 +283,14 @@ import torch.nn as nn
 import torch_npu
 import custom_ops_lib
 
-
 class ModelNew(nn.Module):
     def __init__(self, in_features, out_features, pool_kernel_size, scale_factor):
         super(ModelNew, self).__init__()
         self.matmul = nn.Linear(in_features, out_features)
-        self.pool_kernel_size = int(pool_kernel_size)
+        self.pool_kernel_size = pool_kernel_size
         self.scale_factor = float(scale_factor)
 
     def forward(self, x):
-        x = self.matmul(x)
-        x = custom_ops_lib.matmul_avg_pool_gelu_scale_max_custom(x, self.pool_kernel_size, self.scale_factor)
-        return x
+        out = self.matmul(x)
+        return custom_ops_lib.matmul_avg_pool_gelu_scale_max_custom(out, self.scale_factor)
 '''

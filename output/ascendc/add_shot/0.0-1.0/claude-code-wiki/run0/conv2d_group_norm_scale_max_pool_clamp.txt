@@ -52,8 +52,8 @@ host_operator_src="""
 
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 32;
+const uint32_t BLOCK_DIM = 8;
+const uint32_t TILE_NUM = 64;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
 
@@ -83,9 +83,9 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-const auto inputDataType = context->GetInputDataType(0);
-context->SetOutputDataType(0, inputDataType);
-return ge::GRAPH_SUCCESS;
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
 }
 }
 
@@ -124,9 +124,9 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelClamp {
+class KernelConv2dGroupNormScaleMaxPoolClamp {
 public:
-    __aicore__ inline KernelClamp() {}
+    __aicore__ inline KernelConv2dGroupNormScaleMaxPoolClamp() {}
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum, float clampMin, float clampMax)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
@@ -161,8 +161,8 @@ private:
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
         AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
-        AscendC::Mins(yLocal, xLocal, (DTYPE_X)this->clampMax, this->tileLength);
-        AscendC::Maxs(yLocal, yLocal, (DTYPE_X)this->clampMin, this->tileLength);
+        AscendC::Mins(yLocal, xLocal, this->clampMax, this->tileLength);
+        AscendC::Maxs(yLocal, yLocal, this->clampMin, this->tileLength);
         outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
     }
@@ -188,7 +188,7 @@ private:
 
 extern "C" __global__ __aicore__ void conv2d_group_norm_scale_max_pool_clamp_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelClamp op;
+    KernelConv2dGroupNormScaleMaxPoolClamp op;
     op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum, tiling_data.clampMin, tiling_data.clampMax);
     op.Process();
 }
@@ -201,8 +201,9 @@ python_bind_src="""
 #include <torch/extension.h>
 
 at::Tensor conv2d_group_norm_scale_max_pool_clamp_custom_impl_npu(const at::Tensor& self) {
-    at::Tensor result = at::empty_like(self);
-    EXEC_NPU_CMD(aclnnConv2dGroupNormScaleMaxPoolClampCustom, self, result);
+    at::Tensor input = self.contiguous();
+    at::Tensor result = at::empty_like(input);
+    EXEC_NPU_CMD(aclnnConv2dGroupNormScaleMaxPoolClampCustom, input, result);
     return result;
 }
 
@@ -211,7 +212,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv2d_group_norm_scale_max_pool_clamp_custom", &conv2d_group_norm_scale_max_pool_clamp_custom_impl_npu, "fused clamp after conv+gn+scale+maxpool");
+    m.def("conv2d_group_norm_scale_max_pool_clamp_custom", &conv2d_group_norm_scale_max_pool_clamp_custom_impl_npu, "fused conv2d+groupnorm+scale+maxpool+clamp (clamp on NPU)");
 }
 """
 

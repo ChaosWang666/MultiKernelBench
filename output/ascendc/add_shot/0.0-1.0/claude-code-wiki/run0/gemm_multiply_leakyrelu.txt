@@ -167,7 +167,7 @@ public:
 
     __aicore__ inline void Process()
     {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        int32_t loopCount = static_cast<int32_t>(this->tileNum) * BUFFER_NUM;
         for (int32_t i = 0; i < loopCount; i++) {
             CopyIn(i);
             Compute(i);

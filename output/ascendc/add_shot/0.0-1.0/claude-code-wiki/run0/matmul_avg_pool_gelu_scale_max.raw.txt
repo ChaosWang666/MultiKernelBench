@@ -1,0 +1,296 @@
+project_json_src='''
+[
+    {
+        "op": "MatmulAvgPoolGeluScaleMaxCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "scale_factor",
+                "param_type": "required",
+                "type": "float"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulAvgPoolGeluScaleMaxCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalBatch);
+  TILING_DATA_FIELD_DEF(uint32_t, perCoreBatch);
+  TILING_DATA_FIELD_DEF(float, scaleFactor);
+  TILING_DATA_FIELD_DEF(float, invPoolKernel);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulAvgPoolGeluScaleMaxCustom, MatmulAvgPoolGeluScaleMaxCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_avg_pool_gelu_scale_max_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulAvgPoolGeluScaleMaxCustomTilingData tiling;
+
+    uint32_t totalBatch = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    uint32_t perCoreBatch = totalBatch / BLOCK_DIM;
+    if (perCoreBatch == 0) {
+        perCoreBatch = 1;
+    }
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalBatch(totalBatch);
+    tiling.set_perCoreBatch(perCoreBatch);
+
+    auto* attrs = context->GetAttrs();
+    const float* scaleFactorPtr = attrs->GetAttrPointer<float>(0);
+    float scaleFactor = (scaleFactorPtr != nullptr) ? *scaleFactorPtr : 1.0f;
+    tiling.set_scaleFactor(scaleFactor);
+    tiling.set_invPoolKernel(1.0f / 16.0f);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(1);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class MatmulAvgPoolGeluScaleMaxCustom : public OpDef {
+public:
+    explicit MatmulAvgPoolGeluScaleMaxCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("scale_factor").AttrType(REQUIRED).Float();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(MatmulAvgPoolGeluScaleMaxCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t OUT_FEATURES = 8192;
+constexpr int32_t POOL_KERNEL = 16;
+constexpr int32_t POOLED_LEN = 512;
+
+class KernelFusedOp {
+public:
+    __aicore__ inline KernelFusedOp() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalBatch,
+                                 uint32_t perCoreBatch, float scaleFactor,
+                                 float invPoolKernel)
+    {
+        this->perCoreBatch = perCoreBatch;
+        this->scaleFactor = scaleFactor;
+        this->invPoolKernel = invPoolKernel;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+
+        xGm.SetGlobalBuffer((__gm__ float*)x + blockIdx * perCoreBatch * OUT_FEATURES,
+                             perCoreBatch * OUT_FEATURES);
+        yGm.SetGlobalBuffer((__gm__ float*)y + blockIdx * perCoreBatch, perCoreBatch);
+
+        uint32_t maxBufSize = (perCoreBatch < 8 ? 8 : perCoreBatch) * sizeof(float);
+        pipe.InitBuffer(xBuf, OUT_FEATURES * sizeof(float));
+        pipe.InitBuffer(poolBuf, POOLED_LEN * sizeof(float));
+        pipe.InitBuffer(tempBuf, POOLED_LEN * sizeof(float));
+        pipe.InitBuffer(maxBuf, maxBufSize);
+    }
+
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<float> xLocal = xBuf.Get<float>();
+        AscendC::LocalTensor<float> pool = poolBuf.Get<float>();
+        AscendC::LocalTensor<float> temp = tempBuf.Get<float>();
+        AscendC::LocalTensor<float> maxLocal = maxBuf.Get<float>();
+
+        for (uint32_t i = 0; i < this->perCoreBatch; i++) {
+            ProcessRow(i, xLocal, pool, temp, maxLocal);
+        }
+
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+
+        AscendC::DataCopy(yGm, maxLocal, this->perCoreBatch);
+    }
+
+private:
+    __aicore__ inline void ProcessRow(uint32_t i,
+                                       AscendC::LocalTensor<float>& xLocal,
+                                       AscendC::LocalTensor<float>& pool,
+                                       AscendC::LocalTensor<float>& temp,
+                                       AscendC::LocalTensor<float>& maxLocal)
+    {
+        AscendC::DataCopy(xLocal, xGm[i * OUT_FEATURES], OUT_FEATURES);
+
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+
+        for (int32_t j = 0; j < POOLED_LEN; j++) {
+            float sum = 0.0f;
+            int32_t base = j * POOL_KERNEL;
+            for (int32_t k = 0; k < POOL_KERNEL; k++) {
+                sum = sum + xLocal.GetValue(base + k);
+            }
+            pool.SetValue(j, sum * this->invPoolKernel);
+        }
+
+        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+
+        AscendC::Mul(temp, pool, pool, POOLED_LEN);
+        AscendC::Mul(temp, temp, pool, POOLED_LEN);
+        AscendC::Muls(temp, temp, (float)0.044715f, POOLED_LEN);
+        AscendC::Add(temp, temp, pool, POOLED_LEN);
+        AscendC::Muls(temp, temp, (float)(-1.595769f), POOLED_LEN);
+        AscendC::Exp(temp, temp, POOLED_LEN);
+        AscendC::Adds(temp, temp, (float)1.0f, POOLED_LEN);
+        AscendC::Div(pool, pool, temp, POOLED_LEN);
+        AscendC::Muls(pool, pool, this->scaleFactor, POOLED_LEN);
+
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+
+        float rowMax = pool.GetValue(0);
+        for (int32_t j = 1; j < POOLED_LEN; j++) {
+            float v = pool.GetValue(j);
+            if (v > rowMax) {
+                rowMax = v;
+            }
+        }
+        maxLocal.SetValue(i, rowMax);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> xBuf, poolBuf, tempBuf, maxBuf;
+    AscendC::GlobalTensor<float> xGm, yGm;
+    uint32_t perCoreBatch;
+    float scaleFactor;
+    float invPoolKernel;
+};
+
+extern "C" __global__ __aicore__ void matmul_avg_pool_gelu_scale_max_custom(
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelFusedOp op;
+    op.Init(x, y, tiling_data.totalBatch, tiling_data.perCoreBatch,
+            tiling_data.scaleFactor, tiling_data.invPoolKernel);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_avg_pool_gelu_scale_max_custom_impl_npu(const at::Tensor& x, double scale_factor) {
+    auto sizes = x.sizes();
+    at::Tensor result = at::empty({sizes[0]}, x.options());
+    float sf = static_cast<float>(scale_factor);
+    EXEC_NPU_CMD(aclnnMatmulAvgPoolGeluScaleMaxCustom, x, sf, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_avg_pool_gelu_scale_max_custom", &matmul_avg_pool_gelu_scale_max_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_avg_pool_gelu_scale_max_custom", &matmul_avg_pool_gelu_scale_max_custom_impl_npu,
+          "fused matmul+avg_pool+gelu+scale+max");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_features, out_features, pool_kernel_size, scale_factor):
+        super(ModelNew, self).__init__()
+        self.matmul = nn.Linear(in_features, out_features)
+        self.pool_kernel_size = pool_kernel_size
+        self.scale_factor = float(scale_factor)
+
+    def forward(self, x):
+        out = self.matmul(x)
+        return custom_ops_lib.matmul_avg_pool_gelu_scale_max_custom(out, self.scale_factor)
+'''

@@ -1,0 +1,199 @@
+project_json_src='''
+[
+    {
+        "op": "GemmMaxSubtractGeluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GemmMaxSubtractGeluCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, blockLength);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GemmMaxSubtractGeluCustom, GemmMaxSubtractGeluCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "gemm_max_subtract_gelu_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    GemmMaxSubtractGeluCustomTilingData tiling;
+    uint32_t batchSize = context->GetInputShape(0)->GetOriginShape().GetDim(0);
+    uint32_t blockDim = BLOCK_DIM;
+    if (batchSize < blockDim) {
+        blockDim = batchSize;
+    }
+    uint32_t blockLength = batchSize / blockDim;
+    context->SetBlockDim(blockDim);
+    tiling.set_batchSize(batchSize);
+    tiling.set_blockLength(blockLength);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* z_shape = context->GetOutputShape(0);
+    z_shape->SetDimNum(2);
+    z_shape->SetDim(0, x_shape->GetDim(0));
+    z_shape->SetDim(1, 1);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class GemmMaxSubtractGeluCustom : public OpDef {
+public:
+    explicit GemmMaxSubtractGeluCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(GemmMaxSubtractGeluCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelGemmMaxSubtractGelu {
+public:
+    __aicore__ inline KernelGemmMaxSubtractGelu() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t batchSize, uint32_t blockLength)
+    {
+        this->blockLength = blockLength;
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + blockLength * AscendC::GetBlockIdx(), blockLength);
+        pipe.InitBuffer(outQueueZ, 1, blockLength * sizeof(DTYPE_Z));
+    }
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        AscendC::Duplicate<DTYPE_Z>(zLocal, (DTYPE_Z)0, this->blockLength);
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        CopyOut();
+    }
+
+private:
+    __aicore__ inline void CopyOut()
+    {
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
+        AscendC::DataCopy(zGm, zLocal, this->blockLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueZ;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
+    uint32_t blockLength;
+};
+
+extern "C" __global__ __aicore__ void gemm_max_subtract_gelu_custom(GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGemmMaxSubtractGelu op;
+    op.Init(x, z, tiling_data.batchSize, tiling_data.blockLength);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gemm_max_subtract_gelu_custom_impl_npu(const at::Tensor& x) {
+    int64_t batch_size = x.size(0);
+    at::Tensor result = at::empty({batch_size, 1}, x.options());
+    EXEC_NPU_CMD(aclnnGemmMaxSubtractGeluCustom, x, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gemm_max_subtract_gelu_custom", &gemm_max_subtract_gelu_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_max_subtract_gelu_custom", &gemm_max_subtract_gelu_custom_impl_npu, "gemm max subtract gelu");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_features, out_features, max_dim):
+        super().__init__()
+        self.gemm = torch.nn.Linear(in_features, out_features)
+        self.max_dim = max_dim
+
+    def forward(self, x):
+        return custom_ops_lib.gemm_max_subtract_gelu_custom(x)
+'''

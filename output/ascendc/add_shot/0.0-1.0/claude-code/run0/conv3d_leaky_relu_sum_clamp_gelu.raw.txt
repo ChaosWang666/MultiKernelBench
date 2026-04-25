@@ -1,0 +1,456 @@
+project_json_src='''
+[
+    {
+        "op": "Conv3dLeakyReluSumClampGeluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "sum_tensor",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dLeakyReluSumClampGeluCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, inDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, inHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, inWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, outDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, totalOutputElements);
+  TILING_DATA_FIELD_DEF(uint32_t, elementsPerCore);
+  TILING_DATA_FIELD_DEF(uint32_t, tailElements);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dLeakyReluSumClampGeluCustom, Conv3dLeakyReluSumClampGeluCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_leaky_relu_sum_clamp_gelu_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dLeakyReluSumClampGeluCustomTilingData tiling;
+
+    const gert::Shape& xShape = context->GetInputShape(0)->GetOriginShape();
+    const gert::Shape& wShape = context->GetInputShape(1)->GetOriginShape();
+
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t inChannels = xShape.GetDim(1);
+    uint32_t inDepth = xShape.GetDim(2);
+    uint32_t inHeight = xShape.GetDim(3);
+    uint32_t inWidth = xShape.GetDim(4);
+
+    uint32_t outChannels = wShape.GetDim(0);
+    uint32_t kernelSize = wShape.GetDim(2);
+
+    uint32_t outDepth = inDepth - kernelSize + 1;
+    uint32_t outHeight = inHeight - kernelSize + 1;
+    uint32_t outWidth = inWidth - kernelSize + 1;
+
+    uint32_t totalOutputElements = batchSize * outChannels * outDepth * outHeight * outWidth;
+    uint32_t elementsPerCore = (totalOutputElements + BLOCK_DIM - 1) / BLOCK_DIM;
+    uint32_t tailElements = totalOutputElements - elementsPerCore * (BLOCK_DIM - 1);
+
+    context->SetBlockDim(BLOCK_DIM);
+
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_inDepth(inDepth);
+    tiling.set_inHeight(inHeight);
+    tiling.set_inWidth(inWidth);
+    tiling.set_outDepth(outDepth);
+    tiling.set_outHeight(outHeight);
+    tiling.set_outWidth(outWidth);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_totalOutputElements(totalOutputElements);
+    tiling.set_elementsPerCore(elementsPerCore);
+    tiling.set_tailElements(tailElements);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* w_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+
+    int64_t batchSize = x_shape->GetDim(0);
+    int64_t inDepth = x_shape->GetDim(2);
+    int64_t inHeight = x_shape->GetDim(3);
+    int64_t inWidth = x_shape->GetDim(4);
+
+    int64_t outChannels = w_shape->GetDim(0);
+    int64_t kernelSize = w_shape->GetDim(2);
+
+    int64_t outDepth = inDepth - kernelSize + 1;
+    int64_t outHeight = inHeight - kernelSize + 1;
+    int64_t outWidth = inWidth - kernelSize + 1;
+
+    y_shape->SetDimNum(5);
+    y_shape->SetDim(0, batchSize);
+    y_shape->SetDim(1, outChannels);
+    y_shape->SetDim(2, outDepth);
+    y_shape->SetDim(3, outHeight);
+    y_shape->SetDim(4, outWidth);
+
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv3dLeakyReluSumClampGeluCustom : public OpDef {
+public:
+    explicit Conv3dLeakyReluSumClampGeluCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("sum_tensor")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+
+    }
+};
+
+OP_ADD(Conv3dLeakyReluSumClampGeluCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelConv3dFused {
+public:
+    __aicore__ inline KernelConv3dFused() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR sum_tensor, GM_ADDR z,
+                                 uint32_t batchSize, uint32_t inChannels, uint32_t outChannels,
+                                 uint32_t inDepth, uint32_t inHeight, uint32_t inWidth,
+                                 uint32_t outDepth, uint32_t outHeight, uint32_t outWidth,
+                                 uint32_t kernelSize, uint32_t totalOutputElements,
+                                 uint32_t elementsPerCore, uint32_t tailElements)
+    {
+        this->batchSize = batchSize;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->inDepth = inDepth;
+        this->inHeight = inHeight;
+        this->inWidth = inWidth;
+        this->outDepth = outDepth;
+        this->outHeight = outHeight;
+        this->outWidth = outWidth;
+        this->kernelSize = kernelSize;
+        this->totalOutputElements = totalOutputElements;
+        this->elementsPerCore = elementsPerCore;
+        this->tailElements = tailElements;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+
+        this->startIdx = blockIdx * elementsPerCore;
+        if (blockIdx == blockNum - 1) {
+            this->myElements = tailElements;
+        } else {
+            this->myElements = elementsPerCore;
+        }
+        if (this->startIdx >= totalOutputElements) {
+            this->myElements = 0;
+        } else if (this->startIdx + this->myElements > totalOutputElements) {
+            this->myElements = totalOutputElements - this->startIdx;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batchSize * inChannels * inDepth * inHeight * inWidth);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, outChannels * inChannels * kernelSize * kernelSize * kernelSize);
+        bGm.SetGlobalBuffer((__gm__ float *)bias, outChannels);
+        sGm.SetGlobalBuffer((__gm__ float *)sum_tensor, outChannels);
+        zGm.SetGlobalBuffer((__gm__ float *)z, totalOutputElements);
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (this->myElements == 0) {
+            return;
+        }
+
+        uint32_t outHW = this->outHeight * this->outWidth;
+        uint32_t outDHW = this->outDepth * outHW;
+        uint32_t outCDHW = this->outChannels * outDHW;
+
+        uint32_t inHW = this->inHeight * this->inWidth;
+        uint32_t inDHW = this->inDepth * inHW;
+        uint32_t inCDHW = this->inChannels * inDHW;
+
+        uint32_t kSize = this->kernelSize;
+        uint32_t kSq = kSize * kSize;
+        uint32_t kCube = kSq * kSize;
+        uint32_t wStride = this->inChannels * kCube;
+
+        for (uint32_t i = 0; i < this->myElements; i++) {
+            uint32_t outIdx = this->startIdx + i;
+
+            uint32_t ow = outIdx % this->outWidth;
+            uint32_t oh = (outIdx / this->outWidth) % this->outHeight;
+            uint32_t od = (outIdx / outHW) % this->outDepth;
+            uint32_t oc = (outIdx / outDHW) % this->outChannels;
+            uint32_t n = outIdx / outCDHW;
+
+            float bias_val = bGm.GetValue(oc);
+            float sum_val = sGm.GetValue(oc);
+
+            float acc = bias_val;
+
+            uint32_t x_n_base = n * inCDHW;
+            uint32_t w_oc_base = oc * wStride;
+
+            for (uint32_t ic = 0; ic < this->inChannels; ic++) {
+                uint32_t x_c_base = x_n_base + ic * inDHW;
+                uint32_t w_ic_base = w_oc_base + ic * kCube;
+
+                for (uint32_t kd = 0; kd < kSize; kd++) {
+                    uint32_t id = od + kd;
+                    uint32_t x_d_base = x_c_base + id * inHW;
+                    uint32_t w_kd_base = w_ic_base + kd * kSq;
+
+                    for (uint32_t kh = 0; kh < kSize; kh++) {
+                        uint32_t ih = oh + kh;
+                        uint32_t x_h_base = x_d_base + ih * this->inWidth;
+                        uint32_t w_kh_base = w_kd_base + kh * kSize;
+
+                        for (uint32_t kw = 0; kw < kSize; kw++) {
+                            uint32_t iw = ow + kw;
+                            float x_val = xGm.GetValue(x_h_base + iw);
+                            float w_val = wGm.GetValue(w_kh_base + kw);
+                            acc += x_val * w_val;
+                        }
+                    }
+                }
+            }
+
+            float v = acc;
+            if (v < 0.0f) {
+                v = v * 0.2f;
+            }
+            v = v + sum_val;
+            if (v < -1.0f) v = -1.0f;
+            if (v > 1.0f) v = 1.0f;
+
+            float c = 0.7978845608028654f;
+            float k = 0.044715f;
+            float v3 = v * v * v;
+            float inner = c * (v + k * v3);
+            float e_pos = AscendC::ScalarCast<float, float, AscendC::RoundMode::CAST_NONE>(0.0f);
+            float ex = 0.0f;
+            {
+                float tx = inner;
+                float ax = tx < 0.0f ? -tx : tx;
+                float e = 1.0f;
+                float term = 1.0f;
+                for (int32_t it = 1; it < 12; it++) {
+                    term = term * ax / (float)it;
+                    e += term;
+                }
+                float e_neg = 1.0f / e;
+                float tanh_val;
+                if (tx >= 0.0f) {
+                    tanh_val = (e - e_neg) / (e + e_neg);
+                } else {
+                    tanh_val = -((e - e_neg) / (e + e_neg));
+                }
+                ex = tanh_val;
+            }
+            float gelu_out = 0.5f * v * (1.0f + ex);
+
+            zGm.SetValue(this->startIdx + i, gelu_out);
+        }
+    }
+
+private:
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> wGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> sGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t batchSize;
+    uint32_t inChannels;
+    uint32_t outChannels;
+    uint32_t inDepth;
+    uint32_t inHeight;
+    uint32_t inWidth;
+    uint32_t outDepth;
+    uint32_t outHeight;
+    uint32_t outWidth;
+    uint32_t kernelSize;
+    uint32_t totalOutputElements;
+    uint32_t elementsPerCore;
+    uint32_t tailElements;
+    uint32_t startIdx;
+    uint32_t myElements;
+};
+
+extern "C" __global__ __aicore__ void conv3d_leaky_relu_sum_clamp_gelu_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR sum_tensor, GM_ADDR z,
+    GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv3dFused op;
+    op.Init(x, weight, bias, sum_tensor, z,
+            tiling_data.batchSize, tiling_data.inChannels, tiling_data.outChannels,
+            tiling_data.inDepth, tiling_data.inHeight, tiling_data.inWidth,
+            tiling_data.outDepth, tiling_data.outHeight, tiling_data.outWidth,
+            tiling_data.kernelSize, tiling_data.totalOutputElements,
+            tiling_data.elementsPerCore, tiling_data.tailElements);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_leaky_relu_sum_clamp_gelu_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias, const at::Tensor& sum_tensor) {
+    auto xSizes = x.sizes();
+    auto wSizes = weight.sizes();
+    int64_t batchSize = xSizes[0];
+    int64_t outChannels = wSizes[0];
+    int64_t kernelSize = wSizes[2];
+    int64_t outDepth = xSizes[2] - kernelSize + 1;
+    int64_t outHeight = xSizes[3] - kernelSize + 1;
+    int64_t outWidth = xSizes[4] - kernelSize + 1;
+
+    at::Tensor result = at::empty({batchSize, outChannels, outDepth, outHeight, outWidth}, x.options());
+    EXEC_NPU_CMD(aclnnConv3dLeakyReluSumClampGeluCustom, x, weight, bias, sum_tensor, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_leaky_relu_sum_clamp_gelu_custom", &conv3d_leaky_relu_sum_clamp_gelu_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_leaky_relu_sum_clamp_gelu_custom", &conv3d_leaky_relu_sum_clamp_gelu_custom_impl_npu, "conv3d + leaky_relu + sum + clamp + gelu");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, sum_tensor_shape) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv3d(in_channels, out_channels, kernel_size)
+        self.sum_tensor = torch.nn.Parameter(torch.randn(sum_tensor_shape))
+
+    def forward(self, x):
+        weight = self.conv.weight
+        bias = self.conv.bias
+        sum_flat = self.sum_tensor.reshape(-1).contiguous()
+        return custom_ops_lib.conv3d_leaky_relu_sum_clamp_gelu_custom(x, weight, bias, sum_flat)
+'''

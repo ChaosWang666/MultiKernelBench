@@ -1,5 +1,3 @@
-Got enough context. Let me write the solution.
-
 project_json_src='''
 [
     {
@@ -32,13 +30,13 @@ project_json_src='''
         "attr": [
             {
                 "name": "min_value",
-                "type": "float",
-                "default_value": "0.0"
+                "param_type": "required",
+                "type": "float"
             },
             {
                 "name": "divisor",
-                "type": "float",
-                "default_value": "1.0"
+                "param_type": "required",
+                "type": "float"
             }
         ]
     }
@@ -51,9 +49,9 @@ host_tiling_src="""
 namespace optiling {
 BEGIN_TILING_DATA_DEF(ConvTranspose3dClampMinDivideCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, totalLength);
-  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
   TILING_DATA_FIELD_DEF(float, minValue);
-  TILING_DATA_FIELD_DEF(float, divisor);
+  TILING_DATA_FIELD_DEF(float, invDivisor);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ConvTranspose3dClampMinDivideCustom, ConvTranspose3dClampMinDivideCustomTilingData)
@@ -66,17 +64,30 @@ host_operator_src="""
 
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_LENGTH = 8192;
+const uint32_t BLOCK_DIM = 24;
+const uint32_t TILE_NUM = 186;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose3dClampMinDivideCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+
+    auto attrs = context->GetAttrs();
+    const float* minValuePtr = attrs->GetAttrPointer<float>(0);
+    const float* divisorPtr = attrs->GetAttrPointer<float>(1);
+
+    float minValueHost = (minValuePtr != nullptr) ? (*minValuePtr) : 0.0f;
+    float divisorHost = (divisorPtr != nullptr) ? (*divisorPtr) : 1.0f;
+    if (divisorHost == 0.0f) {
+        divisorHost = 1.0f;
+    }
+
     context->SetBlockDim(BLOCK_DIM);
     tiling.set_totalLength(totalLength);
-    tiling.set_tileLength(TILE_LENGTH);
-    tiling.set_minValue(context->GetAttrFloat("min_value"));
-    tiling.set_divisor(context->GetAttrFloat("divisor"));
+    tiling.set_tileNum(TILE_NUM);
+    tiling.set_minValue(minValueHost);
+    tiling.set_invDivisor(1.0f / divisorHost);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -89,9 +100,9 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* x1_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x_shape;
+    *y_shape = *x1_shape;
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -118,14 +129,15 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("min_value").SetType(FLOAT).SetDefault(0.0f);
-        this->Attr("divisor").SetType(FLOAT).SetDefault(1.0f);
+        this->Attr("min_value").Float();
+        this->Attr("divisor").Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
+
     }
 };
 
@@ -138,83 +150,52 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelClampMinDivide {
+class KernelConvTranspose3dClampMinDivide {
 public:
-    __aicore__ inline KernelClampMinDivide() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileLength, float minValue, float divisor)
+    __aicore__ inline KernelConvTranspose3dClampMinDivide() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum, float minValue, float invDivisor)
     {
-        this->totalLength = totalLength;
-        this->tileLength = tileLength;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
         this->minValue = minValue;
-        this->invDivisor = 1.0f / divisor;
+        this->invDivisor = invDivisor;
 
-        uint32_t blockNum = AscendC::GetBlockNum();
-        uint32_t blockIdx = AscendC::GetBlockIdx();
-
-        uint32_t avgPerBlock = (totalLength + blockNum - 1) / blockNum;
-        avgPerBlock = (avgPerBlock + 7) / 8 * 8;
-
-        uint32_t startOffset = avgPerBlock * blockIdx;
-        if (startOffset >= totalLength) {
-            this->blockOffset = totalLength;
-            this->blockLength = 0;
-        } else {
-            this->blockOffset = startOffset;
-            uint32_t endOffset = startOffset + avgPerBlock;
-            if (endOffset > totalLength) {
-                endOffset = totalLength;
-            }
-            this->blockLength = endOffset - startOffset;
-        }
-
-        xGm.SetGlobalBuffer((__gm__ float *)x, totalLength);
-        yGm.SetGlobalBuffer((__gm__ float *)y, totalLength);
-
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
     }
-
     __aicore__ inline void Process()
     {
-        if (this->blockLength == 0) {
-            return;
-        }
-        uint32_t numFullTiles = this->blockLength / this->tileLength;
-        uint32_t tail = this->blockLength - numFullTiles * this->tileLength;
-        uint32_t totalTiles = numFullTiles + (tail > 0 ? 1 : 0);
-
-        for (uint32_t i = 0; i < totalTiles; i++) {
-            uint32_t curLen = (i < numFullTiles) ? this->tileLength : tail;
-            uint32_t curOff = i * this->tileLength;
-            CopyIn(curOff, curLen);
-            Compute(curLen);
-            CopyOut(curOff, curLen);
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
         }
     }
 
 private:
-    __aicore__ inline void CopyIn(uint32_t localOffset, uint32_t length)
+    __aicore__ inline void CopyIn(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        uint32_t alignedLen = (length + 7) / 8 * 8;
-        AscendC::DataCopy(xLocal, xGm[this->blockOffset + localOffset], alignedLen);
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
         inQueueX.EnQue(xLocal);
     }
-    __aicore__ inline void Compute(uint32_t length)
+    __aicore__ inline void Compute(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-        uint32_t alignedLen = (length + 7) / 8 * 8;
-        AscendC::Maxs(yLocal, xLocal, this->minValue, alignedLen);
-        AscendC::Muls(yLocal, yLocal, this->invDivisor, alignedLen);
-        outQueueY.EnQue<float>(yLocal);
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::Maxs(yLocal, xLocal, (DTYPE_X)this->minValue, this->tileLength);
+        AscendC::Muls(yLocal, yLocal, (DTYPE_Y)this->invDivisor, this->tileLength);
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
     }
-    __aicore__ inline void CopyOut(uint32_t localOffset, uint32_t length)
+    __aicore__ inline void CopyOut(int32_t progress)
     {
-        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
-        uint32_t alignedLen = (length + 7) / 8 * 8;
-        AscendC::DataCopy(yGm[this->blockOffset + localOffset], yLocal, alignedLen);
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
         outQueueY.FreeTensor(yLocal);
     }
 
@@ -222,20 +203,20 @@ private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
-    uint32_t totalLength;
-    uint32_t blockOffset;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t blockLength;
+    uint32_t tileNum;
     uint32_t tileLength;
     float minValue;
     float invDivisor;
 };
 
-extern "C" __global__ __aicore__ void conv_transpose3d_clamp_min_divide_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv_transpose3d_clamp_min_divide_custom(
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelClampMinDivide op;
-    op.Init(x, y, tiling_data.totalLength, tiling_data.tileLength, tiling_data.minValue, tiling_data.divisor);
+    KernelConvTranspose3dClampMinDivide op;
+    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum, tiling_data.minValue, tiling_data.invDivisor);
     op.Process();
 }
 """
@@ -257,7 +238,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv_transpose3d_clamp_min_divide_custom", &conv_transpose3d_clamp_min_divide_custom_impl_npu, "clamp_min then divide");
+    m.def("conv_transpose3d_clamp_min_divide_custom", &conv_transpose3d_clamp_min_divide_custom_impl_npu, "clamp_min + divide after conv_transpose3d");
 }
 """
 
@@ -276,6 +257,5 @@ class ModelNew(torch.nn.Module):
     def forward(self, x):
         x = self.conv_transpose(x)
         x = x.contiguous()
-        x = custom_ops_lib.conv_transpose3d_clamp_min_divide_custom(x, self.min_value, self.divisor)
-        return x
+        return custom_ops_lib.conv_transpose3d_clamp_min_divide_custom(x, self.min_value, self.divisor)
 '''

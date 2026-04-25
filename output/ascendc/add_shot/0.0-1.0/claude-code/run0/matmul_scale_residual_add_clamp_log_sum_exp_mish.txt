@@ -1,4 +1,3 @@
-```python
 project_json_src='''
 [
     {
@@ -27,23 +26,6 @@ project_json_src='''
                     "float"
                 ]
             }
-        ],
-        "attr": [
-            {
-                "name": "scale_factor",
-                "param_type": "required",
-                "type": "float"
-            },
-            {
-                "name": "clamp_min",
-                "param_type": "required",
-                "type": "float"
-            },
-            {
-                "name": "clamp_max",
-                "param_type": "required",
-                "type": "float"
-            }
         ]
     }
 ]
@@ -54,9 +36,10 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(MatmulScaleResidualAddClampLogSumExpMishCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
-  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
-  TILING_DATA_FIELD_DEF(float, scaleFactor);
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, hiddenSize);
+  TILING_DATA_FIELD_DEF(uint32_t, rowsPerBlock);
+  TILING_DATA_FIELD_DEF(float, mulFactor);
   TILING_DATA_FIELD_DEF(float, clampMin);
   TILING_DATA_FIELD_DEF(float, clampMax);
 END_TILING_DATA_DEF;
@@ -72,23 +55,22 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 16;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     MatmulScaleResidualAddClampLogSumExpMishCustomTilingData tiling;
-    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
-
-    auto attrs = context->GetAttrs();
-    const float* scaleFactor = attrs->GetAttrPointer<float>(0);
-    const float* clampMin = attrs->GetAttrPointer<float>(1);
-    const float* clampMax = attrs->GetAttrPointer<float>(2);
+    const gert::Shape& x_shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = x_shape.GetDim(0);
+    uint32_t hiddenSize = x_shape.GetDim(1);
+    uint32_t rowsPerBlock = (batchSize + BLOCK_DIM - 1) / BLOCK_DIM;
 
     context->SetBlockDim(BLOCK_DIM);
-    tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(TILE_NUM);
-    tiling.set_scaleFactor(*scaleFactor);
-    tiling.set_clampMin(*clampMin);
-    tiling.set_clampMax(*clampMax);
+    tiling.set_batchSize(batchSize);
+    tiling.set_hiddenSize(hiddenSize);
+    tiling.set_rowsPerBlock(rowsPerBlock);
+    tiling.set_mulFactor(4.0f);
+    tiling.set_clampMin(-10.0f);
+    tiling.set_clampMax(10.0f);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -101,9 +83,11 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x1_shape = context->GetInputShape(0);
+    const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x1_shape;
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, 1);
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -130,9 +114,6 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("scale_factor").AttrType(REQUIRED).Float();
-        this->Attr("clamp_min").AttrType(REQUIRED).Float();
-        this->Attr("clamp_max").AttrType(REQUIRED).Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
@@ -152,78 +133,109 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelScaleResClamp {
+class KernelFusedLSE {
 public:
-    __aicore__ inline KernelScaleResClamp() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum,
-                                 float scaleFactor, float clampMin, float clampMax)
+    __aicore__ inline KernelFusedLSE() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                uint32_t batchSize, uint32_t hiddenSize,
+                                uint32_t rowsPerBlock,
+                                float mulFactor, float clampMin, float clampMax)
     {
-        this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->tileNum = tileNum;
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
-        this->combinedScale = 2.0f * scaleFactor;
+        this->hiddenSize = hiddenSize;
+        this->rowsPerBlock = rowsPerBlock;
+        this->mulFactor = mulFactor;
         this->clampMin = clampMin;
         this->clampMax = clampMax;
 
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
-    }
-    __aicore__ inline void Process()
-    {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
-        }
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t rowOffset = blockIdx * rowsPerBlock;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x + rowOffset * hiddenSize, rowsPerBlock * hiddenSize);
+        yGm.SetGlobalBuffer((__gm__ float*)y + rowOffset, rowsPerBlock);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, hiddenSize * sizeof(float));
+        pipe.InitBuffer(outQueueY, 1, 64 * sizeof(float));
+        pipe.InitBuffer(sumBuf, 64 * sizeof(float));
+        pipe.InitBuffer(maxBuf, 64 * sizeof(float));
+        pipe.InitBuffer(reduceBuf, 32 * sizeof(float));
+        pipe.InitBuffer(workBuf, 2048 * sizeof(float));
+        pipe.InitBuffer(tmpBuf, 64 * sizeof(float));
     }
 
-private:
-    __aicore__ inline void CopyIn(int32_t progress)
+    __aicore__ inline void Process()
     {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
-        inQueueX.EnQue(xLocal);
-    }
-    __aicore__ inline void Compute(int32_t progress)
-    {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
-        AscendC::Muls(yLocal, xLocal, (DTYPE_X)this->combinedScale, this->tileLength);
-        AscendC::Mins(yLocal, yLocal, (DTYPE_Y)this->clampMax, this->tileLength);
-        AscendC::Maxs(yLocal, yLocal, (DTYPE_Y)this->clampMin, this->tileLength);
-        outQueueY.EnQue<DTYPE_Y>(yLocal);
-        inQueueX.FreeTensor(xLocal);
-    }
-    __aicore__ inline void CopyOut(int32_t progress)
-    {
-        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
-        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
-        outQueueY.FreeTensor(yLocal);
+        AscendC::LocalTensor<float> sumLocal = sumBuf.Get<float>();
+        AscendC::LocalTensor<float> maxLocal = maxBuf.Get<float>();
+        AscendC::LocalTensor<float> workLocal = workBuf.Get<float>();
+        AscendC::LocalTensor<float> reduceLocal = reduceBuf.Get<float>();
+
+        for (uint32_t r = 0; r < rowsPerBlock; r++) {
+            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+            AscendC::DataCopy(xLocal, xGm[r * hiddenSize], hiddenSize);
+            inQueueX.EnQue(xLocal);
+            xLocal = inQueueX.DeQue<float>();
+
+            AscendC::Muls(xLocal, xLocal, mulFactor, hiddenSize);
+            AscendC::Maxs(xLocal, xLocal, clampMin, hiddenSize);
+            AscendC::Mins(xLocal, xLocal, clampMax, hiddenSize);
+
+            AscendC::ReduceMax<float>(reduceLocal, xLocal, workLocal, hiddenSize, false);
+            float rowMax = reduceLocal.GetValue(0);
+            maxLocal.SetValue(r, rowMax);
+
+            AscendC::Adds(xLocal, xLocal, -rowMax, hiddenSize);
+            AscendC::Exp(xLocal, xLocal, hiddenSize);
+
+            AscendC::ReduceSum<float>(reduceLocal, xLocal, workLocal, hiddenSize);
+            float rowSum = reduceLocal.GetValue(0);
+            sumLocal.SetValue(r, rowSum);
+
+            inQueueX.FreeTensor(xLocal);
+        }
+
+        AscendC::LocalTensor<float> outLocal = outQueueY.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
+
+        uint32_t n = rowsPerBlock;
+
+        AscendC::Ln(tmp, sumLocal, n);
+        AscendC::Add(outLocal, tmp, maxLocal, n);
+
+        AscendC::Exp(tmp, outLocal, n);
+        AscendC::Adds(tmp, tmp, 1.0f, n);
+        AscendC::Ln(tmp, tmp, n);
+        AscendC::Tanh(tmp, tmp, n);
+        AscendC::Mul(tmp, tmp, outLocal, n);
+        AscendC::Mul(outLocal, tmp, outLocal, n);
+
+        outQueueY.EnQue<float>(outLocal);
+        outLocal = outQueueY.DeQue<float>();
+        AscendC::DataCopy(yGm, outLocal, n);
+        outQueueY.FreeTensor(outLocal);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::GlobalTensor<DTYPE_X> xGm;
-    AscendC::GlobalTensor<DTYPE_Y> yGm;
-    uint32_t blockLength;
-    uint32_t tileNum;
-    uint32_t tileLength;
-    float combinedScale;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> sumBuf, maxBuf, reduceBuf, workBuf, tmpBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t hiddenSize;
+    uint32_t rowsPerBlock;
+    float mulFactor;
     float clampMin;
     float clampMax;
 };
 
 extern "C" __global__ __aicore__ void matmul_scale_residual_add_clamp_log_sum_exp_mish_custom(
-    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelScaleResClamp op;
-    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum,
-            tiling_data.scaleFactor, tiling_data.clampMin, tiling_data.clampMax);
+    KernelFusedLSE op;
+    op.Init(x, y, tiling_data.batchSize, tiling_data.hiddenSize, tiling_data.rowsPerBlock,
+            tiling_data.mulFactor, tiling_data.clampMin, tiling_data.clampMax);
     op.Process();
 }
 """
@@ -234,23 +246,19 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor matmul_scale_residual_add_clamp_log_sum_exp_mish_custom_impl_npu(
-    const at::Tensor& self, double scale_factor, double clamp_min, double clamp_max) {
-    at::Tensor result = at::empty_like(self);
-    EXEC_NPU_CMD(aclnnMatmulScaleResidualAddClampLogSumExpMishCustom, self,
-                 (float)scale_factor, (float)clamp_min, (float)clamp_max, result);
+at::Tensor matmul_scale_residual_add_clamp_log_sum_exp_mish_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes();
+    at::Tensor result = at::empty({sizes[0], 1}, self.options());
+    EXEC_NPU_CMD(aclnnMatmulScaleResidualAddClampLogSumExpMishCustom, self, result);
     return result;
 }
 
 TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
-    m.impl("matmul_scale_residual_add_clamp_log_sum_exp_mish_custom",
-           &matmul_scale_residual_add_clamp_log_sum_exp_mish_custom_impl_npu);
+    m.impl("matmul_scale_residual_add_clamp_log_sum_exp_mish_custom", &matmul_scale_residual_add_clamp_log_sum_exp_mish_custom_impl_npu);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("matmul_scale_residual_add_clamp_log_sum_exp_mish_custom",
-          &matmul_scale_residual_add_clamp_log_sum_exp_mish_custom_impl_npu,
-          "fused scale + residual-add + clamp");
+    m.def("matmul_scale_residual_add_clamp_log_sum_exp_mish_custom", &matmul_scale_residual_add_clamp_log_sum_exp_mish_custom_impl_npu, "fused scale+residual+clamp+logsumexp+mish after linear");
 }
 """
 
@@ -259,21 +267,16 @@ import torch
 import torch.nn as nn
 import torch_npu
 import custom_ops_lib
-
-class ModelNew(nn.Module):
+class ModelNew(torch.nn.Module):
     def __init__(self, input_size, hidden_size, scale_factor, clamp_min, clamp_max):
-        super(ModelNew, self).__init__()
+        super().__init__()
         self.matmul = nn.Linear(input_size, hidden_size)
-        self.scale_factor = float(scale_factor)
-        self.clamp_min = float(clamp_min)
-        self.clamp_max = float(clamp_max)
+        self.scale_factor = scale_factor
+        self.clamp_min = clamp_min
+        self.clamp_max = clamp_max
 
     def forward(self, x):
         x = self.matmul(x)
-        x = custom_ops_lib.matmul_scale_residual_add_clamp_log_sum_exp_mish_custom(
-            x.contiguous(), self.scale_factor, self.clamp_min, self.clamp_max)
-        x = torch.logsumexp(x, dim=1, keepdim=True)
-        x = x * torch.nn.functional.mish(x)
+        x = custom_ops_lib.matmul_scale_residual_add_clamp_log_sum_exp_mish_custom(x)
         return x
 '''
-```

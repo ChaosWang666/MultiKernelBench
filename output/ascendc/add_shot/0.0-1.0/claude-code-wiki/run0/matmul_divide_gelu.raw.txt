@@ -1,5 +1,3 @@
-I found a verified compiled implementation in the project. Let me output the complete kernel code based on this working reference.
-
 project_json_src='''
 [
     {

@@ -1,0 +1,467 @@
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose3dClampMinDivideCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "kernel_size",
+                "type": "int",
+                "param_type": "required"
+            },
+            {
+                "name": "stride",
+                "type": "int",
+                "param_type": "required"
+            },
+            {
+                "name": "padding",
+                "type": "int",
+                "param_type": "required"
+            },
+            {
+                "name": "min_value",
+                "type": "float",
+                "param_type": "required"
+            },
+            {
+                "name": "divisor",
+                "type": "float",
+                "param_type": "required"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose3dClampMinDivideCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, inDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, inHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, inWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, outDepth);
+  TILING_DATA_FIELD_DEF(uint32_t, outHeight);
+  TILING_DATA_FIELD_DEF(uint32_t, outWidth);
+  TILING_DATA_FIELD_DEF(uint32_t, kernelSize);
+  TILING_DATA_FIELD_DEF(uint32_t, stride);
+  TILING_DATA_FIELD_DEF(uint32_t, padding);
+  TILING_DATA_FIELD_DEF(float, minValue);
+  TILING_DATA_FIELD_DEF(float, divisor);
+  TILING_DATA_FIELD_DEF(float, invDivisor);
+  TILING_DATA_FIELD_DEF(uint32_t, totalOutElements);
+  TILING_DATA_FIELD_DEF(uint32_t, coreNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose3dClampMinDivideCustom, ConvTranspose3dClampMinDivideCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose3d_clamp_min_divide_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose3dClampMinDivideCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto wShape = context->GetInputShape(1)->GetOriginShape();
+
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t inChannels = xShape.GetDim(1);
+    uint32_t inDepth = xShape.GetDim(2);
+    uint32_t inHeight = xShape.GetDim(3);
+    uint32_t inWidth = xShape.GetDim(4);
+    uint32_t outChannels = wShape.GetDim(1);
+
+    auto attrs = context->GetAttrs();
+    const int32_t* kernelSizePtr = attrs->GetAttrPointer<int32_t>(0);
+    const int32_t* stridePtr = attrs->GetAttrPointer<int32_t>(1);
+    const int32_t* paddingPtr = attrs->GetAttrPointer<int32_t>(2);
+    const float* minValuePtr = attrs->GetAttrPointer<float>(3);
+    const float* divisorPtr = attrs->GetAttrPointer<float>(4);
+
+    uint32_t kernelSize = *kernelSizePtr;
+    uint32_t stride = *stridePtr;
+    uint32_t padding = *paddingPtr;
+    float minValue = *minValuePtr;
+    float divisor = *divisorPtr;
+
+    uint32_t outDepth = (inDepth - 1) * stride - 2 * padding + kernelSize;
+    uint32_t outHeight = (inHeight - 1) * stride - 2 * padding + kernelSize;
+    uint32_t outWidth = (inWidth - 1) * stride - 2 * padding + kernelSize;
+
+    uint32_t totalOutElements = batchSize * outChannels * outDepth * outHeight * outWidth;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_inDepth(inDepth);
+    tiling.set_inHeight(inHeight);
+    tiling.set_inWidth(inWidth);
+    tiling.set_outDepth(outDepth);
+    tiling.set_outHeight(outHeight);
+    tiling.set_outWidth(outWidth);
+    tiling.set_kernelSize(kernelSize);
+    tiling.set_stride(stride);
+    tiling.set_padding(padding);
+    tiling.set_minValue(minValue);
+    tiling.set_divisor(divisor);
+    tiling.set_invDivisor(1.0f / divisor);
+    tiling.set_totalOutElements(totalOutElements);
+    tiling.set_coreNum(BLOCK_DIM);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class ConvTranspose3dClampMinDivideCustom : public OpDef {
+public:
+    explicit ConvTranspose3dClampMinDivideCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Attr("kernel_size").Int();
+        this->Attr("stride").Int();
+        this->Attr("padding").Int();
+        this->Attr("min_value").Float();
+        this->Attr("divisor").Float();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose3dClampMinDivideCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelConvTranspose3dClampMinDivide {
+public:
+    __aicore__ inline KernelConvTranspose3dClampMinDivide() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t inChannels, uint32_t outChannels,
+                                 uint32_t inDepth, uint32_t inHeight, uint32_t inWidth,
+                                 uint32_t outDepth, uint32_t outHeight, uint32_t outWidth,
+                                 uint32_t kernelSize, uint32_t stride, uint32_t padding,
+                                 float minValue, float invDivisor,
+                                 uint32_t totalOutElements, uint32_t coreNum)
+    {
+        this->batchSize = batchSize;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->inDepth = inDepth;
+        this->inHeight = inHeight;
+        this->inWidth = inWidth;
+        this->outDepth = outDepth;
+        this->outHeight = outHeight;
+        this->outWidth = outWidth;
+        this->kernelSize = kernelSize;
+        this->stride = stride;
+        this->padding = padding;
+        this->minValue = minValue;
+        this->invDivisor = invDivisor;
+        this->totalOutElements = totalOutElements;
+        this->coreNum = coreNum;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x);
+        wGm.SetGlobalBuffer((__gm__ float *)weight);
+        bGm.SetGlobalBuffer((__gm__ float *)bias);
+        yGm.SetGlobalBuffer((__gm__ float *)y);
+    }
+
+    __aicore__ inline void Process()
+    {
+        int32_t blockIdx = static_cast<int32_t>(AscendC::GetBlockIdx());
+        int32_t coreNumInt = static_cast<int32_t>(this->coreNum);
+        int32_t totalInt = static_cast<int32_t>(this->totalOutElements);
+        int32_t perCore = (totalInt + coreNumInt - 1) / coreNumInt;
+        int32_t startIdx = blockIdx * perCore;
+        int32_t endIdx = startIdx + perCore;
+        if (endIdx > totalInt) {
+            endIdx = totalInt;
+        }
+
+        int32_t outChannelsInt = static_cast<int32_t>(this->outChannels);
+        int32_t inChannelsInt = static_cast<int32_t>(this->inChannels);
+        int32_t outDepthInt = static_cast<int32_t>(this->outDepth);
+        int32_t outHeightInt = static_cast<int32_t>(this->outHeight);
+        int32_t outWidthInt = static_cast<int32_t>(this->outWidth);
+        int32_t inDepthInt = static_cast<int32_t>(this->inDepth);
+        int32_t inHeightInt = static_cast<int32_t>(this->inHeight);
+        int32_t inWidthInt = static_cast<int32_t>(this->inWidth);
+        int32_t kernelSizeInt = static_cast<int32_t>(this->kernelSize);
+        int32_t strideInt = static_cast<int32_t>(this->stride);
+        int32_t paddingInt = static_cast<int32_t>(this->padding);
+
+        int32_t outHW = outHeightInt * outWidthInt;
+        int32_t outDHW = outDepthInt * outHW;
+        int32_t outCDHW = outChannelsInt * outDHW;
+
+        int32_t inHW = inHeightInt * inWidthInt;
+        int32_t inDHW = inDepthInt * inHW;
+        int32_t inCDHW = inChannelsInt * inDHW;
+
+        int32_t kernelSq = kernelSizeInt * kernelSizeInt;
+        int32_t kernelCube = kernelSizeInt * kernelSq;
+
+        for (int32_t idx = startIdx; idx < endIdx; idx++) {
+            int32_t ow = idx % outWidthInt;
+            int32_t tmp = idx / outWidthInt;
+            int32_t oh = tmp % outHeightInt;
+            tmp = tmp / outHeightInt;
+            int32_t od = tmp % outDepthInt;
+            tmp = tmp / outDepthInt;
+            int32_t oc = tmp % outChannelsInt;
+            int32_t n = tmp / outChannelsInt;
+
+            float sum = bGm.GetValue(oc);
+
+            int32_t idBase = od + paddingInt;
+            int32_t ihBase = oh + paddingInt;
+            int32_t iwBase = ow + paddingInt;
+
+            for (int32_t ic = 0; ic < inChannelsInt; ic++) {
+                for (int32_t kd = 0; kd < kernelSizeInt; kd++) {
+                    int32_t idNum = idBase - kd;
+                    if (idNum < 0) continue;
+                    if (idNum % strideInt != 0) continue;
+                    int32_t id = idNum / strideInt;
+                    if (id >= inDepthInt) continue;
+
+                    for (int32_t kh = 0; kh < kernelSizeInt; kh++) {
+                        int32_t ihNum = ihBase - kh;
+                        if (ihNum < 0) continue;
+                        if (ihNum % strideInt != 0) continue;
+                        int32_t ih = ihNum / strideInt;
+                        if (ih >= inHeightInt) continue;
+
+                        for (int32_t kw = 0; kw < kernelSizeInt; kw++) {
+                            int32_t iwNum = iwBase - kw;
+                            if (iwNum < 0) continue;
+                            if (iwNum % strideInt != 0) continue;
+                            int32_t iw = iwNum / strideInt;
+                            if (iw >= inWidthInt) continue;
+
+                            int32_t xOffset = n * inCDHW + ic * inDHW + id * inHW + ih * inWidthInt + iw;
+                            int32_t wOffset = ic * outChannelsInt * kernelCube + oc * kernelCube + kd * kernelSq + kh * kernelSizeInt + kw;
+
+                            float xVal = xGm.GetValue(xOffset);
+                            float wVal = wGm.GetValue(wOffset);
+                            sum += xVal * wVal;
+                        }
+                    }
+                }
+            }
+
+            if (sum < this->minValue) {
+                sum = this->minValue;
+            }
+            sum = sum * this->invDivisor;
+
+            yGm.SetValue(idx, sum);
+        }
+    }
+
+private:
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> wGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batchSize;
+    uint32_t inChannels;
+    uint32_t outChannels;
+    uint32_t inDepth;
+    uint32_t inHeight;
+    uint32_t inWidth;
+    uint32_t outDepth;
+    uint32_t outHeight;
+    uint32_t outWidth;
+    uint32_t kernelSize;
+    uint32_t stride;
+    uint32_t padding;
+    float minValue;
+    float invDivisor;
+    uint32_t totalOutElements;
+    uint32_t coreNum;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose3d_clamp_min_divide_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConvTranspose3dClampMinDivide op;
+    op.Init(x, weight, bias, y,
+            tiling_data.batchSize, tiling_data.inChannels, tiling_data.outChannels,
+            tiling_data.inDepth, tiling_data.inHeight, tiling_data.inWidth,
+            tiling_data.outDepth, tiling_data.outHeight, tiling_data.outWidth,
+            tiling_data.kernelSize, tiling_data.stride, tiling_data.padding,
+            tiling_data.minValue, tiling_data.invDivisor,
+            tiling_data.totalOutElements, tiling_data.coreNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose3d_clamp_min_divide_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& weight, const at::Tensor& bias,
+    int64_t kernel_size, int64_t stride, int64_t padding,
+    double min_value, double divisor)
+{
+    auto xSizes = x.sizes();
+    int64_t N = xSizes[0];
+    int64_t inD = xSizes[2];
+    int64_t inH = xSizes[3];
+    int64_t inW = xSizes[4];
+    int64_t outC = weight.size(1);
+    int64_t outD = (inD - 1) * stride - 2 * padding + kernel_size;
+    int64_t outH = (inH - 1) * stride - 2 * padding + kernel_size;
+    int64_t outW = (inW - 1) * stride - 2 * padding + kernel_size;
+
+    at::Tensor result = at::empty({N, outC, outD, outH, outW}, x.options());
+    EXEC_NPU_CMD(aclnnConvTranspose3dClampMinDivideCustom, x, weight, bias,
+                 kernel_size, stride, padding, min_value, divisor, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose3d_clamp_min_divide_custom", &conv_transpose3d_clamp_min_divide_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose3d_clamp_min_divide_custom", &conv_transpose3d_clamp_min_divide_custom_impl_npu,
+          "ConvTranspose3d + ClampMin + Divide custom");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, min_value, divisor):
+        super(ModelNew, self).__init__()
+        conv = nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
+        self.weight = nn.Parameter(conv.weight.detach().clone())
+        self.bias = nn.Parameter(conv.bias.detach().clone())
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.min_value = float(min_value)
+        self.divisor = float(divisor)
+
+    def forward(self, x):
+        return custom_ops_lib.conv_transpose3d_clamp_min_divide_custom(
+            x, self.weight, self.bias,
+            self.kernel_size, self.stride, self.padding,
+            self.min_value, self.divisor)
+'''

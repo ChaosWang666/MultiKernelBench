@@ -1,36 +1,47 @@
-```python
-project_json_src = '''
+project_json_src='''
 [
     {
         "op": "Conv2dGroupNormTanhHardSwishResidualAddLogSumExpCustom",
         "language": "cpp",
         "input_desc": [
             {
-                "name": "x_conv",
-                "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
-            },
-            {
                 "name": "x_norm",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "x_conv",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             }
         ],
         "output_desc": [
             {
                 "name": "z",
                 "param_type": "required",
-                "format": ["ND"],
-                "type": ["float"]
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
             }
         ]
     }
 ]
 '''
 
-host_tiling_src = """
+host_tiling_src="""
 #include "register/tilingdata_base.h"
 
 namespace optiling {
@@ -43,14 +54,14 @@ REGISTER_TILING_DATA_CLASS(Conv2dGroupNormTanhHardSwishResidualAddLogSumExpCusto
 }
 """
 
-host_operator_src = """
+host_operator_src="""
 #include "conv2d_group_norm_tanh_hard_swish_residual_add_log_sum_exp_custom_tiling.h"
 #include "register/op_def_registry.h"
 
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 3969;
+const uint32_t TILE_NUM = 441;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv2dGroupNormTanhHardSwishResidualAddLogSumExpCustomTilingData tiling;
@@ -89,12 +100,12 @@ class Conv2dGroupNormTanhHardSwishResidualAddLogSumExpCustom : public OpDef {
 public:
     explicit Conv2dGroupNormTanhHardSwishResidualAddLogSumExpCustom(const char* name) : OpDef(name)
     {
-        this->Input("x_conv")
+        this->Input("x_norm")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("x_norm")
+        this->Input("x_conv")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
@@ -117,7 +128,7 @@ OP_ADD(Conv2dGroupNormTanhHardSwishResidualAddLogSumExpCustom);
 }
 """
 
-kernel_src = """
+kernel_src="""
 #include "kernel_operator.h"
 
 constexpr int32_t BUFFER_NUM = 2;
@@ -125,22 +136,21 @@ constexpr int32_t BUFFER_NUM = 2;
 class KernelFused {
 public:
     __aicore__ inline KernelFused() {}
-    __aicore__ inline void Init(GM_ADDR x_conv, GM_ADDR x_norm, GM_ADDR z, uint32_t totalLength, uint32_t tileNum)
+    __aicore__ inline void Init(GM_ADDR x_norm, GM_ADDR x_conv, GM_ADDR z, uint32_t totalLength, uint32_t tileNum)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
         this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
 
-        xConvGm.SetGlobalBuffer((__gm__ DTYPE_X_CONV *)x_conv + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         xNormGm.SetGlobalBuffer((__gm__ DTYPE_X_NORM *)x_norm + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        xConvGm.SetGlobalBuffer((__gm__ DTYPE_X_CONV *)x_conv + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
 
-        pipe.InitBuffer(inQueueXConv, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X_CONV));
         pipe.InitBuffer(inQueueXNorm, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X_NORM));
+        pipe.InitBuffer(inQueueXConv, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X_CONV));
         pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
         pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
     }
-
     __aicore__ inline void Process()
     {
         int32_t loopCount = this->tileNum * BUFFER_NUM;
@@ -154,41 +164,30 @@ public:
 private:
     __aicore__ inline void CopyIn(int32_t progress)
     {
-        AscendC::LocalTensor<DTYPE_X_CONV> xConvLocal = inQueueXConv.AllocTensor<DTYPE_X_CONV>();
         AscendC::LocalTensor<DTYPE_X_NORM> xNormLocal = inQueueXNorm.AllocTensor<DTYPE_X_NORM>();
-        AscendC::DataCopy(xConvLocal, xConvGm[progress * this->tileLength], this->tileLength);
+        AscendC::LocalTensor<DTYPE_X_CONV> xConvLocal = inQueueXConv.AllocTensor<DTYPE_X_CONV>();
         AscendC::DataCopy(xNormLocal, xNormGm[progress * this->tileLength], this->tileLength);
-        inQueueXConv.EnQue(xConvLocal);
+        AscendC::DataCopy(xConvLocal, xConvGm[progress * this->tileLength], this->tileLength);
         inQueueXNorm.EnQue(xNormLocal);
+        inQueueXConv.EnQue(xConvLocal);
     }
-
     __aicore__ inline void Compute(int32_t progress)
     {
-        AscendC::LocalTensor<DTYPE_X_CONV> xConvLocal = inQueueXConv.DeQue<DTYPE_X_CONV>();
         AscendC::LocalTensor<DTYPE_X_NORM> xNormLocal = inQueueXNorm.DeQue<DTYPE_X_NORM>();
+        AscendC::LocalTensor<DTYPE_X_CONV> xConvLocal = inQueueXConv.DeQue<DTYPE_X_CONV>();
         AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+        AscendC::LocalTensor<float> tmp = tmpBuf.Get<float>();
 
-        // t = tanh(x_norm)
-        AscendC::Tanh(xNormLocal, xNormLocal, this->tileLength);
-        // temp = t + 3
-        AscendC::Adds(tmpLocal, xNormLocal, (float)3.0f, this->tileLength);
-        // temp = max(temp, 0)
-        AscendC::Maxs(tmpLocal, tmpLocal, (float)0.0f, this->tileLength);
-        // temp = min(temp, 6)
-        AscendC::Mins(tmpLocal, tmpLocal, (float)6.0f, this->tileLength);
-        // temp = temp / 6
-        AscendC::Muls(tmpLocal, tmpLocal, (float)(1.0f / 6.0f), this->tileLength);
-        // h = t * temp  (hardswish(t))
-        AscendC::Mul(tmpLocal, xNormLocal, tmpLocal, this->tileLength);
-        // z = x_conv + h
-        AscendC::Add(zLocal, xConvLocal, tmpLocal, this->tileLength);
+        AscendC::Tanh(tmp, xNormLocal, this->tileLength);
+        AscendC::Adds(zLocal, tmp, (float)3.0f, this->tileLength);
+        AscendC::Mul(zLocal, tmp, zLocal, this->tileLength);
+        AscendC::Muls(zLocal, zLocal, (float)(1.0f / 6.0f), this->tileLength);
+        AscendC::Add(zLocal, zLocal, xConvLocal, this->tileLength);
 
         outQueueZ.EnQue<DTYPE_Z>(zLocal);
-        inQueueXConv.FreeTensor(xConvLocal);
         inQueueXNorm.FreeTensor(xNormLocal);
+        inQueueXConv.FreeTensor(xConvLocal);
     }
-
     __aicore__ inline void CopyOut(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
@@ -198,34 +197,34 @@ private:
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueXConv, inQueueXNorm;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueXNorm, inQueueXConv;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
     AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
-    AscendC::GlobalTensor<DTYPE_X_CONV> xConvGm;
     AscendC::GlobalTensor<DTYPE_X_NORM> xNormGm;
+    AscendC::GlobalTensor<DTYPE_X_CONV> xConvGm;
     AscendC::GlobalTensor<DTYPE_Z> zGm;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
 };
 
-extern "C" __global__ __aicore__ void conv2d_group_norm_tanh_hard_swish_residual_add_log_sum_exp_custom(GM_ADDR x_conv, GM_ADDR x_norm, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv2d_group_norm_tanh_hard_swish_residual_add_log_sum_exp_custom(GM_ADDR x_norm, GM_ADDR x_conv, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelFused op;
-    op.Init(x_conv, x_norm, z, tiling_data.totalLength, tiling_data.tileNum);
+    op.Init(x_norm, x_conv, z, tiling_data.totalLength, tiling_data.tileNum);
     op.Process();
 }
 """
 
-python_bind_src = """
+python_bind_src="""
 #include <torch/library.h>
 #include <torch/csrc/autograd/custom_function.h>
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv2d_group_norm_tanh_hard_swish_residual_add_log_sum_exp_custom_impl_npu(const at::Tensor& x_conv, const at::Tensor& x_norm) {
-    at::Tensor result = at::empty_like(x_conv);
-    EXEC_NPU_CMD(aclnnConv2dGroupNormTanhHardSwishResidualAddLogSumExpCustom, x_conv, x_norm, result);
+at::Tensor conv2d_group_norm_tanh_hard_swish_residual_add_log_sum_exp_custom_impl_npu(const at::Tensor& x_norm, const at::Tensor& x_conv) {
+    at::Tensor result = at::empty_like(x_norm);
+    EXEC_NPU_CMD(aclnnConv2dGroupNormTanhHardSwishResidualAddLogSumExpCustom, x_norm, x_conv, result);
     return result;
 }
 
@@ -234,16 +233,15 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv2d_group_norm_tanh_hard_swish_residual_add_log_sum_exp_custom", &conv2d_group_norm_tanh_hard_swish_residual_add_log_sum_exp_custom_impl_npu, "Fused tanh+hardswish+residual");
+    m.def("conv2d_group_norm_tanh_hard_swish_residual_add_log_sum_exp_custom", &conv2d_group_norm_tanh_hard_swish_residual_add_log_sum_exp_custom_impl_npu, "fused tanh+hardswish+residual");
 }
 """
 
-model_src = '''
+model_src='''
 import torch
 import torch.nn as nn
 import torch_npu
 import custom_ops_lib
-
 
 class ModelNew(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, groups, eps=1e-5):
@@ -255,9 +253,8 @@ class ModelNew(nn.Module):
         x_conv = self.conv(x)
         x_norm = self.group_norm(x_conv)
         x_res = custom_ops_lib.conv2d_group_norm_tanh_hard_swish_residual_add_log_sum_exp_custom(
-            x_conv.contiguous(), x_norm.contiguous()
+            x_norm.contiguous(), x_conv.contiguous()
         )
         x_logsumexp = torch.logsumexp(x_res, dim=1, keepdim=True)
         return x_logsumexp
 '''
-```

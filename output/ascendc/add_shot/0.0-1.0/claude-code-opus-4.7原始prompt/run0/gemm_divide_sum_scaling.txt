@@ -1,0 +1,271 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "GemmDivideSumScalingCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "v",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(GemmDivideSumScalingCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, rowsPerBlock);
+  TILING_DATA_FIELD_DEF(uint32_t, innerSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(GemmDivideSumScalingCustom, GemmDivideSumScalingCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "gemm_divide_sum_scaling_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_NUM = 8;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    GemmDivideSumScalingCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t innerSize = xShape.GetDim(1);
+    uint32_t rowsPerBlock = batchSize / BLOCK_DIM;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_rowsPerBlock(rowsPerBlock);
+    tiling.set_innerSize(innerSize);
+    tiling.set_tileNum(TILE_NUM);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(1);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class GemmDivideSumScalingCustom : public OpDef {
+public:
+    explicit GemmDivideSumScalingCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("v")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(GemmDivideSumScalingCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelGemmDivideSumScaling {
+public:
+    __aicore__ inline KernelGemmDivideSumScaling() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR v, GM_ADDR y,
+                                 uint32_t rowsPerBlock, uint32_t innerSize, uint32_t tileNum)
+    {
+        this->rowsPerBlock = rowsPerBlock;
+        this->innerSize = innerSize;
+        this->tileNum = tileNum;
+        this->tileLength = innerSize / tileNum;
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X*)x + AscendC::GetBlockIdx() * rowsPerBlock * innerSize,
+                            rowsPerBlock * innerSize);
+        vGm.SetGlobalBuffer((__gm__ DTYPE_V*)v, innerSize);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y*)y + AscendC::GetBlockIdx() * rowsPerBlock,
+                            rowsPerBlock);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(inQueueV, BUFFER_NUM, this->tileLength * sizeof(DTYPE_V));
+        pipe.InitBuffer(accumBuf, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(reduceBuf, 32);
+        uint32_t yBufSize = ((this->rowsPerBlock * sizeof(DTYPE_Y) + 31) / 32) * 32;
+        pipe.InitBuffer(outQueueY, 1, yBufSize);
+    }
+
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+
+        for (uint32_t row = 0; row < rowsPerBlock; row++) {
+            AscendC::LocalTensor<DTYPE_Y> accum = accumBuf.Get<DTYPE_Y>();
+            AscendC::Duplicate<DTYPE_Y>(accum, (DTYPE_Y)0, this->tileLength);
+
+            for (uint32_t tile = 0; tile < this->tileNum; tile++) {
+                CopyIn(row, tile);
+                Compute(accum);
+            }
+
+            AscendC::LocalTensor<DTYPE_Y> reduceDst = reduceBuf.Get<DTYPE_Y>();
+            AscendC::LocalTensor<DTYPE_Y> reduceWork = tmpBuf.Get<DTYPE_Y>();
+            AscendC::ReduceSum<DTYPE_Y>(reduceDst, accum, reduceWork, this->tileLength);
+            DTYPE_Y result = reduceDst.GetValue(0);
+            yLocal.SetValue(row, result);
+        }
+
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
+        AscendC::LocalTensor<DTYPE_Y> yOut = outQueueY.DeQue<DTYPE_Y>();
+        uint32_t outCount = ((this->rowsPerBlock + 7) / 8) * 8;
+        AscendC::DataCopy(yGm, yOut, outCount);
+        outQueueY.FreeTensor(yOut);
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint32_t row, uint32_t tile)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_V> vLocal = inQueueV.AllocTensor<DTYPE_V>();
+        AscendC::DataCopy(xLocal, xGm[row * this->innerSize + tile * this->tileLength], this->tileLength);
+        AscendC::DataCopy(vLocal, vGm[tile * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+        inQueueV.EnQue(vLocal);
+    }
+
+    __aicore__ inline void Compute(AscendC::LocalTensor<DTYPE_Y> accum)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_V> vLocal = inQueueV.DeQue<DTYPE_V>();
+        AscendC::LocalTensor<DTYPE_Y> tmp = tmpBuf.Get<DTYPE_Y>();
+        AscendC::Mul(tmp, xLocal, vLocal, this->tileLength);
+        AscendC::Add(accum, accum, tmp, this->tileLength);
+        inQueueX.FreeTensor(xLocal);
+        inQueueV.FreeTensor(vLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueV;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> accumBuf, tmpBuf, reduceBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_V> vGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    uint32_t rowsPerBlock;
+    uint32_t innerSize;
+    uint32_t tileNum;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void gemm_divide_sum_scaling_custom(GM_ADDR x, GM_ADDR v, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGemmDivideSumScaling op;
+    op.Init(x, v, y, tiling_data.rowsPerBlock, tiling_data.innerSize, tiling_data.tileNum);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor gemm_divide_sum_scaling_custom_impl_npu(const at::Tensor& x, const at::Tensor& v) {
+    at::Tensor result = at::empty({x.size(0)}, x.options());
+    EXEC_NPU_CMD(aclnnGemmDivideSumScalingCustom, x, v, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("gemm_divide_sum_scaling_custom", &gemm_divide_sum_scaling_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("gemm_divide_sum_scaling_custom", &gemm_divide_sum_scaling_custom_impl_npu, "fused gemm-divide-sum-scaling");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, input_size, hidden_size, scaling_factor):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(hidden_size, input_size))
+        self.scaling_factor = scaling_factor
+        self._v_cache = None
+
+    def forward(self, x):
+        if self._v_cache is None or self._v_cache.device != x.device:
+            with torch.no_grad():
+                self._v_cache = (self.weight.sum(dim=0) * (self.scaling_factor / 2.0)).contiguous()
+        y = custom_ops_lib.gemm_divide_sum_scaling_custom(x, self._v_cache)
+        return y.view(-1, 1)
+'''
+```

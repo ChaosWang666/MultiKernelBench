@@ -1,4 +1,3 @@
-```python
 project_json_src='''
 [
     {
@@ -52,10 +51,9 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 16;
+const uint32_t TILE_NUM = 289;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
-
     Convtranspose2dBatchnormTanhMaxpoolGroupnormCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
     context->SetBlockDim(BLOCK_DIM);
@@ -108,7 +106,6 @@ public:
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
-
     }
 };
 
@@ -121,13 +118,12 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelTanh {
+class KernelTanhFused {
 public:
-    __aicore__ inline KernelTanh() {}
+    __aicore__ inline KernelTanhFused() {}
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
     {
-        uint32_t blockNum = AscendC::GetBlockNum();
-        this->blockLength = totalLength / blockNum;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
         this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
 
@@ -181,7 +177,7 @@ private:
 
 extern "C" __global__ __aicore__ void convtranspose2d_batchnorm_tanh_maxpool_groupnorm_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelTanh op;
+    KernelTanhFused op;
     op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum);
     op.Process();
 }
@@ -204,7 +200,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("convtranspose2d_batchnorm_tanh_maxpool_groupnorm_custom", &convtranspose2d_batchnorm_tanh_maxpool_groupnorm_custom_impl_npu, "custom tanh on NPU");
+    m.def("convtranspose2d_batchnorm_tanh_maxpool_groupnorm_custom", &convtranspose2d_batchnorm_tanh_maxpool_groupnorm_custom_impl_npu, "fused tanh custom op");
 }
 """
 
@@ -230,4 +226,3 @@ class ModelNew(nn.Module):
         x = self.group_norm(x)
         return x
 '''
-```

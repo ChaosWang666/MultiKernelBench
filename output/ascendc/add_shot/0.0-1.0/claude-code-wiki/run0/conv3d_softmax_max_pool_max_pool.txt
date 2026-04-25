@@ -36,9 +36,7 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv3dSoftmaxMaxPoolMaxPoolCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
-  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
-  TILING_DATA_FIELD_DEF(uint32_t, rowLength);
+  TILING_DATA_FIELD_DEF(uint32_t, batchesPerCore);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv3dSoftmaxMaxPoolMaxPoolCustom, Conv3dSoftmaxMaxPoolMaxPoolCustomTilingData)
@@ -49,19 +47,25 @@ host_operator_src="""
 #include "conv3d_softmax_max_pool_max_pool_custom_tiling.h"
 #include "register/op_def_registry.h"
 
-namespace optiling {
-const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 100;
 
+namespace optiling {
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv3dSoftmaxMaxPoolMaxPoolCustomTilingData tiling;
-    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
-    uint32_t rowLength = context->GetInputShape(0)->GetOriginShape().GetDim(1);
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_totalLength(totalLength);
-    tiling.set_tileNum(TILE_NUM);
-    tiling.set_rowLength(rowLength);
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = shape.GetDim(0);
+
+    uint32_t blockDim = 16;
+    if (N < blockDim) {
+        blockDim = N;
+    }
+    while (blockDim > 1 && (N % blockDim) != 0) {
+        blockDim--;
+    }
+    uint32_t batchesPerCore = N / blockDim;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_batchesPerCore(batchesPerCore);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -70,12 +74,27 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
+
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
-    *y_shape = *x_shape;
+    y_shape->SetDimNum(5);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, x_shape->GetDim(1));
+    int64_t Ddim = x_shape->GetDim(2);
+    int64_t Hdim = x_shape->GetDim(3);
+    int64_t Wdim = x_shape->GetDim(4);
+    int64_t D1 = (Ddim - 2) / 2 + 1;
+    int64_t D2 = (D1 - 2) / 2 + 1;
+    int64_t H1 = (Hdim - 2) / 2 + 1;
+    int64_t H2 = (H1 - 2) / 2 + 1;
+    int64_t W1 = (Wdim - 2) / 2 + 1;
+    int64_t W2 = (W1 - 2) / 2 + 1;
+    y_shape->SetDim(2, D2);
+    y_shape->SetDim(3, H2);
+    y_shape->SetDim(4, W2);
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -85,6 +104,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class Conv3dSoftmaxMaxPoolMaxPoolCustom : public OpDef {
@@ -117,93 +137,159 @@ OP_ADD(Conv3dSoftmaxMaxPoolMaxPoolCustom);
 kernel_src="""
 #include "kernel_operator.h"
 
-constexpr int32_t BUFFER_NUM = 2;
-
-class KernelSoftmax {
+class KernelConv3dSoftmaxMaxPoolMaxPool {
 public:
-    __aicore__ inline KernelSoftmax() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum, uint32_t rowLength)
-    {
-        this->blockLength = totalLength / AscendC::GetBlockNum();
-        this->tileNum = tileNum;
-        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
-        this->rowLength = rowLength;
-        this->tileRows = this->tileLength / rowLength;
+    static constexpr uint32_t C = 16;
+    static constexpr uint32_t D = 14;
+    static constexpr uint32_t H = 30;
+    static constexpr uint32_t W = 30;
+    static constexpr uint32_t OD = 3;
+    static constexpr uint32_t OH = 7;
+    static constexpr uint32_t OW = 7;
+    static constexpr uint32_t PD = 4;
+    static constexpr uint32_t PH = 4;
+    static constexpr uint32_t PW = 4;
+    static constexpr uint32_t TILE_SPATIAL = PD * PH * W;
+    static constexpr uint32_t TILE_SIZE = C * TILE_SPATIAL;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ float *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+    __aicore__ inline KernelConv3dSoftmaxMaxPoolMaxPool() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchesPerCore)
+    {
+        this->batchesPerCore = batchesPerCore;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint64_t inBatchStride = (uint64_t)C * D * H * W;
+        uint64_t outBatchStride = (uint64_t)C * OD * OH * OW;
+        uint64_t inStart = (uint64_t)blockIdx * batchesPerCore * inBatchStride;
+        uint64_t outStart = (uint64_t)blockIdx * batchesPerCore * outBatchStride;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x + inStart, (uint64_t)batchesPerCore * inBatchStride);
+        yGm.SetGlobalBuffer((__gm__ float*)y + outStart, (uint64_t)batchesPerCore * outBatchStride);
+
+        pipe.InitBuffer(tileBuf, TILE_SIZE * sizeof(float));
+        pipe.InitBuffer(redBuf, TILE_SPATIAL * sizeof(float));
+        pipe.InitBuffer(ptAllBuf, C * PH * W * sizeof(float));
+        pipe.InitBuffer(outBuf, C * OW * sizeof(float));
     }
+
     __aicore__ inline void Process()
     {
-        int32_t loopCount = this->tileNum * BUFFER_NUM;
-        for (int32_t i = 0; i < loopCount; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
-        }
-    }
+        AscendC::LocalTensor<float> tile = tileBuf.Get<float>();
+        AscendC::LocalTensor<float> red = redBuf.Get<float>();
+        AscendC::LocalTensor<float> pt = ptAllBuf.Get<float>();
+        AscendC::LocalTensor<float> out = outBuf.Get<float>();
 
-private:
-    __aicore__ inline void CopyIn(int32_t progress)
-    {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
-        inQueueX.EnQue(xLocal);
-    }
-    __aicore__ inline void Compute(int32_t progress)
-    {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+        for (uint32_t b = 0; b < batchesPerCore; b++) {
+            for (uint32_t od = 0; od < OD; od++) {
+                for (uint32_t oh = 0; oh < OH; oh++) {
+                    // Phase 1: Load tile (C=16, PD=4, PH*W=120) into UB
+                    for (uint32_t c = 0; c < C; c++) {
+                        for (uint32_t dd = 0; dd < PD; dd++) {
+                            uint64_t srcOffset = (uint64_t)b * C * D * H * W
+                                               + (uint64_t)c * D * H * W
+                                               + (uint64_t)(od * 4 + dd) * H * W
+                                               + (uint64_t)(oh * 4) * W;
+                            uint32_t dstOffset = c * TILE_SPATIAL + dd * PH * W;
+                            AscendC::DataCopyExtParams copyParams{1, (uint32_t)(PH * W * sizeof(float)), 0, 0, 0};
+                            AscendC::DataCopyPadExtParams<float> padParams{false, 0, 0, 0.0f};
+                            AscendC::DataCopyPad(tile[dstOffset], xGm[srcOffset], copyParams, padParams);
+                        }
+                    }
 
-        for (uint32_t r = 0; r < this->tileRows; r++) {
-            uint32_t off = r * this->rowLength;
+                    AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
 
-            float maxVal = xLocal.GetValue(off);
-            for (uint32_t j = 1; j < this->rowLength; j++) {
-                float v = xLocal.GetValue(off + j);
-                if (v > maxVal) maxVal = v;
+                    // Phase 2a: Softmax along channel dim
+                    AscendC::Max(red, tile[0], tile[TILE_SPATIAL], TILE_SPATIAL);
+                    for (uint32_t c = 2; c < C; c++) {
+                        AscendC::Max(red, red, tile[c * TILE_SPATIAL], TILE_SPATIAL);
+                    }
+                    for (uint32_t c = 0; c < C; c++) {
+                        AscendC::Sub(tile[c * TILE_SPATIAL], tile[c * TILE_SPATIAL], red, TILE_SPATIAL);
+                        AscendC::Exp(tile[c * TILE_SPATIAL], tile[c * TILE_SPATIAL], TILE_SPATIAL);
+                    }
+                    AscendC::Add(red, tile[0], tile[TILE_SPATIAL], TILE_SPATIAL);
+                    for (uint32_t c = 2; c < C; c++) {
+                        AscendC::Add(red, red, tile[c * TILE_SPATIAL], TILE_SPATIAL);
+                    }
+                    AscendC::Reciprocal(red, red, TILE_SPATIAL);
+                    for (uint32_t c = 0; c < C; c++) {
+                        AscendC::Mul(tile[c * TILE_SPATIAL], tile[c * TILE_SPATIAL], red, TILE_SPATIAL);
+                    }
+
+                    // Phase 2b: D-dim max pool (reduce 4 D-slices per channel)
+                    for (uint32_t c = 0; c < C; c++) {
+                        AscendC::Max(pt[c * PH * W],
+                                     tile[c * TILE_SPATIAL + 0 * PH * W],
+                                     tile[c * TILE_SPATIAL + 1 * PH * W],
+                                     PH * W);
+                        AscendC::Max(pt[c * PH * W],
+                                     pt[c * PH * W],
+                                     tile[c * TILE_SPATIAL + 2 * PH * W],
+                                     PH * W);
+                        AscendC::Max(pt[c * PH * W],
+                                     pt[c * PH * W],
+                                     tile[c * TILE_SPATIAL + 3 * PH * W],
+                                     PH * W);
+                    }
+
+                    AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+                    AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+
+                    // Phase 3: Scalar H,W max-pool (4x4 window over pt[c*120..c*120+120])
+                    for (uint32_t c = 0; c < C; c++) {
+                        for (uint32_t ow = 0; ow < OW; ow++) {
+                            float maxVal = pt.GetValue(c * PH * W + 0 * W + ow * 4);
+                            for (uint32_t hh = 0; hh < PH; hh++) {
+                                for (uint32_t ww = 0; ww < PW; ww++) {
+                                    uint32_t idx = c * PH * W + hh * W + ow * 4 + ww;
+                                    float v = pt.GetValue(idx);
+                                    maxVal = (v > maxVal) ? v : maxVal;
+                                }
+                            }
+                            out.SetValue(c * OW + ow, maxVal);
+                        }
+                    }
+
+                    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+                    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+
+                    // Phase 4: Store output strips
+                    for (uint32_t c = 0; c < C; c++) {
+                        uint64_t dstOffset = (uint64_t)b * C * OD * OH * OW
+                                           + (uint64_t)c * OD * OH * OW
+                                           + (uint64_t)od * OH * OW
+                                           + (uint64_t)oh * OW;
+                        AscendC::DataCopyExtParams outParams{1, (uint32_t)(OW * sizeof(float)), 0, 0, 0};
+                        AscendC::DataCopyPad(yGm[dstOffset], out[c * OW], outParams);
+                    }
+
+                    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+                    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+                }
             }
-
-            AscendC::Adds(yLocal[off], xLocal[off], -maxVal, this->rowLength);
-            AscendC::Exp(yLocal[off], yLocal[off], this->rowLength);
-
-            float sumVal = 0.0f;
-            for (uint32_t j = 0; j < this->rowLength; j++) {
-                sumVal += yLocal.GetValue(off + j);
-            }
-
-            AscendC::Muls(yLocal[off], yLocal[off], 1.0f / sumVal, this->rowLength);
         }
-
-        outQueueY.EnQue<float>(yLocal);
-        inQueueX.FreeTensor(xLocal);
-    }
-    __aicore__ inline void CopyOut(int32_t progress)
-    {
-        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
-        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
-        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tileBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> redBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> ptAllBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> outBuf;
     AscendC::GlobalTensor<float> xGm;
     AscendC::GlobalTensor<float> yGm;
-    uint32_t blockLength;
-    uint32_t tileNum;
-    uint32_t tileLength;
-    uint32_t rowLength;
-    uint32_t tileRows;
+    uint32_t batchesPerCore;
 };
 
-extern "C" __global__ __aicore__ void conv3d_softmax_max_pool_max_pool_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv3d_softmax_max_pool_max_pool_custom(
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
     GET_TILING_DATA(tiling_data, tiling);
-    KernelSoftmax op;
-    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum, tiling_data.rowLength);
+    KernelConv3dSoftmaxMaxPoolMaxPool op;
+    op.Init(x, y, tiling_data.batchesPerCore);
     op.Process();
 }
 """
@@ -214,9 +300,19 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv3d_softmax_max_pool_max_pool_custom_impl_npu(const at::Tensor& x) {
-    at::Tensor result = at::empty_like(x);
-    EXEC_NPU_CMD(aclnnConv3dSoftmaxMaxPoolMaxPoolCustom, x, result);
+at::Tensor conv3d_softmax_max_pool_max_pool_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes().vec();
+    int64_t D1 = (sizes[2] - 2) / 2 + 1;
+    int64_t D2 = (D1 - 2) / 2 + 1;
+    int64_t H1 = (sizes[3] - 2) / 2 + 1;
+    int64_t H2 = (H1 - 2) / 2 + 1;
+    int64_t W1 = (sizes[4] - 2) / 2 + 1;
+    int64_t W2 = (W1 - 2) / 2 + 1;
+    sizes[2] = D2;
+    sizes[3] = H2;
+    sizes[4] = W2;
+    at::Tensor result = at::empty(sizes, self.options());
+    EXEC_NPU_CMD(aclnnConv3dSoftmaxMaxPoolMaxPoolCustom, self, result);
     return result;
 }
 
@@ -225,7 +321,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv3d_softmax_max_pool_max_pool_custom", &conv3d_softmax_max_pool_max_pool_custom_impl_npu, "channel-wise softmax");
+    m.def("conv3d_softmax_max_pool_max_pool_custom", &conv3d_softmax_max_pool_max_pool_custom_impl_npu, "fused softmax + 2x MaxPool3d(k=2,s=2)");
 }
 """
 
@@ -234,20 +330,13 @@ import torch
 import torch_npu
 import custom_ops_lib
 
+
 class ModelNew(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, pool_kernel_size):
         super(ModelNew, self).__init__()
         self.conv = torch.nn.Conv3d(in_channels, out_channels, kernel_size)
-        self.pool1 = torch.nn.MaxPool3d(pool_kernel_size)
-        self.pool2 = torch.nn.MaxPool3d(pool_kernel_size)
 
     def forward(self, x):
-        x = self.conv(x)
-        B, C, D, H, W = x.shape
-        x = x.permute(0, 2, 3, 4, 1).contiguous().view(-1, C)
-        x = custom_ops_lib.conv3d_softmax_max_pool_max_pool_custom(x)
-        x = x.view(B, D, H, W, C).permute(0, 4, 1, 2, 3).contiguous()
-        x = self.pool1(x)
-        x = self.pool2(x)
-        return x
+        x = self.conv(x).contiguous()
+        return custom_ops_lib.conv3d_softmax_max_pool_max_pool_custom(x)
 '''

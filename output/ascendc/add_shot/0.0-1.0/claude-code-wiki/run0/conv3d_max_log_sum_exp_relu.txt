@@ -36,14 +36,8 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv3dMaxLogSumExpReluCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
-  TILING_DATA_FIELD_DEF(uint32_t, channels);
-  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
-  TILING_DATA_FIELD_DEF(uint32_t, coresPerBatch);
-  TILING_DATA_FIELD_DEF(uint32_t, spatialPerCore);
-  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
-  TILING_DATA_FIELD_DEF(uint32_t, tileCount);
-  TILING_DATA_FIELD_DEF(uint32_t, lastTileLength);
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(Conv3dMaxLogSumExpReluCustom, Conv3dMaxLogSumExpReluCustomTilingData)
@@ -54,49 +48,17 @@ host_operator_src="""
 #include "conv3d_max_log_sum_exp_relu_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
+const uint32_t BLOCK_DIM = 8;
+const uint32_t TILE_NUM = 4;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv3dMaxLogSumExpReluCustomTilingData tiling;
-    auto xShape = context->GetInputShape(0)->GetOriginShape();
-    uint32_t B = xShape.GetDim(0);
-    uint32_t C = xShape.GetDim(1);
-    uint32_t spatialSize = 1;
-    for (uint32_t i = 2; i < xShape.GetDimNum(); i++) {
-        spatialSize *= xShape.GetDim(i);
-    }
-
-    uint32_t coresPerBatch = 8;
-    if (spatialSize < coresPerBatch * 8) {
-        coresPerBatch = 1;
-    }
-    uint32_t blockDim = B * coresPerBatch;
-    uint32_t spatialPerCore = (spatialSize / coresPerBatch / 8) * 8;
-
-    uint32_t tileLength = 256;
-    if (spatialPerCore < tileLength) {
-        tileLength = spatialPerCore;
-    }
-    uint32_t tileCount = 0;
-    uint32_t lastTileLength = 0;
-    if (tileLength > 0) {
-        tileCount = spatialPerCore / tileLength;
-        lastTileLength = spatialPerCore - tileCount * tileLength;
-        if (lastTileLength > 0) {
-            lastTileLength = (lastTileLength + 7) / 8 * 8;
-        }
-    }
-
-    context->SetBlockDim(blockDim);
-    tiling.set_batchSize(B);
-    tiling.set_channels(C);
-    tiling.set_spatialSize(spatialSize);
-    tiling.set_coresPerBatch(coresPerBatch);
-    tiling.set_spatialPerCore(spatialPerCore);
-    tiling.set_tileLength(tileLength);
-    tiling.set_tileCount(tileCount);
-    tiling.set_lastTileLength(lastTileLength);
-
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(TILE_NUM);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -105,13 +67,13 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 }
 }
 
+
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
     gert::Shape* y_shape = context->GetOutputShape(0);
     *y_shape = *x_shape;
-    y_shape->SetDim(1, 1);
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -121,6 +83,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
+
 
 namespace ops {
 class Conv3dMaxLogSumExpReluCustom : public OpDef {
@@ -155,122 +118,67 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConv3dMaxLogSumExpRelu {
+class KernelReluFinal {
 public:
-    __aicore__ inline KernelConv3dMaxLogSumExpRelu() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
-                                 uint32_t batchSize, uint32_t channels,
-                                 uint32_t spatialSize, uint32_t coresPerBatch,
-                                 uint32_t spatialPerCore, uint32_t tileLength,
-                                 uint32_t tileCount, uint32_t lastTileLength)
+    __aicore__ inline KernelReluFinal() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
     {
-        this->channels = channels;
-        this->spatialSize = spatialSize;
-        this->tileLength = tileLength;
-        this->tileCount = tileCount;
-        this->lastTileLength = lastTileLength;
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
 
-        uint32_t blockIdx = AscendC::GetBlockIdx();
-        this->batchIdx = blockIdx / coresPerBatch;
-        uint32_t coreInBatch = blockIdx % coresPerBatch;
-        this->spatialStart = coreInBatch * spatialPerCore;
-
-        xGm.SetGlobalBuffer((__gm__ float*)x, (uint64_t)batchSize * channels * spatialSize);
-        yGm.SetGlobalBuffer((__gm__ float*)y, (uint64_t)batchSize * spatialSize);
-
-        uint32_t maxBufLen = tileLength;
-        if (lastTileLength > maxBufLen) {
-            maxBufLen = lastTileLength;
-        }
-        uint32_t bufBytes = maxBufLen * sizeof(float);
-        pipe.InitBuffer(inQueue, BUFFER_NUM, bufBytes);
-        pipe.InitBuffer(outQueue, BUFFER_NUM, bufBytes);
-        pipe.InitBuffer(maxBuf, bufBytes);
-        pipe.InitBuffer(sumBuf, bufBytes);
-        pipe.InitBuffer(tmpBuf, bufBytes);
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
     }
-
     __aicore__ inline void Process()
     {
-        for (uint32_t t = 0; t < tileCount; t++) {
-            ProcessTile(t * tileLength, tileLength);
-        }
-        if (lastTileLength > 0) {
-            ProcessTile(tileCount * tileLength, lastTileLength);
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
         }
     }
 
 private:
-    __aicore__ inline void ProcessTile(uint32_t localOffset, uint32_t len)
+    __aicore__ inline void CopyIn(int32_t progress)
     {
-        uint32_t spatialOff = spatialStart + localOffset;
-        uint64_t batchXBase = (uint64_t)batchIdx * channels * spatialSize;
-
-        AscendC::LocalTensor<float> maxLocal = maxBuf.Get<float>();
-        AscendC::LocalTensor<float> sumLocal = sumBuf.Get<float>();
-        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
-
-        AscendC::Duplicate<float>(maxLocal, -3.4e38f, len);
-
-        for (uint32_t c = 0; c < channels; c++) {
-            uint64_t gmOff = batchXBase + (uint64_t)c * spatialSize + spatialOff;
-            AscendC::LocalTensor<float> xLocal = inQueue.AllocTensor<float>();
-            AscendC::DataCopy(xLocal, xGm[gmOff], len);
-            inQueue.EnQue(xLocal);
-            AscendC::LocalTensor<float> xIn = inQueue.DeQue<float>();
-            AscendC::Max(maxLocal, maxLocal, xIn, len);
-            inQueue.FreeTensor(xIn);
-        }
-
-        AscendC::Duplicate<float>(sumLocal, 0.0f, len);
-
-        for (uint32_t c = 0; c < channels; c++) {
-            uint64_t gmOff = batchXBase + (uint64_t)c * spatialSize + spatialOff;
-            AscendC::LocalTensor<float> xLocal = inQueue.AllocTensor<float>();
-            AscendC::DataCopy(xLocal, xGm[gmOff], len);
-            inQueue.EnQue(xLocal);
-            AscendC::LocalTensor<float> xIn = inQueue.DeQue<float>();
-            AscendC::Sub(tmpLocal, xIn, maxLocal, len);
-            AscendC::Exp(tmpLocal, tmpLocal, len);
-            AscendC::Add(sumLocal, sumLocal, tmpLocal, len);
-            inQueue.FreeTensor(xIn);
-        }
-
-        AscendC::LocalTensor<float> outLocal = outQueue.AllocTensor<float>();
-        AscendC::Ln(sumLocal, sumLocal, len);
-        AscendC::Add(outLocal, sumLocal, maxLocal, len);
-        AscendC::Maxs(outLocal, outLocal, 0.0f, len);
-        outQueue.EnQue<float>(outLocal);
-
-        AscendC::LocalTensor<float> outDq = outQueue.DeQue<float>();
-        uint64_t yOff = (uint64_t)batchIdx * spatialSize + spatialOff;
-        AscendC::DataCopy(yGm[yOff], outDq, len);
-        outQueue.FreeTensor(outDq);
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::Relu(yLocal, xLocal, this->tileLength);
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> maxBuf, sumBuf, tmpBuf;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
-    uint32_t channels;
-    uint32_t spatialSize;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    uint32_t blockLength;
+    uint32_t tileNum;
     uint32_t tileLength;
-    uint32_t tileCount;
-    uint32_t lastTileLength;
-    uint32_t batchIdx;
-    uint32_t spatialStart;
 };
 
 extern "C" __global__ __aicore__ void conv3d_max_log_sum_exp_relu_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConv3dMaxLogSumExpRelu op;
-    op.Init(x, y, tiling_data.batchSize, tiling_data.channels,
-            tiling_data.spatialSize, tiling_data.coresPerBatch,
-            tiling_data.spatialPerCore, tiling_data.tileLength,
-            tiling_data.tileCount, tiling_data.lastTileLength);
+    KernelReluFinal op;
+    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum);
     op.Process();
 }
 """
@@ -282,9 +190,7 @@ python_bind_src="""
 #include <torch/extension.h>
 
 at::Tensor conv3d_max_log_sum_exp_relu_custom_impl_npu(const at::Tensor& self) {
-    auto sizes = self.sizes().vec();
-    sizes[1] = 1;
-    at::Tensor result = at::empty(sizes, self.options());
+    at::Tensor result = at::empty_like(self);
     EXEC_NPU_CMD(aclnnConv3dMaxLogSumExpReluCustom, self, result);
     return result;
 }
@@ -294,7 +200,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv3d_max_log_sum_exp_relu_custom", &conv3d_max_log_sum_exp_relu_custom_impl_npu, "logsumexp over channels + relu");
+    m.def("conv3d_max_log_sum_exp_relu_custom", &conv3d_max_log_sum_exp_relu_custom_impl_npu, "fused conv3d+maxpool+logsumexp+relu (relu stage on AscendC)");
 }
 """
 
@@ -303,6 +209,7 @@ import torch
 import torch.nn as nn
 import torch_npu
 import custom_ops_lib
+
 
 class ModelNew(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
@@ -313,6 +220,7 @@ class ModelNew(nn.Module):
     def forward(self, x):
         x = self.conv(x)
         x = self.max_pool(x)
+        x = torch.logsumexp(x, dim=1, keepdim=True)
         x = x.contiguous()
         x = custom_ops_lib.conv3d_max_log_sum_exp_relu_custom(x)
         return x

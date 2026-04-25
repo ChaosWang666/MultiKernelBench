@@ -1,5 +1,3 @@
-I have enough context from the Wiki. Now outputting the generated code.
-
 project_json_src='''
 [
     {
@@ -8,6 +6,26 @@ project_json_src='''
         "input_desc": [
             {
                 "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -28,6 +46,13 @@ project_json_src='''
                     "float"
                 ]
             }
+        ],
+        "attr": [
+            {
+                "name": "scale_factor",
+                "param_type": "required",
+                "type": "float"
+            }
         ]
     }
 ]
@@ -38,10 +63,7 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(Conv2dScalingMinCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, N);
-  TILING_DATA_FIELD_DEF(uint32_t, C);
-  TILING_DATA_FIELD_DEF(uint32_t, HW);
-  TILING_DATA_FIELD_DEF(uint32_t, tileLen);
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
   TILING_DATA_FIELD_DEF(float, scaleFactor);
 END_TILING_DATA_DEF;
 
@@ -56,32 +78,18 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_LEN = 8192;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Conv2dScalingMinCustomTilingData tiling;
-    const gert::Shape& shape = context->GetInputShape(0)->GetOriginShape();
-    uint32_t N = static_cast<uint32_t>(shape.GetDim(0));
-    uint32_t C = static_cast<uint32_t>(shape.GetDim(1));
-    uint32_t H = static_cast<uint32_t>(shape.GetDim(2));
-    uint32_t W = static_cast<uint32_t>(shape.GetDim(3));
-    uint32_t HW = H * W;
+    uint32_t batchSize = context->GetInputShape(0)->GetOriginShape().GetDim(0);
 
-    uint32_t blockDim = BLOCK_DIM;
-    if (N < blockDim) {
-        blockDim = N;
-    } else {
-        while (blockDim > 1 && (N % blockDim) != 0) {
-            blockDim--;
-        }
-    }
+    auto attrs = context->GetAttrs();
+    const float* scaleFactorPtr = attrs->GetAttrPointer<float>(0);
+    float scaleFactor = (scaleFactorPtr != nullptr) ? *scaleFactorPtr : 1.0f;
 
-    context->SetBlockDim(blockDim);
-    tiling.set_N(N);
-    tiling.set_C(C);
-    tiling.set_HW(HW);
-    tiling.set_tileLen(TILE_LEN);
-    tiling.set_scaleFactor(2.0f);
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchSize(batchSize);
+    tiling.set_scaleFactor(scaleFactor);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -95,12 +103,20 @@ namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* w_shape = context->GetInputShape(1);
     gert::Shape* y_shape = context->GetOutputShape(0);
+
+    int64_t N = x_shape->GetDim(0);
+    int64_t H = x_shape->GetDim(2);
+    int64_t W = x_shape->GetDim(3);
+    int64_t Kh = w_shape->GetDim(2);
+    int64_t Kw = w_shape->GetDim(3);
+
     y_shape->SetDimNum(4);
-    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(0, N);
     y_shape->SetDim(1, 1);
-    y_shape->SetDim(2, x_shape->GetDim(2));
-    y_shape->SetDim(3, x_shape->GetDim(3));
+    y_shape->SetDim(2, H - Kh + 1);
+    y_shape->SetDim(3, W - Kw + 1);
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -122,17 +138,29 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
         this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("scale_factor").AttrType(REQUIRED).Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
+
     }
 };
 
@@ -142,142 +170,157 @@ OP_ADD(Conv2dScalingMinCustom);
 
 kernel_src="""
 #include "kernel_operator.h"
+using namespace AscendC;
 
-constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t IN_CHANNELS = 64;
+constexpr int32_t OUT_CHANNELS = 128;
+constexpr int32_t KERNEL_H = 3;
+constexpr int32_t KERNEL_W = 3;
+constexpr int32_t H_IN = 256;
+constexpr int32_t W_IN = 256;
+constexpr int32_t H_OUT = 254;
+constexpr int32_t W_OUT = 254;
+constexpr int32_t W_CHUNK = 128;
+constexpr int32_t W_INPUT_STRIDE = 136;
 
 class KernelConv2dScalingMin {
 public:
     __aicore__ inline KernelConv2dScalingMin() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
-                                 uint32_t N, uint32_t C, uint32_t HW,
-                                 uint32_t tileLen, float scaleFactor)
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+                                  uint32_t batchSize, float scaleFactor)
     {
-        this->C = C;
-        this->HW = HW;
-        this->tileLen = tileLen;
+        this->batchSize = batchSize;
         this->scaleFactor = scaleFactor;
 
-        uint32_t blockIdx = AscendC::GetBlockIdx();
-        uint32_t blockNum = AscendC::GetBlockNum();
-        if (blockNum == 0) {
-            blockNum = 1;
-        }
-        this->batchesPerBlock = N / blockNum;
-        uint32_t batchStart = blockIdx * this->batchesPerBlock;
-        if (this->batchesPerBlock == 0) {
-            this->batchesPerBlock = (blockIdx == 0) ? N : 0;
-            batchStart = 0;
-        }
+        xGm.SetGlobalBuffer((__gm__ float*)x);
+        weightGm.SetGlobalBuffer((__gm__ float*)weight);
+        biasGm.SetGlobalBuffer((__gm__ float*)bias);
+        yGm.SetGlobalBuffer((__gm__ float*)y);
 
-        this->tileCount = (HW + tileLen - 1) / tileLen;
-
-        uint64_t xBase = (uint64_t)batchStart * (uint64_t)C * (uint64_t)HW;
-        uint64_t xLen = (uint64_t)this->batchesPerBlock * (uint64_t)C * (uint64_t)HW;
-        uint64_t yBase = (uint64_t)batchStart * (uint64_t)HW;
-        uint64_t yLen = (uint64_t)this->batchesPerBlock * (uint64_t)HW;
-
-        xGm.SetGlobalBuffer((__gm__ float*)x + xBase, xLen);
-        yGm.SetGlobalBuffer((__gm__ float*)y + yBase, yLen);
-
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLen * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, tileLen * sizeof(float));
+        pipe.InitBuffer(xBuf, IN_CHANNELS * KERNEL_H * W_INPUT_STRIDE * sizeof(float));
+        pipe.InitBuffer(weightChBuf, IN_CHANNELS * KERNEL_H * KERNEL_W * sizeof(float));
+        pipe.InitBuffer(biasBuf, OUT_CHANNELS * sizeof(float));
+        pipe.InitBuffer(accBuf, W_CHUNK * sizeof(float));
+        pipe.InitBuffer(minBuf, W_CHUNK * sizeof(float));
+        pipe.InitBuffer(tmpBuf, W_CHUNK * sizeof(float));
     }
 
     __aicore__ inline void Process()
     {
-        for (uint32_t b = 0; b < this->batchesPerBlock; b++) {
-            for (uint32_t t = 0; t < this->tileCount; t++) {
-                uint32_t hwOffset = t * this->tileLen;
-                uint32_t curLen = (hwOffset + this->tileLen <= this->HW)
-                                  ? this->tileLen : (this->HW - hwOffset);
-                ProcessTile(b, hwOffset, curLen);
+        LocalTensor<float> biasLocal = biasBuf.Get<float>();
+        DataCopy(biasLocal, biasGm, OUT_CHANNELS);
+        SetFlag<HardEvent::MTE2_S>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE2_S>(EVENT_ID0);
+
+        int32_t blockIdx = static_cast<int32_t>(GetBlockIdx());
+        int32_t blockNum = static_cast<int32_t>(GetBlockNum());
+        int32_t totalRows = static_cast<int32_t>(batchSize) * H_OUT;
+        int32_t rowsPerBlock = (totalRows + blockNum - 1) / blockNum;
+        int32_t startRow = blockIdx * rowsPerBlock;
+        int32_t endRow = startRow + rowsPerBlock;
+        if (endRow > totalRows) endRow = totalRows;
+
+        for (int32_t row = startRow; row < endRow; row++) {
+            int32_t b = row / H_OUT;
+            int32_t h_out = row % H_OUT;
+            ProcessRow(b, h_out, biasLocal);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessRow(int32_t b, int32_t h_out, LocalTensor<float>& biasLocal)
+    {
+        LocalTensor<float> xLocal = xBuf.Get<float>();
+        LocalTensor<float> wLocal = weightChBuf.Get<float>();
+        LocalTensor<float> accLocal = accBuf.Get<float>();
+        LocalTensor<float> minLocal = minBuf.Get<float>();
+        LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+
+        for (int32_t w_start = 0; w_start < W_OUT; w_start += W_CHUNK) {
+            int32_t w_count = (w_start + W_CHUNK <= W_OUT) ? W_CHUNK : (W_OUT - w_start);
+            int32_t input_cols_needed = w_count + KERNEL_W - 1;
+            int32_t input_cols_load = (input_cols_needed + 7) / 8 * 8;
+            if (w_start + input_cols_load > W_IN) {
+                input_cols_load = W_IN - w_start;
             }
+
+            for (int32_t ic = 0; ic < IN_CHANNELS; ic++) {
+                for (int32_t kh = 0; kh < KERNEL_H; kh++) {
+                    uint64_t srcOffset = (uint64_t)b * IN_CHANNELS * H_IN * W_IN +
+                                          (uint64_t)ic * H_IN * W_IN +
+                                          (uint64_t)(h_out + kh) * W_IN +
+                                          (uint64_t)w_start;
+                    int32_t dstOffset = (ic * KERNEL_H + kh) * W_INPUT_STRIDE;
+                    DataCopy(xLocal[dstOffset], xGm[srcOffset], input_cols_load);
+                }
+            }
+
+            SetFlag<HardEvent::MTE2_V>(EVENT_ID1);
+            WaitFlag<HardEvent::MTE2_V>(EVENT_ID1);
+
+            Duplicate(minLocal, (float)3.4e38f, w_count);
+
+            for (int32_t c = 0; c < OUT_CHANNELS; c++) {
+                uint64_t weightOffset = (uint64_t)c * IN_CHANNELS * KERNEL_H * KERNEL_W;
+                DataCopy(wLocal, weightGm[weightOffset], IN_CHANNELS * KERNEL_H * KERNEL_W);
+
+                SetFlag<HardEvent::MTE2_S>(EVENT_ID2);
+                WaitFlag<HardEvent::MTE2_S>(EVENT_ID2);
+
+                float biasVal = biasLocal.GetValue(c);
+                Duplicate(accLocal, biasVal, w_count);
+
+                for (int32_t ic = 0; ic < IN_CHANNELS; ic++) {
+                    for (int32_t kh = 0; kh < KERNEL_H; kh++) {
+                        for (int32_t kw = 0; kw < KERNEL_W; kw++) {
+                            float w_val = wLocal.GetValue(ic * KERNEL_H * KERNEL_W + kh * KERNEL_W + kw);
+                            int32_t xOffset = (ic * KERNEL_H + kh) * W_INPUT_STRIDE + kw;
+                            Muls(tmpLocal, xLocal[xOffset], w_val, w_count);
+                            Add(accLocal, accLocal, tmpLocal, w_count);
+                        }
+                    }
+                }
+
+                Min(minLocal, minLocal, accLocal, w_count);
+            }
+
+            Muls(minLocal, minLocal, scaleFactor, w_count);
+
+            SetFlag<HardEvent::V_MTE3>(EVENT_ID3);
+            WaitFlag<HardEvent::V_MTE3>(EVENT_ID3);
+
+            uint64_t outOffset = (uint64_t)b * H_OUT * W_OUT +
+                                  (uint64_t)h_out * W_OUT +
+                                  (uint64_t)w_start;
+
+            DataCopyExtParams copyParams;
+            copyParams.blockCount = 1;
+            copyParams.blockLen = (uint32_t)(w_count * sizeof(float));
+            copyParams.srcStride = 0;
+            copyParams.dstStride = 0;
+            DataCopyPad(yGm[outOffset], minLocal, copyParams);
+
+            SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
+            SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
+            WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
         }
     }
 
 private:
-    __aicore__ inline void ProcessTile(uint32_t b, uint32_t hwOffset, uint32_t curLen)
-    {
-        AscendC::LocalTensor<float> accLocal = outQueueY.AllocTensor<float>();
-
-        {
-            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-            LoadChannel(xLocal, b, 0, hwOffset, curLen);
-            inQueueX.EnQue(xLocal);
-            xLocal = inQueueX.DeQue<float>();
-            AscendC::Muls(accLocal, xLocal, this->scaleFactor, curLen);
-            inQueueX.FreeTensor(xLocal);
-        }
-
-        for (uint32_t c = 1; c < this->C; c++) {
-            AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-            LoadChannel(xLocal, b, c, hwOffset, curLen);
-            inQueueX.EnQue(xLocal);
-            xLocal = inQueueX.DeQue<float>();
-            AscendC::Muls(xLocal, xLocal, this->scaleFactor, curLen);
-            AscendC::Min(accLocal, accLocal, xLocal, curLen);
-            inQueueX.FreeTensor(xLocal);
-        }
-
-        outQueueY.EnQue(accLocal);
-        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
-        StoreOutput(yLocal, b, hwOffset, curLen);
-        outQueueY.FreeTensor(yLocal);
-    }
-
-    __aicore__ inline void LoadChannel(AscendC::LocalTensor<float>& dst,
-                                        uint32_t b, uint32_t c,
-                                        uint32_t hwOffset, uint32_t curLen)
-    {
-        uint64_t offset = (uint64_t)b * (uint64_t)this->C * (uint64_t)this->HW
-                        + (uint64_t)c * (uint64_t)this->HW
-                        + (uint64_t)hwOffset;
-        AscendC::DataCopyExtParams copyParams;
-        copyParams.blockCount = 1;
-        copyParams.blockLen = (uint32_t)(curLen * sizeof(float));
-        copyParams.srcStride = 0;
-        copyParams.dstStride = 0;
-        copyParams.rsv = 0;
-        AscendC::DataCopyPadExtParams<float> padParams;
-        padParams.isPad = false;
-        padParams.leftPadding = 0;
-        padParams.rightPadding = 0;
-        padParams.paddingValue = 0.0f;
-        AscendC::DataCopyPad(dst, xGm[offset], copyParams, padParams);
-    }
-
-    __aicore__ inline void StoreOutput(const AscendC::LocalTensor<float>& src,
-                                        uint32_t b, uint32_t hwOffset, uint32_t curLen)
-    {
-        uint64_t offset = (uint64_t)b * (uint64_t)this->HW + (uint64_t)hwOffset;
-        AscendC::DataCopyExtParams copyParams;
-        copyParams.blockCount = 1;
-        copyParams.blockLen = (uint32_t)(curLen * sizeof(float));
-        copyParams.srcStride = 0;
-        copyParams.dstStride = 0;
-        copyParams.rsv = 0;
-        AscendC::DataCopyPad(yGm[offset], src, copyParams);
-    }
-
-private:
-    AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
-    uint32_t C;
-    uint32_t HW;
-    uint32_t tileLen;
-    uint32_t batchesPerBlock;
-    uint32_t tileCount;
+    TPipe pipe;
+    TBuf<TPosition::VECCALC> xBuf, weightChBuf, biasBuf, accBuf, minBuf, tmpBuf;
+    GlobalTensor<float> xGm, weightGm, biasGm, yGm;
+    uint32_t batchSize;
     float scaleFactor;
 };
 
-extern "C" __global__ __aicore__ void conv2d_scaling_min_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv2d_scaling_min_custom(GM_ADDR x, GM_ADDR weight, GM_ADDR bias,
+                                                                  GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelConv2dScalingMin op;
-    op.Init(x, y, tiling_data.N, tiling_data.C, tiling_data.HW,
-            tiling_data.tileLen, tiling_data.scaleFactor);
+    op.Init(x, weight, bias, y, tiling_data.batchSize, tiling_data.scaleFactor);
     op.Process();
 }
 """
@@ -288,11 +331,23 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv2d_scaling_min_custom_impl_npu(const at::Tensor& self) {
-    auto sizes = self.sizes().vec();
-    sizes[1] = 1;
-    at::Tensor result = at::empty(sizes, self.options());
-    EXEC_NPU_CMD(aclnnConv2dScalingMinCustom, self, result);
+at::Tensor conv2d_scaling_min_custom_impl_npu(const at::Tensor& x, const at::Tensor& weight,
+                                                const at::Tensor& bias, double scale_factor) {
+    at::Tensor x_c = x.contiguous();
+    at::Tensor w_c = weight.contiguous();
+    at::Tensor b_c = bias.contiguous();
+    auto x_sizes = x_c.sizes();
+    auto w_sizes = w_c.sizes();
+    int64_t N = x_sizes[0];
+    int64_t H = x_sizes[2];
+    int64_t W = x_sizes[3];
+    int64_t Kh = w_sizes[2];
+    int64_t Kw = w_sizes[3];
+    int64_t Hout = H - Kh + 1;
+    int64_t Wout = W - Kw + 1;
+    at::Tensor result = at::empty({N, 1, Hout, Wout}, x_c.options());
+    float scale = static_cast<float>(scale_factor);
+    EXEC_NPU_CMD(aclnnConv2dScalingMinCustom, x_c, w_c, b_c, scale, result);
     return result;
 }
 
@@ -301,7 +356,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv2d_scaling_min_custom", &conv2d_scaling_min_custom_impl_npu, "fused scale(2.0) + channel-min on NCHW");
+    m.def("conv2d_scaling_min_custom", &conv2d_scaling_min_custom_impl_npu, "Conv2d + Scale + Min along channel dim");
 }
 """
 
@@ -311,17 +366,12 @@ import torch.nn as nn
 import torch_npu
 import custom_ops_lib
 
-
-class ModelNew(nn.Module):
+class ModelNew(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, scale_factor):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
         self.scale_factor = scale_factor
 
     def forward(self, x):
-        x = self.conv(x)
-        if self.scale_factor != 2.0:
-            x = x * (self.scale_factor / 2.0)
-        x = x.contiguous()
-        return custom_ops_lib.conv2d_scaling_min_custom(x)
+        return custom_ops_lib.conv2d_scaling_min_custom(x, self.conv.weight, self.conv.bias, self.scale_factor)
 '''

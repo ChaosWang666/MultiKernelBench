@@ -1,5 +1,3 @@
-I've gathered sufficient information from the Wiki. Now I'll generate the complete implementation.
-```
 project_json_src='''
 [
     {
@@ -17,7 +15,7 @@ project_json_src='''
                 ]
             },
             {
-                "name": "factor",
+                "name": "w",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -29,7 +27,7 @@ project_json_src='''
         ],
         "output_desc": [
             {
-                "name": "y",
+                "name": "z",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -48,8 +46,10 @@ host_tiling_src="""
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(GemmDivideSumScalingCustomTilingData)
-  TILING_DATA_FIELD_DEF(uint32_t, totalRows);
-  TILING_DATA_FIELD_DEF(uint32_t, cols);
+  TILING_DATA_FIELD_DEF(uint32_t, batchPerBlock);
+  TILING_DATA_FIELD_DEF(uint32_t, inputSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(GemmDivideSumScalingCustom, GemmDivideSumScalingCustomTilingData)
@@ -60,16 +60,28 @@ host_operator_src="""
 #include "gemm_divide_sum_scaling_custom_tiling.h"
 #include "register/op_def_registry.h"
 
+
 namespace optiling {
-const uint32_t BLOCK_DIM = 20;
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_LENGTH = 2048;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     GemmDivideSumScalingCustomTilingData tiling;
-    uint32_t totalRows = context->GetInputShape(0)->GetOriginShape().GetDim(0);
-    uint32_t cols = context->GetInputShape(0)->GetOriginShape().GetDim(1);
-    context->SetBlockDim(BLOCK_DIM);
-    tiling.set_totalRows(totalRows);
-    tiling.set_cols(cols);
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t inputSize = xShape.GetDim(1);
+
+    uint32_t blockDim = BLOCK_DIM;
+    uint32_t batchPerBlock = batchSize / blockDim;
+    uint32_t tileLength = TILE_LENGTH;
+    uint32_t tileNum = inputSize / tileLength;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_batchPerBlock(batchPerBlock);
+    tiling.set_inputSize(inputSize);
+    tiling.set_tileNum(tileNum);
+    tiling.set_tileLength(tileLength);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -82,11 +94,11 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
-    const gert::Shape* x_shape = context->GetInputShape(0);
-    gert::Shape* y_shape = context->GetOutputShape(0);
-    y_shape->SetDimNum(2);
-    y_shape->SetDim(0, x_shape->GetDim(0));
-    y_shape->SetDim(1, 1);
+    const gert::Shape* xShape = context->GetInputShape(0);
+    gert::Shape* zShape = context->GetOutputShape(0);
+    zShape->SetDimNum(2);
+    zShape->SetDim(0, xShape->GetDim(0));
+    zShape->SetDim(1, 1);
     return GRAPH_SUCCESS;
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
@@ -108,12 +120,12 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("factor")
+        this->Input("w")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("y")
+        this->Output("z")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
@@ -135,115 +147,99 @@ kernel_src="""
 #include "kernel_operator.h"
 
 constexpr int32_t BUFFER_NUM = 2;
-constexpr int32_t ALIGN_NUM = 8;
 
 class KernelGemmDivideSumScaling {
 public:
     __aicore__ inline KernelGemmDivideSumScaling() {}
-
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR factor, GM_ADDR y, uint32_t totalRows, uint32_t cols)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR w, GM_ADDR z,
+                                  uint32_t batchPerBlock, uint32_t inputSize,
+                                  uint32_t tileNum, uint32_t tileLength)
     {
-        this->cols = cols;
+        this->batchPerBlock = batchPerBlock;
+        this->inputSize = inputSize;
+        this->tileNum = tileNum;
+        this->tileLength = tileLength;
+
         uint32_t blockIdx = AscendC::GetBlockIdx();
-        uint32_t blockNum = AscendC::GetBlockNum();
 
-        uint32_t baseRows = totalRows / blockNum;
-        uint32_t extraRows = totalRows % blockNum;
-        uint32_t startRow;
-        if (blockIdx < extraRows) {
-            this->rowsThisBlock = baseRows + 1;
-            startRow = blockIdx * this->rowsThisBlock;
-        } else {
-            this->rowsThisBlock = baseRows;
-            startRow = extraRows * (baseRows + 1) + (blockIdx - extraRows) * baseRows;
-        }
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + blockIdx * batchPerBlock * inputSize, batchPerBlock * inputSize);
+        wGm.SetGlobalBuffer((__gm__ DTYPE_W *)w, inputSize);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + blockIdx * batchPerBlock, batchPerBlock);
 
-        if (this->rowsThisBlock == 0) {
-            return;
-        }
-
-        xGm.SetGlobalBuffer((__gm__ float*)x + startRow * cols, this->rowsThisBlock * cols);
-        yGm.SetGlobalBuffer((__gm__ float*)y + startRow, this->rowsThisBlock);
-        factorGm.SetGlobalBuffer((__gm__ float*)factor, ALIGN_NUM);
-
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, cols * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, ALIGN_NUM * sizeof(float));
-        pipe.InitBuffer(factorQueue, 1, ALIGN_NUM * sizeof(float));
-        pipe.InitBuffer(reduceBuf, cols * sizeof(float));
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(inQueueW, BUFFER_NUM, this->tileLength * sizeof(DTYPE_W));
+        pipe.InitBuffer(outQueueZ, 1, 256);
+        pipe.InitBuffer(accumBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(reduceBuf, 64 * sizeof(float));
     }
 
     __aicore__ inline void Process()
     {
-        if (this->rowsThisBlock == 0) {
-            return;
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        AscendC::LocalTensor<float> accumLocal = accumBuf.Get<float>();
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+        AscendC::LocalTensor<float> reduceLocal = reduceBuf.Get<float>();
+
+        for (uint32_t b = 0; b < batchPerBlock; b++) {
+            AscendC::Duplicate<float>(accumLocal, 0.0f, this->tileLength);
+            AscendC::PipeBarrier<PIPE_V>();
+
+            for (uint32_t t = 0; t < tileNum; t++) {
+                AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+                AscendC::LocalTensor<DTYPE_W> wLocal = inQueueW.AllocTensor<DTYPE_W>();
+                AscendC::DataCopy(xLocal, xGm[b * this->inputSize + t * this->tileLength], this->tileLength);
+                AscendC::DataCopy(wLocal, wGm[t * this->tileLength], this->tileLength);
+                inQueueX.EnQue(xLocal);
+                inQueueW.EnQue(wLocal);
+
+                AscendC::LocalTensor<DTYPE_X> xL = inQueueX.DeQue<DTYPE_X>();
+                AscendC::LocalTensor<DTYPE_W> wL = inQueueW.DeQue<DTYPE_W>();
+                AscendC::Mul(tmpLocal, xL, wL, this->tileLength);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Add(accumLocal, accumLocal, tmpLocal, this->tileLength);
+                AscendC::PipeBarrier<PIPE_V>();
+                inQueueX.FreeTensor(xL);
+                inQueueW.FreeTensor(wL);
+            }
+
+            AscendC::ReduceSum<float>(reduceLocal, accumLocal, tmpLocal, this->tileLength);
+            AscendC::PipeBarrier<PIPE_V>();
+
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            float sumVal = reduceLocal.GetValue(0);
+            zLocal.SetValue(b, sumVal);
+            AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
         }
 
-        AscendC::LocalTensor<float> fLocal = factorQueue.AllocTensor<float>();
-        AscendC::DataCopy(fLocal, factorGm, ALIGN_NUM);
-        factorQueue.EnQue(fLocal);
-        fLocal = factorQueue.DeQue<float>();
-        this->factorVal = fLocal.GetValue(0);
-        factorQueue.FreeTensor(fLocal);
-
-        for (uint32_t i = 0; i < this->rowsThisBlock; i++) {
-            CopyIn(i);
-            Compute(i);
-            CopyOut(i);
-        }
-    }
-
-private:
-    __aicore__ inline void CopyIn(uint32_t i)
-    {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
-        AscendC::DataCopy(xLocal, xGm[i * this->cols], this->cols);
-        inQueueX.EnQue(xLocal);
-    }
-
-    __aicore__ inline void Compute(uint32_t i)
-    {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-        AscendC::LocalTensor<float> work = reduceBuf.Get<float>();
-
-        AscendC::ReduceSum(yLocal, xLocal, work, (int32_t)this->cols);
-        inQueueX.FreeTensor(xLocal);
-
-        AscendC::Muls(yLocal, yLocal, this->factorVal, ALIGN_NUM);
-
-        outQueueY.EnQue<float>(yLocal);
-    }
-
-    __aicore__ inline void CopyOut(uint32_t i)
-    {
-        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
-        AscendC::DataCopyExtParams copyParams;
-        copyParams.blockCount = 1;
-        copyParams.blockLen = sizeof(float);
-        copyParams.srcStride = 0;
-        copyParams.dstStride = 0;
-        AscendC::DataCopyPad(yGm[i], yLocal, copyParams);
-        outQueueY.FreeTensor(yLocal);
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        AscendC::LocalTensor<DTYPE_Z> zOut = outQueueZ.DeQue<DTYPE_Z>();
+        AscendC::DataCopy(zGm, zOut, this->batchPerBlock);
+        outQueueZ.FreeTensor(zOut);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECIN, 1> factorQueue;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
-    AscendC::GlobalTensor<float> factorGm;
-    uint32_t cols;
-    uint32_t rowsThisBlock;
-    float factorVal;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueW;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> accumBuf, tmpBuf, reduceBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_W> wGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
+    uint32_t batchPerBlock;
+    uint32_t inputSize;
+    uint32_t tileNum;
+    uint32_t tileLength;
 };
 
-extern "C" __global__ __aicore__ void gemm_divide_sum_scaling_custom(GM_ADDR x, GM_ADDR factor, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void gemm_divide_sum_scaling_custom(GM_ADDR x, GM_ADDR w, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelGemmDivideSumScaling op;
-    op.Init(x, factor, y, tiling_data.totalRows, tiling_data.cols);
+    op.Init(x, w, z, tiling_data.batchPerBlock, tiling_data.inputSize, tiling_data.tileNum, tiling_data.tileLength);
     op.Process();
 }
 """
@@ -254,10 +250,11 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor gemm_divide_sum_scaling_custom_impl_npu(const at::Tensor& x, const at::Tensor& factor) {
+at::Tensor gemm_divide_sum_scaling_custom_impl_npu(const at::Tensor& x, const at::Tensor& w) {
     auto batch_size = x.size(0);
-    at::Tensor result = at::empty({batch_size, 1}, x.options());
-    EXEC_NPU_CMD(aclnnGemmDivideSumScalingCustom, x, factor, result);
+    auto options = x.options();
+    at::Tensor result = at::empty({batch_size, 1}, options);
+    EXEC_NPU_CMD(aclnnGemmDivideSumScalingCustom, x, w, result);
     return result;
 }
 
@@ -266,22 +263,24 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("gemm_divide_sum_scaling_custom", &gemm_divide_sum_scaling_custom_impl_npu, "gemm divide sum scaling");
+    m.def("gemm_divide_sum_scaling_custom", &gemm_divide_sum_scaling_custom_impl_npu, "gemm divide sum scaling custom");
 }
 """
 
 model_src='''
 import torch
+import torch.nn as nn
 import torch_npu
 import custom_ops_lib
-class ModelNew(torch.nn.Module):
+
+
+class ModelNew(nn.Module):
     def __init__(self, input_size, hidden_size, scaling_factor):
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.randn(hidden_size, input_size))
+        super(ModelNew, self).__init__()
+        self.weight = nn.Parameter(torch.randn(hidden_size, input_size))
         self.scaling_factor = scaling_factor
 
     def forward(self, x):
-        x = torch.matmul(x, self.weight.T)
-        factor = torch.full((8,), self.scaling_factor / 2.0, dtype=x.dtype, device=x.device)
-        return custom_ops_lib.gemm_divide_sum_scaling_custom(x, factor)
+        w = self.weight.sum(dim=0).mul(self.scaling_factor / 2.0).contiguous()
+        return custom_ops_lib.gemm_divide_sum_scaling_custom(x.contiguous(), w)
 '''

@@ -1,0 +1,275 @@
+project_json_src='''
+[
+    {
+        "op": "Conv2dSubtractSubtractMishCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "sub_total",
+                "param_type": "required",
+                "type": "float"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv2dSubtractSubtractMishCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(float, subTotal);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv2dSubtractSubtractMishCustom, Conv2dSubtractSubtractMishCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv2d_subtract_subtract_mish_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv2dSubtractSubtractMishCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+
+    auto attrs = context->GetAttrs();
+    const float* subTotalPtr = attrs->GetAttrPointer<float>(0);
+    float subTotal = (subTotalPtr == nullptr) ? 0.0f : (*subTotalPtr);
+
+    uint32_t blockDim = 32;
+    while (blockDim > 1 && (totalLength % blockDim) != 0) {
+        blockDim /= 2;
+    }
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+    uint32_t blockLength = totalLength / blockDim;
+
+    uint32_t tileLength = 512;
+    while (tileLength > 32 && (blockLength % (tileLength * 2)) != 0) {
+        tileLength /= 2;
+    }
+    if (tileLength < 32) {
+        tileLength = 32;
+    }
+    uint32_t tileNum = blockLength / (tileLength * 2);
+    if (tileNum == 0) {
+        tileNum = 1;
+    }
+
+    context->SetBlockDim(blockDim);
+    tiling.set_totalLength(totalLength);
+    tiling.set_tileNum(tileNum);
+    tiling.set_subTotal(subTotal);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Conv2dSubtractSubtractMishCustom : public OpDef {
+public:
+    explicit Conv2dSubtractSubtractMishCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("sub_total").AttrType(REQUIRED).Float();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv2dSubtractSubtractMishCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConvSubMish {
+public:
+    __aicore__ inline KernelConvSubMish() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum, float subTotal)
+    {
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->subTotal = subTotal;
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Compute(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::LocalTensor<float> t1 = tmpBuf1.Get<float>();
+        AscendC::LocalTensor<float> t2 = tmpBuf2.Get<float>();
+
+        float negSub = -(this->subTotal);
+        AscendC::Adds(t1, xLocal, negSub, this->tileLength);
+        AscendC::Exp(t2, t1, this->tileLength);
+        AscendC::Adds(t2, t2, (float)1.0, this->tileLength);
+        AscendC::Ln(t2, t2, this->tileLength);
+        AscendC::Tanh(t2, t2, this->tileLength);
+        AscendC::Mul(yLocal, t1, t2, this->tileLength);
+
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(int32_t progress)
+    {
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        outQueueY.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    uint32_t blockLength;
+    uint32_t tileNum;
+    uint32_t tileLength;
+    float subTotal;
+};
+
+extern "C" __global__ __aicore__ void conv2d_subtract_subtract_mish_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConvSubMish op;
+    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum, tiling_data.subTotal);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv2d_subtract_subtract_mish_custom_impl_npu(const at::Tensor& self, double sub_total) {
+    at::Tensor x = self.contiguous();
+    at::Tensor result = at::empty_like(x);
+    float st = static_cast<float>(sub_total);
+    EXEC_NPU_CMD(aclnnConv2dSubtractSubtractMishCustom, x, st, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv2d_subtract_subtract_mish_custom", &conv2d_subtract_subtract_mish_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv2d_subtract_subtract_mish_custom", &conv2d_subtract_subtract_mish_custom_impl_npu, "fused subtract+subtract+mish after conv2d");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, subtract_value_1, subtract_value_2):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+        self.sub_total = float(subtract_value_1 + subtract_value_2)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = x.contiguous()
+        x = custom_ops_lib.conv2d_subtract_subtract_mish_custom(x, self.sub_total)
+        return x
+'''

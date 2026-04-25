@@ -1,5 +1,3 @@
-Now I have enough context. Let me generate the code.
-
 project_json_src='''
 [
     {
@@ -17,7 +15,7 @@ project_json_src='''
                 ]
             },
             {
-                "name": "y",
+                "name": "bias",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -29,7 +27,7 @@ project_json_src='''
         ],
         "output_desc": [
             {
-                "name": "z",
+                "name": "y",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -63,7 +61,7 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 32;
+const uint32_t TILE_NUM = 124;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
 
@@ -91,9 +89,9 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-    const auto inputDataType = context->GetInputDataType(0);
-    context->SetOutputDataType(0, inputDataType);
-    return ge::GRAPH_SUCCESS;
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
 }
 }
 
@@ -108,12 +106,12 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("y")
+        this->Input("bias")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("z")
+        this->Output("y")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
@@ -137,122 +135,75 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelConvTranspose3dScalingAvgPoolBiasAddScalingCustom {
+class KernelFusedBiasAdd {
 public:
-    __aicore__ inline KernelConvTranspose3dScalingAvgPoolBiasAddScalingCustom() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t totalLength, uint32_t tileNum)
+    __aicore__ inline KernelFusedBiasAdd() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
     {
-        uint32_t blockNum = AscendC::GetBlockNum();
-        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->blockLength = totalLength / AscendC::GetBlockNum();
+        this->tileNum = tileNum;
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
 
-        uint32_t baseBlockLen = totalLength / blockNum;
-        uint32_t remainder = totalLength % blockNum;
-        uint32_t myBlockLen = baseBlockLen + (blockIdx < remainder ? 1 : 0);
-        uint32_t myOffset = blockIdx * baseBlockLen + (blockIdx < remainder ? blockIdx : remainder);
-
-        this->blockLength = myBlockLen;
-        this->totalOffset = myOffset;
-
-        if (this->blockLength == 0) {
-            this->tileNum = 1;
-            this->tileLength = 0;
-            this->tailLength = 0;
-            this->loopCount = 0;
-            return;
-        }
-
-        uint32_t desiredTileNum = tileNum;
-        if (desiredTileNum < 1) desiredTileNum = 1;
-
-        uint32_t unit = BUFFER_NUM;
-        uint32_t totalUnits = desiredTileNum * unit;
-        if (totalUnits > this->blockLength) {
-            totalUnits = this->blockLength;
-        }
-        if (totalUnits < 1) totalUnits = 1;
-
-        this->tileLength = this->blockLength / totalUnits;
-        if (this->tileLength < 1) this->tileLength = 1;
-
-        uint32_t covered = this->tileLength * totalUnits;
-        this->tailLength = this->blockLength - covered;
-        this->loopCount = totalUnits;
-
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->totalOffset, this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->totalOffset, this->blockLength);
-        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->totalOffset, this->blockLength);
-
-        uint32_t bufLen = this->tileLength + this->tailLength;
-        if (bufLen < 8) bufLen = 8;
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, bufLen * sizeof(DTYPE_X));
-        pipe.InitBuffer(inQueueY, BUFFER_NUM, bufLen * sizeof(DTYPE_Y));
-        pipe.InitBuffer(outQueueZ, BUFFER_NUM, bufLen * sizeof(DTYPE_Z));
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        biasGm.SetGlobalBuffer((__gm__ DTYPE_BIAS *)bias + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(inQueueBias, BUFFER_NUM, this->tileLength * sizeof(DTYPE_BIAS));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
     }
-
     __aicore__ inline void Process()
     {
-        if (this->blockLength == 0) {
-            return;
-        }
-        uint32_t offset = 0;
-        for (uint32_t i = 0; i < this->loopCount; i++) {
-            uint32_t curLen = this->tileLength;
-            if (i == this->loopCount - 1) {
-                curLen += this->tailLength;
-            }
-            CopyIn(offset, curLen);
-            Compute(curLen);
-            CopyOut(offset, curLen);
-            offset += curLen;
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {
+            CopyIn(i);
+            Compute(i);
+            CopyOut(i);
         }
     }
 
 private:
-    __aicore__ inline void CopyIn(uint32_t offset, uint32_t len)
+    __aicore__ inline void CopyIn(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = inQueueY.AllocTensor<DTYPE_Y>();
-        AscendC::DataCopy(xLocal, xGm[offset], (len + 7) / 8 * 8);
-        AscendC::DataCopy(yLocal, yGm[offset], (len + 7) / 8 * 8);
+        AscendC::LocalTensor<DTYPE_BIAS> bLocal = inQueueBias.AllocTensor<DTYPE_BIAS>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(bLocal, biasGm[progress * this->tileLength], this->tileLength);
         inQueueX.EnQue(xLocal);
-        inQueueY.EnQue(yLocal);
+        inQueueBias.EnQue(bLocal);
     }
-    __aicore__ inline void Compute(uint32_t len)
+    __aicore__ inline void Compute(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = inQueueY.DeQue<DTYPE_Y>();
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
-        AscendC::Add(zLocal, xLocal, yLocal, (len + 7) / 8 * 8);
-        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        AscendC::LocalTensor<DTYPE_BIAS> bLocal = inQueueBias.DeQue<DTYPE_BIAS>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::Add(yLocal, xLocal, bLocal, this->tileLength);
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
-        inQueueY.FreeTensor(yLocal);
+        inQueueBias.FreeTensor(bLocal);
     }
-    __aicore__ inline void CopyOut(uint32_t offset, uint32_t len)
+    __aicore__ inline void CopyOut(int32_t progress)
     {
-        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
-        AscendC::DataCopy(zGm[offset], zLocal, (len + 7) / 8 * 8);
-        outQueueZ.FreeTensor(zLocal);
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
+        outQueueY.FreeTensor(yLocal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueBias;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
     AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_BIAS> biasGm;
     AscendC::GlobalTensor<DTYPE_Y> yGm;
-    AscendC::GlobalTensor<DTYPE_Z> zGm;
     uint32_t blockLength;
-    uint32_t totalOffset;
     uint32_t tileNum;
     uint32_t tileLength;
-    uint32_t tailLength;
-    uint32_t loopCount;
 };
 
-extern "C" __global__ __aicore__ void conv_transpose3d_scaling_avg_pool_bias_add_scaling_custom(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv_transpose3d_scaling_avg_pool_bias_add_scaling_custom(GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelConvTranspose3dScalingAvgPoolBiasAddScalingCustom op;
-    op.Init(x, y, z, tiling_data.totalLength, tiling_data.tileNum);
+    KernelFusedBiasAdd op;
+    op.Init(x, bias, y, tiling_data.totalLength, tiling_data.tileNum);
     op.Process();
 }
 """
@@ -263,9 +214,9 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor conv_transpose3d_scaling_avg_pool_bias_add_scaling_custom_impl_npu(const at::Tensor& self, const at::Tensor& other) {
-    at::Tensor result = at::empty_like(self);
-    EXEC_NPU_CMD(aclnnConvTranspose3dScalingAvgPoolBiasAddScalingCustom, self, other, result);
+at::Tensor conv_transpose3d_scaling_avg_pool_bias_add_scaling_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnConvTranspose3dScalingAvgPoolBiasAddScalingCustom, x, bias, result);
     return result;
 }
 
@@ -274,7 +225,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv_transpose3d_scaling_avg_pool_bias_add_scaling_custom", &conv_transpose3d_scaling_avg_pool_bias_add_scaling_custom_impl_npu, "fused scaled add");
+    m.def("conv_transpose3d_scaling_avg_pool_bias_add_scaling_custom", &conv_transpose3d_scaling_avg_pool_bias_add_scaling_custom_impl_npu, "fused bias add kernel");
 }
 """
 
@@ -283,6 +234,7 @@ import torch
 import torch.nn as nn
 import torch_npu
 import custom_ops_lib
+
 
 class ModelNew(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, scale1, scale2, bias_shape):
@@ -294,9 +246,12 @@ class ModelNew(nn.Module):
         self.scale2 = nn.Parameter(torch.tensor(scale2))
 
     def forward(self, x):
-        x = self.conv_transpose(x)
-        x = self.avg_pool(x)
-        x_scaled = (x * (self.scale1 * self.scale2)).contiguous()
-        bias_scaled = (self.bias * self.scale2).expand_as(x_scaled).contiguous()
-        return custom_ops_lib.conv_transpose3d_scaling_avg_pool_bias_add_scaling_custom(x_scaled, bias_scaled)
+        y = self.conv_transpose(x)
+        y = self.avg_pool(y)
+        combined_scale = (self.scale1 * self.scale2).to(y.dtype)
+        y = y * combined_scale
+        scaled_bias = (self.bias * self.scale2).to(y.dtype)
+        bias_expanded = scaled_bias.expand_as(y).contiguous()
+        y = y.contiguous()
+        return custom_ops_lib.conv_transpose3d_scaling_avg_pool_bias_add_scaling_custom(y, bias_expanded)
 '''

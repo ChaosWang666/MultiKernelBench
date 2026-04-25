@@ -1,4 +1,3 @@
-```python
 project_json_src='''
 [
     {
@@ -18,7 +17,7 @@ project_json_src='''
         ],
         "output_desc": [
             {
-                "name": "y",
+                "name": "z",
                 "param_type": "required",
                 "format": [
                     "ND"
@@ -39,6 +38,9 @@ namespace optiling {
 BEGIN_TILING_DATA_DEF(ConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, totalLength);
   TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(float, scale);
+  TILING_DATA_FIELD_DEF(float, clampMin);
+  TILING_DATA_FIELD_DEF(float, clampMax);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustom, ConvTranspose3dMultiplyMaxGlobalAvgPoolClampCustomTilingData)
@@ -61,6 +63,9 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     context->SetBlockDim(BLOCK_DIM);
     tiling.set_totalLength(totalLength);
     tiling.set_tileNum(TILE_NUM);
+    tiling.set_scale(0.5f);
+    tiling.set_clampMin(0.0f);
+    tiling.set_clampMax(1.0f);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -80,9 +85,9 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
 }
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
-    const auto inputDataType = context->GetInputDataType(0);
-    context->SetOutputDataType(0, inputDataType);
-    return ge::GRAPH_SUCCESS;
+const auto inputDataType = context->GetInputDataType(0);
+context->SetOutputDataType(0, inputDataType);
+return ge::GRAPH_SUCCESS;
 }
 }
 
@@ -97,7 +102,7 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("y")
+        this->Output("z")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
@@ -121,19 +126,22 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelClamp {
+class KernelConvTranspose3dMultiplyMaxGlobalAvgPoolClamp {
 public:
-    __aicore__ inline KernelClamp() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
+    __aicore__ inline KernelConvTranspose3dMultiplyMaxGlobalAvgPoolClamp() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z, uint32_t totalLength, uint32_t tileNum, float scale, float clampMin, float clampMax)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
         this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+        this->scale = scale;
+        this->clampMin = clampMin;
+        this->clampMax = clampMax;
 
         xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
     }
     __aicore__ inline void Process()
     {
@@ -155,34 +163,38 @@ private:
     __aicore__ inline void Compute(int32_t progress)
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
-        AscendC::Mins(yLocal, xLocal, (DTYPE_X)1.0f, this->tileLength);
-        AscendC::Maxs(yLocal, yLocal, (DTYPE_X)0.0f, this->tileLength);
-        outQueueY.EnQue<DTYPE_Y>(yLocal);
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        AscendC::Muls(zLocal, xLocal, this->scale, this->tileLength);
+        AscendC::Maxs(zLocal, zLocal, this->clampMin, this->tileLength);
+        AscendC::Mins(zLocal, zLocal, this->clampMax, this->tileLength);
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
         inQueueX.FreeTensor(xLocal);
     }
     __aicore__ inline void CopyOut(int32_t progress)
     {
-        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
-        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
-        outQueueY.FreeTensor(yLocal);
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
+        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
+        outQueueZ.FreeTensor(zLocal);
     }
 
 private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
     AscendC::GlobalTensor<DTYPE_X> xGm;
-    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
+    float scale;
+    float clampMin;
+    float clampMax;
 };
 
-extern "C" __global__ __aicore__ void conv_transpose3d_multiply_max_global_avg_pool_clamp_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv_transpose3d_multiply_max_global_avg_pool_clamp_custom(GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelClamp op;
-    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum);
+    KernelConvTranspose3dMultiplyMaxGlobalAvgPoolClamp op;
+    op.Init(x, z, tiling_data.totalLength, tiling_data.tileNum, tiling_data.scale, tiling_data.clampMin, tiling_data.clampMax);
     op.Process();
 }
 """
@@ -204,7 +216,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv_transpose3d_multiply_max_global_avg_pool_clamp_custom", &conv_transpose3d_multiply_max_global_avg_pool_clamp_custom_impl_npu, "clamp x to [0,1]");
+    m.def("conv_transpose3d_multiply_max_global_avg_pool_clamp_custom", &conv_transpose3d_multiply_max_global_avg_pool_clamp_custom_impl_npu, "fused scale and clamp");
 }
 """
 
@@ -221,14 +233,14 @@ class ModelNew(nn.Module):
         self.scale = scale
         self.maxpool = nn.MaxPool3d(kernel_size=maxpool_kernel_size)
         self.global_avg_pool = nn.AdaptiveAvgPool3d((1, 1, 1))
+        self.clamp_min = 0
+        self.clamp_max = 1
 
     def forward(self, x):
         x = self.conv_transpose(x)
-        x = x * self.scale
         x = self.maxpool(x)
         x = self.global_avg_pool(x)
         x = x.contiguous()
         x = custom_ops_lib.conv_transpose3d_multiply_max_global_avg_pool_clamp_custom(x)
         return x
 '''
-```

@@ -1,5 +1,3 @@
-Based on the Wiki research, I'll generate the fused matmul+add+swish+tanh+gelu+hardtanh kernel using the Matmul high-order API + Vector activation pattern with AIC/AIV split.
-
 project_json_src='''
 [
     {
@@ -236,7 +234,8 @@ public:
             uint32_t tilesPerCore = totalTiles / numBlocks;
             uint32_t extraTiles = totalTiles % numBlocks;
 
-            uint32_t startTile, myTiles;
+            uint32_t startTile;
+            uint32_t myTiles;
             if (blockIdx < extraTiles) {
                 startTile = blockIdx * (tilesPerCore + 1);
                 myTiles = tilesPerCore + 1;
@@ -298,7 +297,9 @@ private:
     GlobalTensor<float> biasGm;
     GlobalTensor<float> yGm;
     TCubeTiling tiling;
-    uint32_t M, N, K;
+    uint32_t M;
+    uint32_t N;
+    uint32_t K;
 };
 
 extern "C" __global__ __aicore__ void matmul_add_swish_tanh_gelu_hardtanh_custom(

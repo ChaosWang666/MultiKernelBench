@@ -1,5 +1,3 @@
-Now I have enough context. Let me generate the solution.
-
 project_json_src='''
 [
     {
@@ -39,8 +37,10 @@ host_tiling_src="""
 namespace optiling {
 BEGIN_TILING_DATA_DEF(MatmulSigmoidSumCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, batchSize);
-  TILING_DATA_FIELD_DEF(uint32_t, featureSize);
-  TILING_DATA_FIELD_DEF(uint32_t, coreNum);
+  TILING_DATA_FIELD_DEF(uint32_t, hiddenSize);
+  TILING_DATA_FIELD_DEF(uint32_t, batchPerCore);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLen);
+  TILING_DATA_FIELD_DEF(uint32_t, numTiles);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(MatmulSigmoidSumCustom, MatmulSigmoidSumCustomTilingData)
@@ -50,33 +50,54 @@ REGISTER_TILING_DATA_CLASS(MatmulSigmoidSumCustom, MatmulSigmoidSumCustomTilingD
 host_operator_src="""
 #include "matmul_sigmoid_sum_custom_tiling.h"
 #include "register/op_def_registry.h"
-#include "tiling/platform/platform_ascendc.h"
 
 namespace optiling {
+const uint32_t MAX_BLOCK_DIM = 16;
+const uint32_t MIN_BATCH_PER_CORE_ALIGN = 8;
+const uint32_t TILE_LEN = 8192;
+
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     MatmulSigmoidSumCustomTilingData tiling;
-    auto shape = context->GetInputShape(0)->GetOriginShape();
-    uint32_t batchSize = shape.GetDim(0);
-    uint32_t featureSize = shape.GetDim(1);
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = xShape.GetDim(0);
+    uint32_t hiddenSize = xShape.GetDim(1);
 
-    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
-    uint32_t coreNum = ascendcPlatform.GetCoreNumAiv();
-    if (coreNum == 0) {
-        coreNum = 40;
+    uint32_t blockDim = 1;
+    for (uint32_t d = MAX_BLOCK_DIM; d >= 1; d /= 2) {
+        if (batchSize % d == 0) {
+            uint32_t bpc = batchSize / d;
+            if (bpc % MIN_BATCH_PER_CORE_ALIGN == 0) {
+                blockDim = d;
+                break;
+            }
+        }
+        if (d == 1) break;
     }
-    if (batchSize < coreNum) {
-        coreNum = batchSize;
-    }
-    if (coreNum == 0) {
-        coreNum = 1;
+    if (blockDim == 0) {
+        blockDim = 1;
     }
 
-    context->SetBlockDim(coreNum);
+    uint32_t batchPerCore = batchSize / blockDim;
+
+    uint32_t tileLen = TILE_LEN;
+    if (tileLen > hiddenSize) {
+        tileLen = hiddenSize;
+    }
+    while (tileLen > 0 && (hiddenSize % tileLen != 0)) {
+        tileLen /= 2;
+    }
+    if (tileLen == 0) {
+        tileLen = hiddenSize;
+    }
+    uint32_t numTiles = hiddenSize / tileLen;
+
+    context->SetBlockDim(blockDim);
     tiling.set_batchSize(batchSize);
-    tiling.set_featureSize(featureSize);
-    tiling.set_coreNum(coreNum);
-
+    tiling.set_hiddenSize(hiddenSize);
+    tiling.set_batchPerCore(batchPerCore);
+    tiling.set_tileLen(tileLen);
+    tiling.set_numTiles(numTiles);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -84,7 +105,6 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 }
-
 
 namespace ge {
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
@@ -103,7 +123,6 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 }
-
 
 namespace ops {
 class MatmulSigmoidSumCustom : public OpDef {
@@ -137,154 +156,105 @@ kernel_src="""
 #include "kernel_operator.h"
 
 constexpr int32_t BUFFER_NUM = 2;
-constexpr uint32_t TILE_LEN = 4096;
 
 class KernelSigmoidSum {
 public:
     __aicore__ inline KernelSigmoidSum() {}
-
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t featureSize, uint32_t coreNum)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                uint32_t batchSize, uint32_t hiddenSize,
+                                uint32_t batchPerCore, uint32_t tileLen, uint32_t numTiles)
     {
-        this->batchSize = batchSize;
-        this->featureSize = featureSize;
+        this->hiddenSize = hiddenSize;
+        this->batchPerCore = batchPerCore;
+        this->tileLen = tileLen;
+        this->numTiles = numTiles;
 
-        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t coreOffset = AscendC::GetBlockIdx() * batchPerCore;
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + coreOffset * hiddenSize, batchPerCore * hiddenSize);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + coreOffset, batchPerCore);
 
-        uint32_t baseRows = batchSize / coreNum;
-        uint32_t extraRows = batchSize % coreNum;
-        uint32_t startRow;
-        uint32_t endRow;
-        if (blockIdx < extraRows) {
-            startRow = blockIdx * (baseRows + 1);
-            endRow = startRow + (baseRows + 1);
-        } else {
-            startRow = extraRows * (baseRows + 1) + (blockIdx - extraRows) * baseRows;
-            endRow = startRow + baseRows;
+        pipe.InitBuffer(xQue, BUFFER_NUM, tileLen * sizeof(DTYPE_X));
+        pipe.InitBuffer(tmpBuf, tileLen * sizeof(DTYPE_X));
+        pipe.InitBuffer(workBuf, tileLen * sizeof(DTYPE_X));
+        pipe.InitBuffer(reduceBuf, 32);
+
+        uint32_t outBytes = batchPerCore * sizeof(DTYPE_Y);
+        uint32_t outBufBytes = ((outBytes + 31) / 32) * 32;
+        if (outBufBytes < 32) {
+            outBufBytes = 32;
         }
-
-        this->rowsToProcess = endRow - startRow;
-        if (this->rowsToProcess == 0) {
-            return;
-        }
-
-        this->startRow = startRow;
-
-        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + startRow * featureSize,
-                            this->rowsToProcess * featureSize);
-        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + startRow, this->rowsToProcess);
-
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, TILE_LEN * sizeof(DTYPE_X));
-        pipe.InitBuffer(outQueueY, 1, 32);
-        pipe.InitBuffer(tmpBuf, TILE_LEN * sizeof(DTYPE_X));
-        pipe.InitBuffer(scalarBuf, 32);
-        pipe.InitBuffer(reduceTmpBuf, 4096);
-        pipe.InitBuffer(accBuf, 32);
+        pipe.InitBuffer(outQue, 1, outBufBytes);
     }
 
     __aicore__ inline void Process()
     {
-        if (rowsToProcess == 0) {
-            return;
-        }
+        AscendC::LocalTensor<DTYPE_X> tmpLocal = tmpBuf.Get<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_X> workLocal = workBuf.Get<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_X> reduceLocal = reduceBuf.Get<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> outLocal = outQue.AllocTensor<DTYPE_Y>();
 
-        uint32_t tilesPerRow = (featureSize + TILE_LEN - 1) / TILE_LEN;
+        for (uint32_t i = 0; i < this->batchPerCore; i++) {
+            float batchSum = 0.0f;
+            for (uint32_t t = 0; t < this->numTiles; t++) {
+                AscendC::LocalTensor<DTYPE_X> xLocal = xQue.AllocTensor<DTYPE_X>();
+                AscendC::DataCopy(xLocal, xGm[i * this->hiddenSize + t * this->tileLen], this->tileLen);
+                xQue.EnQue(xLocal);
 
-        for (uint32_t r = 0; r < rowsToProcess; r++) {
-            AscendC::LocalTensor<DTYPE_X> accLocal = accBuf.Get<DTYPE_X>();
-            accLocal.SetValue(0, (DTYPE_X)0.0);
-            AscendC::PipeBarrier<PIPE_ALL>();
+                AscendC::LocalTensor<DTYPE_X> xL = xQue.DeQue<DTYPE_X>();
 
-            DTYPE_X rowSum = (DTYPE_X)0.0;
+                AscendC::Muls(tmpLocal, xL, -1.0f, this->tileLen);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Exp(tmpLocal, tmpLocal, this->tileLen);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Adds(tmpLocal, tmpLocal, 1.0f, this->tileLen);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Reciprocal(tmpLocal, tmpLocal, this->tileLen);
+                AscendC::PipeBarrier<PIPE_V>();
 
-            for (uint32_t t = 0; t < tilesPerRow; t++) {
-                uint32_t offset = t * TILE_LEN;
-                uint32_t len = (offset + TILE_LEN <= featureSize) ? TILE_LEN : (featureSize - offset);
+                AscendC::ReduceSum<DTYPE_X>(reduceLocal, tmpLocal, workLocal, this->tileLen);
+                xQue.FreeTensor(xL);
 
-                CopyIn(r, offset, len);
-                DTYPE_X partial = ComputeTile(len);
-                rowSum += partial;
+                AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+
+                batchSum += reduceLocal.GetValue(0);
+
+                AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
             }
-
-            CopyOut(r, rowSum);
+            outLocal.SetValue(i, batchSum);
         }
-    }
 
-private:
-    __aicore__ inline void CopyIn(uint32_t row, uint32_t offset, uint32_t len)
-    {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
-        AscendC::DataCopyExtParams copyParams;
-        copyParams.blockCount = 1;
-        copyParams.blockLen = len * sizeof(DTYPE_X);
-        copyParams.srcStride = 0;
-        copyParams.dstStride = 0;
-        AscendC::DataCopyPadExtParams<DTYPE_X> padParams;
-        padParams.isPad = false;
-        padParams.leftPadding = 0;
-        padParams.rightPadding = 0;
-        padParams.paddingValue = (DTYPE_X)0;
-        AscendC::DataCopyPad(xLocal, xGm[row * featureSize + offset], copyParams, padParams);
-        inQueueX.EnQue(xLocal);
-    }
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
 
-    __aicore__ inline DTYPE_X ComputeTile(uint32_t len)
-    {
-        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_X> tmp = tmpBuf.Get<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_X> scalarTmp = scalarBuf.Get<DTYPE_X>();
-        AscendC::LocalTensor<DTYPE_X> reduceTmp = reduceTmpBuf.Get<DTYPE_X>();
-
-        AscendC::Muls<DTYPE_X>(tmp, xLocal, (DTYPE_X)(-1.0), len);
-        AscendC::Exp<DTYPE_X>(tmp, tmp, len);
-        AscendC::Adds<DTYPE_X>(tmp, tmp, (DTYPE_X)(1.0), len);
-        AscendC::Duplicate<DTYPE_X>(xLocal, (DTYPE_X)(1.0), len);
-        AscendC::Div<DTYPE_X>(tmp, xLocal, tmp, len);
-
-        AscendC::ReduceSum<DTYPE_X>(scalarTmp, tmp, reduceTmp, static_cast<int32_t>(len));
-        AscendC::PipeBarrier<PIPE_ALL>();
-        DTYPE_X partial = scalarTmp.GetValue(0);
-
-        inQueueX.FreeTensor(xLocal);
-        return partial;
-    }
-
-    __aicore__ inline void CopyOut(uint32_t row, DTYPE_X rowSum)
-    {
-        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
-        yLocal.SetValue(0, rowSum);
-        outQueueY.EnQue<DTYPE_Y>(yLocal);
-        AscendC::LocalTensor<DTYPE_Y> yDeq = outQueueY.DeQue<DTYPE_Y>();
-        AscendC::DataCopyExtParams copyParams;
-        copyParams.blockCount = 1;
-        copyParams.blockLen = sizeof(DTYPE_Y);
-        copyParams.srcStride = 0;
-        copyParams.dstStride = 0;
-        AscendC::DataCopyPad(yGm[row], yDeq, copyParams);
-        outQueueY.FreeTensor(yDeq);
+        outQue.EnQue<DTYPE_Y>(outLocal);
+        AscendC::LocalTensor<DTYPE_Y> outFinal = outQue.DeQue<DTYPE_Y>();
+        AscendC::DataCopy(yGm, outFinal, this->batchPerCore);
+        outQue.FreeTensor(outFinal);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
-    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueY;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> xQue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQue;
     AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> scalarBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceTmpBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> accBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> workBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
     AscendC::GlobalTensor<DTYPE_X> xGm;
     AscendC::GlobalTensor<DTYPE_Y> yGm;
-    uint32_t batchSize;
-    uint32_t featureSize;
-    uint32_t rowsToProcess;
-    uint32_t startRow;
+    uint32_t hiddenSize;
+    uint32_t batchPerCore;
+    uint32_t tileLen;
+    uint32_t numTiles;
 };
 
 extern "C" __global__ __aicore__ void matmul_sigmoid_sum_custom(
-    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
-{
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelSigmoidSum op;
-    op.Init(x, y, tiling_data.batchSize, tiling_data.featureSize, tiling_data.coreNum);
+    op.Init(x, y, tiling_data.batchSize, tiling_data.hiddenSize,
+            tiling_data.batchPerCore, tiling_data.tileLen, tiling_data.numTiles);
     op.Process();
 }
 """
@@ -296,9 +266,8 @@ python_bind_src="""
 #include <torch/extension.h>
 
 at::Tensor matmul_sigmoid_sum_custom_impl_npu(const at::Tensor& x) {
-    auto options = x.options();
-    int64_t batch = x.size(0);
-    at::Tensor result = at::empty({batch, 1}, options);
+    auto batch = x.size(0);
+    at::Tensor result = at::empty({batch, 1}, x.options());
     EXEC_NPU_CMD(aclnnMatmulSigmoidSumCustom, x, result);
     return result;
 }
@@ -308,8 +277,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("matmul_sigmoid_sum_custom", &matmul_sigmoid_sum_custom_impl_npu,
-          "fused sigmoid + sum over last dim");
+    m.def("matmul_sigmoid_sum_custom", &matmul_sigmoid_sum_custom_impl_npu, "fused sigmoid + reduce-sum after linear");
 }
 """
 
@@ -319,14 +287,13 @@ import torch.nn as nn
 import torch_npu
 import custom_ops_lib
 
-class ModelNew(torch.nn.Module):
+class ModelNew(nn.Module):
     def __init__(self, input_size, hidden_size):
-        super(ModelNew, self).__init__()
+        super().__init__()
         self.linear = nn.Linear(input_size, hidden_size)
 
     def forward(self, x):
         x = self.linear(x)
         x = x.contiguous()
-        x = custom_ops_lib.matmul_sigmoid_sum_custom(x)
-        return x
+        return custom_ops_lib.matmul_sigmoid_sum_custom(x)
 '''

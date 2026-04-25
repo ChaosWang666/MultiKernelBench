@@ -51,9 +51,10 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 16;
+const uint32_t TILE_NUM = 256;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
+
     GemmBatchNormGeluGroupNormMeanReluCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
     context->SetBlockDim(BLOCK_DIM);
@@ -106,6 +107,7 @@ public:
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
+
     }
 };
 
@@ -131,9 +133,6 @@ public:
         yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
         pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
-        pipe.InitBuffer(tmpBuf1, this->tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuf2, this->tileLength * sizeof(float));
-        pipe.InitBuffer(tmpBuf3, this->tileLength * sizeof(float));
     }
     __aicore__ inline void Process()
     {
@@ -156,36 +155,8 @@ private:
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
         AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
-
-        AscendC::LocalTensor<float> t1 = tmpBuf1.Get<float>();
-        AscendC::LocalTensor<float> t2 = tmpBuf2.Get<float>();
-        AscendC::LocalTensor<float> t3 = tmpBuf3.Get<float>();
-
-        const float kBeta = 0.7978845608028654f;
-        const float kAlpha = 0.044715f;
-        const float kHalf = 0.5f;
-        const float kOne = 1.0f;
-        const float kZero = 0.0f;
-
-        AscendC::Mul(t1, xLocal, xLocal, this->tileLength);
-        AscendC::Mul(t1, t1, xLocal, this->tileLength);
-        AscendC::Muls(t1, t1, kAlpha, this->tileLength);
-        AscendC::Add(t1, t1, xLocal, this->tileLength);
-        AscendC::Muls(t1, t1, kBeta, this->tileLength);
-
-        AscendC::Muls(t2, t1, -2.0f, this->tileLength);
-        AscendC::Exp(t2, t2, this->tileLength);
-        AscendC::Adds(t2, t2, kOne, this->tileLength);
-        AscendC::Duplicate(t3, 2.0f, this->tileLength);
-        AscendC::Div(t2, t3, t2, this->tileLength);
-        AscendC::Adds(t2, t2, -kOne, this->tileLength);
-
-        AscendC::Adds(t2, t2, kOne, this->tileLength);
-        AscendC::Mul(t2, t2, xLocal, this->tileLength);
-        AscendC::Muls(t2, t2, kHalf, this->tileLength);
-
-        AscendC::Relu(yLocal, t2, this->tileLength);
-
+        AscendC::Gelu(yLocal, xLocal, this->tileLength);
+        AscendC::Relu(yLocal, yLocal, this->tileLength);
         outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
     }
@@ -200,7 +171,6 @@ private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf1, tmpBuf2, tmpBuf3;
     AscendC::GlobalTensor<DTYPE_X> xGm;
     AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t blockLength;
@@ -222,9 +192,9 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor gemm_batch_norm_gelu_group_norm_mean_relu_custom_impl_npu(const at::Tensor& self) {
-    at::Tensor result = at::empty_like(self);
-    EXEC_NPU_CMD(aclnnGemmBatchNormGeluGroupNormMeanReluCustom, self, result);
+at::Tensor gemm_batch_norm_gelu_group_norm_mean_relu_custom_impl_npu(const at::Tensor& x) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnGemmBatchNormGeluGroupNormMeanReluCustom, x, result);
     return result;
 }
 
@@ -233,7 +203,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("gemm_batch_norm_gelu_group_norm_mean_relu_custom", &gemm_batch_norm_gelu_group_norm_mean_relu_custom_impl_npu, "fused gelu+relu after gemm+batch_norm");
+    m.def("gemm_batch_norm_gelu_group_norm_mean_relu_custom", &gemm_batch_norm_gelu_group_norm_mean_relu_custom_impl_npu, "fused gelu+relu");
 }
 """
 
@@ -245,14 +215,13 @@ import custom_ops_lib
 
 class ModelNew(nn.Module):
     def __init__(self, in_features, out_features):
-        super(ModelNew, self).__init__()
+        super().__init__()
         self.gemm = nn.Linear(in_features, out_features)
         self.batch_norm = nn.BatchNorm1d(out_features)
 
     def forward(self, x):
         x = self.gemm(x)
         x = self.batch_norm(x)
-        x = x.contiguous()
-        x = custom_ops_lib.gemm_batch_norm_gelu_group_norm_mean_relu_custom(x)
+        x = custom_ops_lib.gemm_batch_norm_gelu_group_norm_mean_relu_custom(x.contiguous())
         return x
 '''

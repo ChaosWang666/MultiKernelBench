@@ -1,0 +1,370 @@
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose2dMaxPoolHardtanhMeanTanhCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "attr": [
+            {
+                "name": "hardtanh_min",
+                "param_type": "required",
+                "type": "float"
+            },
+            {
+                "name": "hardtanh_max",
+                "param_type": "required",
+                "type": "float"
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose2dMaxPoolHardtanhMeanTanhCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalTasks);
+  TILING_DATA_FIELD_DEF(uint32_t, innerSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tasksPerCore);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(float, invInnerSize);
+  TILING_DATA_FIELD_DEF(float, hardtanhMin);
+  TILING_DATA_FIELD_DEF(float, hardtanhMax);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose2dMaxPoolHardtanhMeanTanhCustom, ConvTranspose2dMaxPoolHardtanhMeanTanhCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose2d_max_pool_hardtanh_mean_tanh_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM_DEFAULT = 32;
+const uint32_t TILE_LENGTH_DEFAULT = 2048;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose2dMaxPoolHardtanhMeanTanhCustomTilingData tiling;
+
+    auto shape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = static_cast<uint32_t>(shape.GetDim(0));
+    uint32_t C = static_cast<uint32_t>(shape.GetDim(1));
+    uint32_t H = static_cast<uint32_t>(shape.GetDim(2));
+    uint32_t W = static_cast<uint32_t>(shape.GetDim(3));
+
+    uint32_t totalTasks = N * C;
+    uint32_t innerSize = H * W;
+
+    uint32_t blockDim = BLOCK_DIM_DEFAULT;
+    while (blockDim > 1 && (totalTasks % blockDim != 0)) {
+        blockDim--;
+    }
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+    uint32_t tasksPerCore = totalTasks / blockDim;
+
+    uint32_t tileLength = TILE_LENGTH_DEFAULT;
+    if (tileLength > innerSize) {
+        tileLength = innerSize;
+    }
+    while (tileLength > 1 && (innerSize % tileLength != 0)) {
+        tileLength /= 2;
+    }
+    if (tileLength == 0) {
+        tileLength = 1;
+    }
+    uint32_t tileNum = innerSize / tileLength;
+
+    float invInnerSize = 1.0f / static_cast<float>(static_cast<int32_t>(innerSize));
+
+    auto* attrs = context->GetAttrs();
+    const float* hminPtr = attrs->GetAttrPointer<float>(0);
+    const float* hmaxPtr = attrs->GetAttrPointer<float>(1);
+    float hardtanhMin = (hminPtr != nullptr) ? (*hminPtr) : -1.0f;
+    float hardtanhMax = (hmaxPtr != nullptr) ? (*hmaxPtr) : 1.0f;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_totalTasks(totalTasks);
+    tiling.set_innerSize(innerSize);
+    tiling.set_tasksPerCore(tasksPerCore);
+    tiling.set_tileLength(tileLength);
+    tiling.set_tileNum(tileNum);
+    tiling.set_invInnerSize(invInnerSize);
+    tiling.set_hardtanhMin(hardtanhMin);
+    tiling.set_hardtanhMax(hardtanhMax);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(4);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, x_shape->GetDim(1));
+    y_shape->SetDim(2, 1);
+    y_shape->SetDim(3, 1);
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class ConvTranspose2dMaxPoolHardtanhMeanTanhCustom : public OpDef {
+public:
+    explicit ConvTranspose2dMaxPoolHardtanhMeanTanhCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("hardtanh_min").AttrType(REQUIRED).Float();
+        this->Attr("hardtanh_max").AttrType(REQUIRED).Float();
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose2dMaxPoolHardtanhMeanTanhCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelFusedTail {
+public:
+    __aicore__ inline KernelFusedTail() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                uint32_t totalTasks, uint32_t innerSize,
+                                uint32_t tasksPerCore, uint32_t tileLength,
+                                uint32_t tileNum, float invInnerSize,
+                                float hardtanhMin, float hardtanhMax)
+    {
+        this->totalTasks = totalTasks;
+        this->innerSize = innerSize;
+        this->tasksPerCore = tasksPerCore;
+        this->tileLength = tileLength;
+        this->tileNum = tileNum;
+        this->invInnerSize = invInnerSize;
+        this->hardtanhMin = hardtanhMin;
+        this->hardtanhMax = hardtanhMax;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t start = blockIdx * tasksPerCore;
+        uint32_t end = start + tasksPerCore;
+        if (end > totalTasks) {
+            end = totalTasks;
+        }
+        this->startTask = start;
+        this->numTasks = (end > start) ? (end - start) : 0;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + this->startTask * this->innerSize,
+                            this->numTasks * this->innerSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y + this->startTask, this->tasksPerCore);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(accBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(reduceBuf, 32);
+        pipe.InitBuffer(workBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(resultsBuf, this->tasksPerCore * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (this->numTasks == 0) {
+            return;
+        }
+
+        AscendC::LocalTensor<float> resultsLocal = resultsBuf.Get<float>();
+        AscendC::LocalTensor<float> accLocal = accBuf.Get<float>();
+        AscendC::LocalTensor<float> rLocal = reduceBuf.Get<float>();
+        AscendC::LocalTensor<float> wLocal = workBuf.Get<float>();
+
+        int32_t evtVS = static_cast<int32_t>(
+            AscendC::GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
+        int32_t evtSV = static_cast<int32_t>(
+            AscendC::GetTPipePtr()->FetchEventID(AscendC::HardEvent::S_V));
+
+        for (uint32_t i = 0; i < this->numTasks; i++) {
+            AscendC::Duplicate<float>(accLocal, 0.0f, this->tileLength);
+
+            for (uint32_t j = 0; j < this->tileNum; j++) {
+                AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+                AscendC::DataCopy(xLocal, xGm[i * this->innerSize + j * this->tileLength], this->tileLength);
+                inQueueX.EnQue(xLocal);
+
+                xLocal = inQueueX.DeQue<float>();
+                AscendC::Mins<float>(xLocal, xLocal, this->hardtanhMax, this->tileLength);
+                AscendC::Maxs<float>(xLocal, xLocal, this->hardtanhMin, this->tileLength);
+                AscendC::Add<float>(accLocal, accLocal, xLocal, this->tileLength);
+                inQueueX.FreeTensor(xLocal);
+            }
+
+            AscendC::ReduceSum<float>(rLocal, accLocal, wLocal, this->tileLength);
+
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(evtVS);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(evtVS);
+
+            float sum = rLocal.GetValue(0);
+            resultsLocal.SetValue(i, sum * this->invInnerSize);
+
+            AscendC::SetFlag<AscendC::HardEvent::S_V>(evtSV);
+            AscendC::WaitFlag<AscendC::HardEvent::S_V>(evtSV);
+        }
+
+        AscendC::Tanh<float>(resultsLocal, resultsLocal, this->tasksPerCore);
+
+        int32_t evtVM = static_cast<int32_t>(
+            AscendC::GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_MTE3));
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(evtVM);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(evtVM);
+
+        AscendC::DataCopy(yGm, resultsLocal, this->tasksPerCore);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> accBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> workBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> resultsBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+
+    uint32_t totalTasks;
+    uint32_t innerSize;
+    uint32_t numTasks;
+    uint32_t startTask;
+    uint32_t tasksPerCore;
+    uint32_t tileLength;
+    uint32_t tileNum;
+    float invInnerSize;
+    float hardtanhMin;
+    float hardtanhMax;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose2d_max_pool_hardtanh_mean_tanh_custom(
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelFusedTail op;
+    op.Init(x, y,
+            tiling_data.totalTasks, tiling_data.innerSize,
+            tiling_data.tasksPerCore, tiling_data.tileLength,
+            tiling_data.tileNum, tiling_data.invInnerSize,
+            tiling_data.hardtanhMin, tiling_data.hardtanhMax);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose2d_max_pool_hardtanh_mean_tanh_custom_impl_npu(
+    const at::Tensor& self, double hardtanh_min, double hardtanh_max) {
+    auto sizes = self.sizes();
+    at::Tensor result = at::empty({sizes[0], sizes[1], 1, 1}, self.options());
+    float hmin = static_cast<float>(hardtanh_min);
+    float hmax = static_cast<float>(hardtanh_max);
+    EXEC_NPU_CMD(aclnnConvTranspose2dMaxPoolHardtanhMeanTanhCustom,
+                 self, hmin, hmax, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose2d_max_pool_hardtanh_mean_tanh_custom",
+           &conv_transpose2d_max_pool_hardtanh_mean_tanh_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose2d_max_pool_hardtanh_mean_tanh_custom",
+          &conv_transpose2d_max_pool_hardtanh_mean_tanh_custom_impl_npu,
+          "Fused Hardtanh + Mean(dim=(2,3), keepdim=True) + Tanh");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding,
+                 maxpool_kernel_size, maxpool_stride, hardtanh_min, hardtanh_max):
+        super().__init__()
+        self.conv_transpose = nn.ConvTranspose2d(in_channels, out_channels, kernel_size,
+                                                 stride=stride, padding=padding)
+        self.maxpool = nn.MaxPool2d(kernel_size=maxpool_kernel_size, stride=maxpool_stride)
+        self.hardtanh_min = float(hardtanh_min)
+        self.hardtanh_max = float(hardtanh_max)
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = self.maxpool(x)
+        x = x.contiguous()
+        x = custom_ops_lib.conv_transpose2d_max_pool_hardtanh_mean_tanh_custom(
+            x, self.hardtanh_min, self.hardtanh_max)
+        return x
+'''

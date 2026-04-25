@@ -1,5 +1,3 @@
-Now I have all the information needed. Let me generate the complete implementation.
-
 project_json_src='''
 [
     {
@@ -29,7 +27,7 @@ project_json_src='''
                 ]
             }
         ],
-        "attr_desc": [
+        "attr": [
             {
                 "name": "subtract_value",
                 "param_type": "required",
@@ -52,8 +50,8 @@ namespace optiling {
 BEGIN_TILING_DATA_DEF(MatmulSubtractMultiplyReluCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, totalLength);
   TILING_DATA_FIELD_DEF(uint32_t, tileNum);
-  TILING_DATA_FIELD_DEF(float, subtractValue);
   TILING_DATA_FIELD_DEF(float, multiplyValue);
+  TILING_DATA_FIELD_DEF(float, combinedBias);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(MatmulSubtractMultiplyReluCustom, MatmulSubtractMultiplyReluCustomTilingData)
@@ -67,21 +65,23 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 16;
+const uint32_t TILE_NUM = 256;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
-
     MatmulSubtractMultiplyReluCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
-
-    const float* subVal = context->GetAttrs()->GetAttrPointer<float>(0);
-    const float* mulVal = context->GetAttrs()->GetAttrPointer<float>(1);
-
     context->SetBlockDim(BLOCK_DIM);
     tiling.set_totalLength(totalLength);
     tiling.set_tileNum(TILE_NUM);
-    tiling.set_subtractValue(*subVal);
-    tiling.set_multiplyValue(*mulVal);
+
+    auto attrs = context->GetAttrs();
+    const float* subtractValuePtr = attrs->GetAttrPointer<float>(0);
+    const float* multiplyValuePtr = attrs->GetAttrPointer<float>(1);
+    float subVal = *subtractValuePtr;
+    float mulVal = *multiplyValuePtr;
+    tiling.set_multiplyValue(mulVal);
+    tiling.set_combinedBias(-subVal * mulVal);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -123,19 +123,14 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Attr("subtract_value")
-            .AttrType(REQUIRED)
-            .Float();
-        this->Attr("multiply_value")
-            .AttrType(REQUIRED)
-            .Float();
+        this->Attr("subtract_value").AttrType(REQUIRED).Float();
+        this->Attr("multiply_value").AttrType(REQUIRED).Float();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 
         this->AICore()
             .SetTiling(optiling::TilingFunc);
         this->AICore().AddConfig("ascend910b");
-
     }
 };
 
@@ -148,22 +143,21 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelSubtractMultiplyRelu {
+class KernelMatmulSubtractMultiplyRelu {
 public:
-    __aicore__ inline KernelSubtractMultiplyRelu() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum,
-                                 float subtractValue, float multiplyValue)
+    __aicore__ inline KernelMatmulSubtractMultiplyRelu() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum, float multiplyValue, float combinedBias)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
         this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
-        this->subtractValue = subtractValue;
         this->multiplyValue = multiplyValue;
+        this->combinedBias = combinedBias;
 
-        xGm.SetGlobalBuffer((__gm__ float *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        yGm.SetGlobalBuffer((__gm__ float *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
-        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
     }
     __aicore__ inline void Process()
     {
@@ -178,23 +172,23 @@ public:
 private:
     __aicore__ inline void CopyIn(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
         AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
         inQueueX.EnQue(xLocal);
     }
     __aicore__ inline void Compute(int32_t progress)
     {
-        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
-        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
-        AscendC::Adds(yLocal, xLocal, -this->subtractValue, this->tileLength);
-        AscendC::Muls(yLocal, yLocal, this->multiplyValue, this->tileLength);
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
+        AscendC::Muls(yLocal, xLocal, (DTYPE_X)this->multiplyValue, this->tileLength);
+        AscendC::Adds(yLocal, yLocal, (DTYPE_Y)this->combinedBias, this->tileLength);
         AscendC::Relu(yLocal, yLocal, this->tileLength);
-        outQueueY.EnQue<float>(yLocal);
+        outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
     }
     __aicore__ inline void CopyOut(int32_t progress)
     {
-        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.DeQue<DTYPE_Y>();
         AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, this->tileLength);
         outQueueY.FreeTensor(yLocal);
     }
@@ -203,19 +197,19 @@ private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::GlobalTensor<float> xGm;
-    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
-    float subtractValue;
     float multiplyValue;
+    float combinedBias;
 };
 
 extern "C" __global__ __aicore__ void matmul_subtract_multiply_relu_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelSubtractMultiplyRelu op;
-    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum, tiling_data.subtractValue, tiling_data.multiplyValue);
+    KernelMatmulSubtractMultiplyRelu op;
+    op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum, tiling_data.multiplyValue, tiling_data.combinedBias);
     op.Process();
 }
 """
@@ -226,9 +220,11 @@ python_bind_src="""
 #include "pytorch_npu_helper.hpp"
 #include <torch/extension.h>
 
-at::Tensor matmul_subtract_multiply_relu_custom_impl_npu(const at::Tensor& x, double subtract_value, double multiply_value) {
-    at::Tensor result = at::empty_like(x);
-    EXEC_NPU_CMD(aclnnMatmulSubtractMultiplyReluCustom, x, static_cast<float>(subtract_value), static_cast<float>(multiply_value), result);
+at::Tensor matmul_subtract_multiply_relu_custom_impl_npu(const at::Tensor& self, double subtract_value, double multiply_value) {
+    at::Tensor result = at::empty_like(self);
+    float sub_val = static_cast<float>(subtract_value);
+    float mul_val = static_cast<float>(multiply_value);
+    EXEC_NPU_CMD(aclnnMatmulSubtractMultiplyReluCustom, self, sub_val, mul_val, result);
     return result;
 }
 
@@ -237,7 +233,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("matmul_subtract_multiply_relu_custom", &matmul_subtract_multiply_relu_custom_impl_npu, "fused subtract, multiply, relu");
+    m.def("matmul_subtract_multiply_relu_custom", &matmul_subtract_multiply_relu_custom_impl_npu, "fused subtract multiply relu after linear");
 }
 """
 
@@ -257,5 +253,6 @@ class ModelNew(nn.Module):
     def forward(self, x):
         x = self.linear(x)
         x = x.contiguous()
-        return custom_ops_lib.matmul_subtract_multiply_relu_custom(x, self.subtract_value, self.multiply_value)
+        x = custom_ops_lib.matmul_subtract_multiply_relu_custom(x, self.subtract_value, self.multiply_value)
+        return x
 '''

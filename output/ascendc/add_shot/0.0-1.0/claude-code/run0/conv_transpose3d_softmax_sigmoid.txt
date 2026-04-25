@@ -1,7 +1,3 @@
-```python
-import torch
-import torch.nn as nn
-
 project_json_src='''
 [
     {
@@ -42,7 +38,9 @@ namespace optiling {
 BEGIN_TILING_DATA_DEF(ConvTranspose3dSoftmaxSigmoidCustomTilingData)
   TILING_DATA_FIELD_DEF(uint32_t, batchSize);
   TILING_DATA_FIELD_DEF(uint32_t, channels);
-  TILING_DATA_FIELD_DEF(uint32_t, spatialSize);
+  TILING_DATA_FIELD_DEF(uint32_t, spatial);
+  TILING_DATA_FIELD_DEF(uint32_t, tileSpatial);
+  TILING_DATA_FIELD_DEF(uint32_t, batchPerCore);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ConvTranspose3dSoftmaxSigmoidCustom, ConvTranspose3dSoftmaxSigmoidCustomTilingData)
@@ -55,21 +53,40 @@ host_operator_src="""
 
 
 namespace optiling {
-const uint32_t BLOCK_DIM = 40;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     ConvTranspose3dSoftmaxSigmoidCustomTilingData tiling;
-    auto shape = context->GetInputShape(0)->GetOriginShape();
-    uint32_t batchSize = shape.GetDim(0);
-    uint32_t channels = shape.GetDim(1);
-    uint32_t spatialSize = 1;
-    for (size_t i = 2; i < shape.GetDimNum(); i++) {
-        spatialSize *= shape.GetDim(i);
+
+    auto inputShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = static_cast<uint32_t>(inputShape.GetDim(0));
+    uint32_t channels  = static_cast<uint32_t>(inputShape.GetDim(1));
+    uint32_t d = static_cast<uint32_t>(inputShape.GetDim(2));
+    uint32_t h = static_cast<uint32_t>(inputShape.GetDim(3));
+    uint32_t w = static_cast<uint32_t>(inputShape.GetDim(4));
+    uint32_t spatial = d * h * w;
+
+    uint32_t tileSpatial = 256;
+    while (tileSpatial > 8 && spatial % tileSpatial != 0) {
+        tileSpatial >>= 1;
     }
-    context->SetBlockDim(BLOCK_DIM);
+    if (tileSpatial < 8) {
+        tileSpatial = 8;
+    }
+
+    uint32_t blockDim = batchSize;
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+    uint32_t batchPerCore = 1;
+
+    context->SetBlockDim(blockDim);
+
     tiling.set_batchSize(batchSize);
     tiling.set_channels(channels);
-    tiling.set_spatialSize(spatialSize);
+    tiling.set_spatial(spatial);
+    tiling.set_tileSpatial(tileSpatial);
+    tiling.set_batchPerCore(batchPerCore);
+
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
@@ -127,115 +144,136 @@ OP_ADD(ConvTranspose3dSoftmaxSigmoidCustom);
 kernel_src="""
 #include "kernel_operator.h"
 
+constexpr int32_t BUFFER_NUM = 1;
+
 class KernelConvTranspose3dSoftmaxSigmoid {
 public:
     __aicore__ inline KernelConvTranspose3dSoftmaxSigmoid() {}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t batchSize, uint32_t channels, uint32_t spatialSize)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                 uint32_t batchSize, uint32_t channels,
+                                 uint32_t spatial, uint32_t tileSpatial,
+                                 uint32_t batchPerCore)
     {
         this->channels = channels;
-        this->spatialSize = spatialSize;
-        this->batchSize = batchSize;
-        this->alignedChannels = (channels + 63) / 64 * 64;
+        this->spatial = spatial;
+        this->tileSpatial = tileSpatial;
+        this->tileNum = spatial / tileSpatial;
 
-        uint32_t totalSpatial = batchSize * spatialSize;
-        uint32_t blockNum = AscendC::GetBlockNum();
         uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->batchStart = blockIdx * batchPerCore;
+        this->batchEnd = this->batchStart + batchPerCore;
+        if (this->batchEnd > batchSize) {
+            this->batchEnd = batchSize;
+        }
 
-        uint32_t spatialPerBlock = (totalSpatial + blockNum - 1) / blockNum;
-        this->startSpatial = blockIdx * spatialPerBlock;
-        uint32_t endSpatial = this->startSpatial + spatialPerBlock;
-        if (endSpatial > totalSpatial) endSpatial = totalSpatial;
-        this->mySpatial = (endSpatial > this->startSpatial) ? (endSpatial - this->startSpatial) : 0;
+        uint32_t totalLen = batchSize * channels * spatial;
+        xGm.SetGlobalBuffer((__gm__ float*)x, totalLen);
+        yGm.SetGlobalBuffer((__gm__ float*)y, totalLen);
 
-        xGm.SetGlobalBuffer((__gm__ float*)x, totalSpatial * channels);
-        yGm.SetGlobalBuffer((__gm__ float*)y, totalSpatial * channels);
-
-        pipe.InitBuffer(xBuf, this->alignedChannels * sizeof(float));
-        pipe.InitBuffer(yBuf, this->alignedChannels * sizeof(float));
-        pipe.InitBuffer(tmpBuf, this->alignedChannels * sizeof(float));
+        uint32_t bufSize = channels * tileSpatial * sizeof(float);
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, bufSize);
+        pipe.InitBuffer(outQueueY, BUFFER_NUM, bufSize);
+        pipe.InitBuffer(maxBuf, tileSpatial * sizeof(float));
+        pipe.InitBuffer(sumBuf, tileSpatial * sizeof(float));
+        pipe.InitBuffer(tmpBuf, tileSpatial * sizeof(float));
     }
 
     __aicore__ inline void Process()
     {
-        AscendC::LocalTensor<float> xLocal = xBuf.Get<float>();
-        AscendC::LocalTensor<float> yLocal = yBuf.Get<float>();
-        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
-
-        for (uint32_t i = 0; i < this->mySpatial; i++) {
-            uint32_t globalSpatialIdx = this->startSpatial + i;
-            uint32_t batchIdx = globalSpatialIdx / this->spatialSize;
-            uint32_t spatialIdx = globalSpatialIdx % this->spatialSize;
-            uint32_t baseOffset = batchIdx * this->channels * this->spatialSize + spatialIdx;
-
-            // Load C channel values (strided)
-            for (uint32_t c = 0; c < this->channels; c++) {
-                xLocal.SetValue(c, xGm.GetValue(baseOffset + c * this->spatialSize));
-            }
-            for (uint32_t c = this->channels; c < this->alignedChannels; c++) {
-                xLocal.SetValue(c, -1.0e30f);
-            }
-
-            // max reduction (scalar)
-            float maxVal = xLocal.GetValue(0);
-            for (uint32_t c = 1; c < this->channels; c++) {
-                float v = xLocal.GetValue(c);
-                if (v > maxVal) maxVal = v;
-            }
-
-            // x = x - max
-            AscendC::Adds(xLocal, xLocal, -maxVal, this->alignedChannels);
-
-            // exp
-            AscendC::Exp(xLocal, xLocal, this->alignedChannels);
-
-            // zero-out padding so it doesn't contribute to sum
-            for (uint32_t c = this->channels; c < this->alignedChannels; c++) {
-                xLocal.SetValue(c, 0.0f);
-            }
-
-            // sum reduction (scalar)
-            float sumVal = 0.0f;
-            for (uint32_t c = 0; c < this->channels; c++) {
-                sumVal += xLocal.GetValue(c);
-            }
-            float invSum = (sumVal > 0.0f) ? (1.0f / sumVal) : 0.0f;
-
-            // softmax = exp / sum
-            AscendC::Muls(xLocal, xLocal, invSum, this->alignedChannels);
-
-            // sigmoid(s) = 1 / (1 + exp(-s))
-            AscendC::Muls(yLocal, xLocal, -1.0f, this->alignedChannels);
-            AscendC::Exp(yLocal, yLocal, this->alignedChannels);
-            AscendC::Adds(yLocal, yLocal, 1.0f, this->alignedChannels);
-            AscendC::Duplicate(tmpLocal, 1.0f, this->alignedChannels);
-            AscendC::Div(yLocal, tmpLocal, yLocal, this->alignedChannels);
-
-            // Store back (strided)
-            for (uint32_t c = 0; c < this->channels; c++) {
-                yGm.SetValue(baseOffset + c * this->spatialSize, yLocal.GetValue(c));
+        for (uint32_t b = batchStart; b < batchEnd; b++) {
+            for (uint32_t t = 0; t < tileNum; t++) {
+                CopyIn(b, t);
+                Compute();
+                CopyOut(b, t);
             }
         }
     }
 
 private:
+    __aicore__ inline void CopyIn(uint32_t b, uint32_t t)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        uint32_t baseOffset = b * channels * spatial + t * tileSpatial;
+        for (uint32_t c = 0; c < channels; c++) {
+            AscendC::DataCopy(xLocal[c * tileSpatial],
+                              xGm[baseOffset + c * spatial],
+                              tileSpatial);
+        }
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Compute()
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueY.AllocTensor<float>();
+        AscendC::LocalTensor<float> maxT = maxBuf.Get<float>();
+        AscendC::LocalTensor<float> sumT = sumBuf.Get<float>();
+        AscendC::LocalTensor<float> tmpT = tmpBuf.Get<float>();
+
+        AscendC::Duplicate<float>(maxT, -3.4e37f, tileSpatial);
+        for (uint32_t c = 0; c < channels; c++) {
+            AscendC::Max(maxT, maxT, xLocal[c * tileSpatial], tileSpatial);
+        }
+
+        AscendC::Duplicate<float>(sumT, 0.0f, tileSpatial);
+        for (uint32_t c = 0; c < channels; c++) {
+            AscendC::Sub(yLocal[c * tileSpatial], xLocal[c * tileSpatial], maxT, tileSpatial);
+            AscendC::Exp(yLocal[c * tileSpatial], yLocal[c * tileSpatial], tileSpatial);
+            AscendC::Add(sumT, sumT, yLocal[c * tileSpatial], tileSpatial);
+        }
+
+        for (uint32_t c = 0; c < channels; c++) {
+            AscendC::Div(yLocal[c * tileSpatial], yLocal[c * tileSpatial], sumT, tileSpatial);
+            AscendC::Muls(tmpT, yLocal[c * tileSpatial], -1.0f, tileSpatial);
+            AscendC::Exp(tmpT, tmpT, tileSpatial);
+            AscendC::Adds(tmpT, tmpT, 1.0f, tileSpatial);
+            AscendC::Duplicate<float>(yLocal[c * tileSpatial], 1.0f, tileSpatial);
+            AscendC::Div(yLocal[c * tileSpatial], yLocal[c * tileSpatial], tmpT, tileSpatial);
+        }
+
+        outQueueY.EnQue<float>(yLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(uint32_t b, uint32_t t)
+    {
+        AscendC::LocalTensor<float> yLocal = outQueueY.DeQue<float>();
+        uint32_t baseOffset = b * channels * spatial + t * tileSpatial;
+        for (uint32_t c = 0; c < channels; c++) {
+            AscendC::DataCopy(yGm[baseOffset + c * spatial],
+                              yLocal[c * tileSpatial],
+                              tileSpatial);
+        }
+        outQueueY.FreeTensor(yLocal);
+    }
+
+private:
     AscendC::TPipe pipe;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> xBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> yBuf;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> maxBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> sumBuf;
     AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
     AscendC::GlobalTensor<float> xGm;
     AscendC::GlobalTensor<float> yGm;
     uint32_t channels;
-    uint32_t spatialSize;
-    uint32_t batchSize;
-    uint32_t startSpatial;
-    uint32_t mySpatial;
-    uint32_t alignedChannels;
+    uint32_t spatial;
+    uint32_t tileSpatial;
+    uint32_t tileNum;
+    uint32_t batchStart;
+    uint32_t batchEnd;
 };
 
-extern "C" __global__ __aicore__ void conv_transpose3d_softmax_sigmoid_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+extern "C" __global__ __aicore__ void conv_transpose3d_softmax_sigmoid_custom(
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
     KernelConvTranspose3dSoftmaxSigmoid op;
-    op.Init(x, y, tiling_data.batchSize, tiling_data.channels, tiling_data.spatialSize);
+    op.Init(x, y,
+            tiling_data.batchSize,
+            tiling_data.channels,
+            tiling_data.spatial,
+            tiling_data.tileSpatial,
+            tiling_data.batchPerCore);
     op.Process();
 }
 """
@@ -257,7 +295,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("conv_transpose3d_softmax_sigmoid_custom", &conv_transpose3d_softmax_sigmoid_custom_impl_npu, "fused softmax(dim=1)+sigmoid after conv_transpose3d");
+    m.def("conv_transpose3d_softmax_sigmoid_custom", &conv_transpose3d_softmax_sigmoid_custom_impl_npu, "fused softmax sigmoid after conv_transpose3d");
 }
 """
 
@@ -267,14 +305,15 @@ import torch.nn as nn
 import torch_npu
 import custom_ops_lib
 
-class ModelNew(nn.Module):
+class ModelNew(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, output_padding, bias=True):
-        super(ModelNew, self).__init__()
-        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, output_padding=output_padding, bias=bias)
+        super().__init__()
+        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size,
+                                                 stride=stride, padding=padding,
+                                                 output_padding=output_padding, bias=bias)
 
     def forward(self, x):
         x = self.conv_transpose(x)
         x = custom_ops_lib.conv_transpose3d_softmax_sigmoid_custom(x.contiguous())
         return x
 '''
-```

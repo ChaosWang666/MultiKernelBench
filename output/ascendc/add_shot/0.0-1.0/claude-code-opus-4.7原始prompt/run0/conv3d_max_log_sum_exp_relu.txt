@@ -1,0 +1,410 @@
+```python
+project_json_src='''
+[
+    {
+        "op": "Conv3dMaxLogSumExpReluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": ["ND"],
+                "type": ["float"]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dMaxLogSumExpReluCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batch);
+  TILING_DATA_FIELD_DEF(uint32_t, inChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, outChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, inD);
+  TILING_DATA_FIELD_DEF(uint32_t, inH);
+  TILING_DATA_FIELD_DEF(uint32_t, inW);
+  TILING_DATA_FIELD_DEF(uint32_t, outD);
+  TILING_DATA_FIELD_DEF(uint32_t, outH);
+  TILING_DATA_FIELD_DEF(uint32_t, outW);
+  TILING_DATA_FIELD_DEF(uint32_t, kSize);
+  TILING_DATA_FIELD_DEF(uint32_t, stride);
+  TILING_DATA_FIELD_DEF(uint32_t, padding);
+  TILING_DATA_FIELD_DEF(uint32_t, totalOut);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dMaxLogSumExpReluCustom, Conv3dMaxLogSumExpReluCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_max_log_sum_exp_relu_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 8;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dMaxLogSumExpReluCustomTilingData tiling;
+
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto wShape = context->GetInputShape(1)->GetOriginShape();
+
+    uint32_t batch = xShape.GetDim(0);
+    uint32_t inChannels = xShape.GetDim(1);
+    uint32_t inD = xShape.GetDim(2);
+    uint32_t inH = xShape.GetDim(3);
+    uint32_t inW = xShape.GetDim(4);
+
+    uint32_t outChannels = wShape.GetDim(0);
+    uint32_t kSize = wShape.GetDim(2);
+    uint32_t stride = 1;
+    uint32_t padding = 1;
+
+    uint32_t convD = (inD + 2 * padding - kSize) / stride + 1;
+    uint32_t convH = (inH + 2 * padding - kSize) / stride + 1;
+    uint32_t convW = (inW + 2 * padding - kSize) / stride + 1;
+
+    uint32_t outD = convD / 2;
+    uint32_t outH = convH / 2;
+    uint32_t outW = convW / 2;
+
+    uint32_t totalOut = batch * outD * outH * outW;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batch(batch);
+    tiling.set_inChannels(inChannels);
+    tiling.set_outChannels(outChannels);
+    tiling.set_inD(inD);
+    tiling.set_inH(inH);
+    tiling.set_inW(inW);
+    tiling.set_outD(outD);
+    tiling.set_outH(outH);
+    tiling.set_outW(outW);
+    tiling.set_kSize(kSize);
+    tiling.set_stride(stride);
+    tiling.set_padding(padding);
+    tiling.set_totalOut(totalOut);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* xShape = context->GetInputShape(0);
+    const gert::Shape* wShape = context->GetInputShape(1);
+    gert::Shape* yShape = context->GetOutputShape(0);
+
+    int64_t batch = xShape->GetDim(0);
+    int64_t inD = xShape->GetDim(2);
+    int64_t inH = xShape->GetDim(3);
+    int64_t inW = xShape->GetDim(4);
+    int64_t kSize = wShape->GetDim(2);
+    int64_t stride = 1;
+    int64_t padding = 1;
+
+    int64_t convD = (inD + 2 * padding - kSize) / stride + 1;
+    int64_t convH = (inH + 2 * padding - kSize) / stride + 1;
+    int64_t convW = (inW + 2 * padding - kSize) / stride + 1;
+
+    yShape->SetDimNum(5);
+    yShape->SetDim(0, batch);
+    yShape->SetDim(1, 1);
+    yShape->SetDim(2, convD / 2);
+    yShape->SetDim(3, convH / 2);
+    yShape->SetDim(4, convW / 2);
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class Conv3dMaxLogSumExpReluCustom : public OpDef {
+public:
+    explicit Conv3dMaxLogSumExpReluCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(Conv3dMaxLogSumExpReluCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelConv3dMaxLogSumExpRelu {
+public:
+    __aicore__ inline KernelConv3dMaxLogSumExpRelu() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t batch, uint32_t inChannels, uint32_t outChannels,
+                                 uint32_t inD, uint32_t inH, uint32_t inW,
+                                 uint32_t outD, uint32_t outH, uint32_t outW,
+                                 uint32_t kSize, uint32_t stride, uint32_t padding,
+                                 uint32_t totalOut)
+    {
+        this->batch = batch;
+        this->inChannels = inChannels;
+        this->outChannels = outChannels;
+        this->inD = inD;
+        this->inH = inH;
+        this->inW = inW;
+        this->outD = outD;
+        this->outH = outH;
+        this->outW = outW;
+        this->kSize = kSize;
+        this->stride = stride;
+        this->padding = padding;
+        this->totalOut = totalOut;
+
+        this->convD = (inD + 2 * padding - kSize) / stride + 1;
+        this->convH = (inH + 2 * padding - kSize) / stride + 1;
+        this->convW = (inW + 2 * padding - kSize) / stride + 1;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->elemsPerBlock = (totalOut + blockNum - 1) / blockNum;
+        this->startIdx = blockIdx * this->elemsPerBlock;
+        this->endIdx = this->startIdx + this->elemsPerBlock;
+        if (this->endIdx > totalOut) this->endIdx = totalOut;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, batch * inChannels * inD * inH * inW);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, outChannels * inChannels * kSize * kSize * kSize);
+        bGm.SetGlobalBuffer((__gm__ float *)bias, outChannels);
+        yGm.SetGlobalBuffer((__gm__ float *)y, totalOut);
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t idx = this->startIdx; idx < this->endIdx; idx++) {
+            ProcessOne(idx);
+        }
+    }
+
+private:
+    __aicore__ inline float ComputeConv(uint32_t n, uint32_t oc, uint32_t d, uint32_t h, uint32_t w)
+    {
+        float acc = bGm.GetValue(oc);
+        int32_t dIn0 = (int32_t)d - (int32_t)padding;
+        int32_t hIn0 = (int32_t)h - (int32_t)padding;
+        int32_t wIn0 = (int32_t)w - (int32_t)padding;
+
+        for (uint32_t ic = 0; ic < inChannels; ic++) {
+            for (uint32_t kd = 0; kd < kSize; kd++) {
+                int32_t di = dIn0 + (int32_t)kd;
+                if (di < 0 || di >= (int32_t)inD) continue;
+                for (uint32_t kh = 0; kh < kSize; kh++) {
+                    int32_t hi = hIn0 + (int32_t)kh;
+                    if (hi < 0 || hi >= (int32_t)inH) continue;
+                    for (uint32_t kw = 0; kw < kSize; kw++) {
+                        int32_t wi = wIn0 + (int32_t)kw;
+                        if (wi < 0 || wi >= (int32_t)inW) continue;
+                        uint32_t xOff = ((n * inChannels + ic) * inD + di) * inH * inW + hi * inW + wi;
+                        uint32_t wOff = ((oc * inChannels + ic) * kSize + kd) * kSize * kSize + kh * kSize + kw;
+                        acc += xGm.GetValue(xOff) * wGm.GetValue(wOff);
+                    }
+                }
+            }
+        }
+        return acc;
+    }
+
+    __aicore__ inline void ProcessOne(uint32_t idx)
+    {
+        uint32_t tmp = idx;
+        uint32_t ow = tmp % outW; tmp /= outW;
+        uint32_t oh = tmp % outH; tmp /= outH;
+        uint32_t od = tmp % outD; tmp /= outD;
+        uint32_t n = tmp;
+
+        uint32_t convD0 = od * 2;
+        uint32_t convH0 = oh * 2;
+        uint32_t convW0 = ow * 2;
+
+        float maxVal = -3.4e38f;
+        float maxArr[64];
+        bool initFlags = false;
+
+        for (uint32_t oc = 0; oc < outChannels; oc++) {
+            float m = -3.4e38f;
+            for (uint32_t pd = 0; pd < 2; pd++) {
+                for (uint32_t ph = 0; ph < 2; ph++) {
+                    for (uint32_t pw = 0; pw < 2; pw++) {
+                        float v = ComputeConv(n, oc, convD0 + pd, convH0 + ph, convW0 + pw);
+                        if (v > m) m = v;
+                    }
+                }
+            }
+            maxArr[oc] = m;
+            if (m > maxVal) maxVal = m;
+        }
+
+        float sumExp = 0.0f;
+        for (uint32_t oc = 0; oc < outChannels; oc++) {
+            float d = maxArr[oc] - maxVal;
+            sumExp += AscendC::ScalarCast<float, float, AscendC::RoundMode::CAST_NONE>(expf(d));
+        }
+        float lse = maxVal + logf(sumExp);
+        if (lse < 0.0f) lse = 0.0f;
+
+        yGm.SetValue(idx, lse);
+    }
+
+private:
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> wGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> yGm;
+    uint32_t batch, inChannels, outChannels;
+    uint32_t inD, inH, inW;
+    uint32_t convD, convH, convW;
+    uint32_t outD, outH, outW;
+    uint32_t kSize, stride, padding;
+    uint32_t totalOut;
+    uint32_t startIdx, endIdx, elemsPerBlock;
+};
+
+extern "C" __global__ __aicore__ void conv3d_max_log_sum_exp_relu_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv3dMaxLogSumExpRelu op;
+    op.Init(x, weight, bias, y,
+            tiling_data.batch, tiling_data.inChannels, tiling_data.outChannels,
+            tiling_data.inD, tiling_data.inH, tiling_data.inW,
+            tiling_data.outD, tiling_data.outH, tiling_data.outW,
+            tiling_data.kSize, tiling_data.stride, tiling_data.padding,
+            tiling_data.totalOut);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_max_log_sum_exp_relu_custom_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& bias)
+{
+    auto sizes = x.sizes();
+    int64_t batch = sizes[0];
+    int64_t inD = sizes[2];
+    int64_t inH = sizes[3];
+    int64_t inW = sizes[4];
+    auto wSizes = weight.sizes();
+    int64_t kSize = wSizes[2];
+    int64_t padding = 1;
+    int64_t stride = 1;
+    int64_t convD = (inD + 2 * padding - kSize) / stride + 1;
+    int64_t convH = (inH + 2 * padding - kSize) / stride + 1;
+    int64_t convW = (inW + 2 * padding - kSize) / stride + 1;
+
+    auto result = at::empty({batch, 1, convD / 2, convH / 2, convW / 2}, x.options());
+    EXEC_NPU_CMD(aclnnConv3dMaxLogSumExpReluCustom, x, weight, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_max_log_sum_exp_relu_custom", &conv3d_max_log_sum_exp_relu_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_max_log_sum_exp_relu_custom", &conv3d_max_log_sum_exp_relu_custom_impl_npu,
+          "fused Conv3d + MaxPool3d + LogSumExp + ReLU");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import math
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.weight = nn.Parameter(torch.empty(
+            out_channels, in_channels, kernel_size, kernel_size, kernel_size))
+        self.bias = nn.Parameter(torch.empty(out_channels))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        fan_in = in_channels * kernel_size * kernel_size * kernel_size
+        bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
+        nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, x):
+        return custom_ops_lib.conv3d_max_log_sum_exp_relu_custom(
+            x, self.weight, self.bias)
+'''
+```

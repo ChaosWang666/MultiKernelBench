@@ -1,0 +1,332 @@
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose3dBatchNormSubtractCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose3dBatchNormSubtractCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, ncPerCore);
+  TILING_DATA_FIELD_DEF(uint32_t, spatialLen);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLen);
+  TILING_DATA_FIELD_DEF(uint32_t, fullTiles);
+  TILING_DATA_FIELD_DEF(uint32_t, remainder);
+  TILING_DATA_FIELD_DEF(float, invSpatial);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose3dBatchNormSubtractCustom, ConvTranspose3dBatchNormSubtractCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose3d_batch_norm_subtract_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose3dBatchNormSubtractCustomTilingData tiling;
+
+    auto srcShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t dimN = static_cast<uint32_t>(srcShape.GetDim(0));
+    uint32_t dimC = static_cast<uint32_t>(srcShape.GetDim(1));
+    uint32_t dimD = static_cast<uint32_t>(srcShape.GetDim(2));
+    uint32_t dimH = static_cast<uint32_t>(srcShape.GetDim(3));
+    uint32_t dimW = static_cast<uint32_t>(srcShape.GetDim(4));
+
+    uint32_t totalNC = dimN * dimC;
+    uint32_t spatialLen = dimD * dimH * dimW;
+
+    uint32_t blockDim = 32;
+    while (blockDim > 1 && totalNC % blockDim != 0) {
+        blockDim--;
+    }
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+    uint32_t ncPerCore = totalNC / blockDim;
+
+    uint32_t tileLen = 2048;
+    uint32_t fullTiles = spatialLen / tileLen;
+    uint32_t remainder = spatialLen - fullTiles * tileLen;
+
+    float invSpatial = 1.0f / static_cast<float>(static_cast<int32_t>(spatialLen));
+
+    context->SetBlockDim(blockDim);
+    tiling.set_ncPerCore(ncPerCore);
+    tiling.set_spatialLen(spatialLen);
+    tiling.set_tileLen(tileLen);
+    tiling.set_fullTiles(fullTiles);
+    tiling.set_remainder(remainder);
+    tiling.set_invSpatial(invSpatial);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class ConvTranspose3dBatchNormSubtractCustom : public OpDef {
+public:
+    explicit ConvTranspose3dBatchNormSubtractCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
+    }
+};
+
+OP_ADD(ConvTranspose3dBatchNormSubtractCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelMeanSub {
+public:
+    __aicore__ inline KernelMeanSub() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t ncPerCore, uint32_t spatialLen,
+                                 uint32_t tileLen, uint32_t fullTiles, uint32_t remainder, float invSpatial)
+    {
+        this->ncPerCore = ncPerCore;
+        this->spatialLen = spatialLen;
+        this->tileLen = tileLen;
+        this->fullTiles = fullTiles;
+        this->remainder = remainder;
+        this->invSpatial = invSpatial;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t coreOffset = blockIdx * ncPerCore * spatialLen;
+        uint32_t coreSize = ncPerCore * spatialLen;
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + coreOffset, coreSize);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + coreOffset, coreSize);
+
+        pipe.InitBuffer(inQueue, BUFFER_NUM, this->tileLen * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueue, BUFFER_NUM, this->tileLen * sizeof(DTYPE_Y));
+        pipe.InitBuffer(reduceBuf, 32);
+        pipe.InitBuffer(workBuf, this->tileLen * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t g = 0; g < ncPerCore; g++) {
+            float mean = ComputeMean(g);
+            SubtractMean(g, mean);
+        }
+    }
+
+private:
+    __aicore__ inline float ComputeMean(uint32_t group)
+    {
+        float sum = 0.0f;
+        uint32_t baseOffset = group * spatialLen;
+
+        for (uint32_t t = 0; t < fullTiles; t++) {
+            sum += LoadAndSum(baseOffset + t * tileLen, tileLen, false);
+        }
+        if (remainder > 0) {
+            sum += LoadAndSum(baseOffset + fullTiles * tileLen, remainder, true);
+        }
+        return sum * invSpatial;
+    }
+
+    __aicore__ inline float LoadAndSum(uint32_t offset, uint32_t curLen, bool usePad)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueue.AllocTensor<DTYPE_X>();
+        if (usePad) {
+            AscendC::DataCopyExtParams params{1, curLen * (uint32_t)sizeof(DTYPE_X), 0, 0, 0};
+            AscendC::DataCopyPadExtParams<DTYPE_X> padParams{false, 0, 0, 0};
+            AscendC::DataCopyPad(xLocal, xGm[offset], params, padParams);
+        } else {
+            AscendC::DataCopy(xLocal, xGm[offset], curLen);
+        }
+        inQueue.EnQue(xLocal);
+        xLocal = inQueue.DeQue<DTYPE_X>();
+
+        AscendC::LocalTensor<float> reduceLocal = reduceBuf.Get<float>();
+        AscendC::LocalTensor<float> workLocal = workBuf.Get<float>();
+        AscendC::ReduceSum<float>(reduceLocal, xLocal, workLocal, curLen);
+
+        event_t eventId = static_cast<event_t>(AscendC::GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(eventId);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(eventId);
+
+        float result = reduceLocal.GetValue(0);
+        inQueue.FreeTensor(xLocal);
+        return result;
+    }
+
+    __aicore__ inline void SubtractMean(uint32_t group, float mean)
+    {
+        uint32_t baseOffset = group * spatialLen;
+
+        for (uint32_t t = 0; t < fullTiles; t++) {
+            DoSubTile(baseOffset + t * tileLen, tileLen, mean, false);
+        }
+        if (remainder > 0) {
+            DoSubTile(baseOffset + fullTiles * tileLen, remainder, mean, true);
+        }
+    }
+
+    __aicore__ inline void DoSubTile(uint32_t offset, uint32_t curLen, float mean, bool usePad)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueue.AllocTensor<DTYPE_X>();
+        if (usePad) {
+            AscendC::DataCopyExtParams params{1, curLen * (uint32_t)sizeof(DTYPE_X), 0, 0, 0};
+            AscendC::DataCopyPadExtParams<DTYPE_X> padParams{false, 0, 0, 0};
+            AscendC::DataCopyPad(xLocal, xGm[offset], params, padParams);
+        } else {
+            AscendC::DataCopy(xLocal, xGm[offset], curLen);
+        }
+        inQueue.EnQue(xLocal);
+        xLocal = inQueue.DeQue<DTYPE_X>();
+
+        AscendC::LocalTensor<DTYPE_Y> yLocal = outQueue.AllocTensor<DTYPE_Y>();
+        AscendC::Adds(yLocal, xLocal, -mean, curLen);
+        outQueue.EnQue<DTYPE_Y>(yLocal);
+        inQueue.FreeTensor(xLocal);
+
+        yLocal = outQueue.DeQue<DTYPE_Y>();
+        if (usePad) {
+            AscendC::DataCopyExtParams params{1, curLen * (uint32_t)sizeof(DTYPE_Y), 0, 0, 0};
+            AscendC::DataCopyPad(yGm[offset], yLocal, params);
+        } else {
+            AscendC::DataCopy(yGm[offset], yLocal, curLen);
+        }
+        outQueue.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> workBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    uint32_t ncPerCore;
+    uint32_t spatialLen;
+    uint32_t tileLen;
+    uint32_t fullTiles;
+    uint32_t remainder;
+    float invSpatial;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose3d_batch_norm_subtract_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelMeanSub op;
+    op.Init(x, y, tiling_data.ncPerCore, tiling_data.spatialLen, tiling_data.tileLen,
+            tiling_data.fullTiles, tiling_data.remainder, tiling_data.invSpatial);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose3d_batch_norm_subtract_custom_impl_npu(const at::Tensor& self) {
+    at::Tensor result = at::empty_like(self);
+    EXEC_NPU_CMD(aclnnConvTranspose3dBatchNormSubtractCustom, self, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose3d_batch_norm_subtract_custom", &conv_transpose3d_batch_norm_subtract_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose3d_batch_norm_subtract_custom", &conv_transpose3d_batch_norm_subtract_custom_impl_npu, "conv_transpose3d + batch_norm + subtract mean along spatial dims");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias=True):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias)
+        self.batch_norm = nn.BatchNorm3d(out_channels)
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = self.batch_norm(x)
+        x = x.contiguous()
+        x = custom_ops_lib.conv_transpose3d_batch_norm_subtract_custom(x)
+        return x
+'''

@@ -1,6 +1,3 @@
-Looking at this task, I need to generate AscendC kernel code for a fused operation (swish/divide/clamp/tanh/clamp after GEMM). I'll keep the GEMM as `nn.Linear` and fuse the post-GEMM elementwise operations in a custom kernel for reliable optimization.
-
-```python
 project_json_src='''
 [
     {
@@ -54,9 +51,10 @@ host_operator_src="""
 
 namespace optiling {
 const uint32_t BLOCK_DIM = 32;
-const uint32_t TILE_NUM = 32;
+const uint32_t TILE_NUM = 16;
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
+
     GemmSwishDivideClampTanhClampCustomTilingData tiling;
     uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
     context->SetBlockDim(BLOCK_DIM);
@@ -122,9 +120,9 @@ kernel_src="""
 
 constexpr int32_t BUFFER_NUM = 2;
 
-class KernelFused {
+class KernelGemmSwishDivideClampTanhClamp {
 public:
-    __aicore__ inline KernelFused() {}
+    __aicore__ inline KernelGemmSwishDivideClampTanhClamp() {}
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, uint32_t totalLength, uint32_t tileNum)
     {
         this->blockLength = totalLength / AscendC::GetBlockNum();
@@ -135,7 +133,6 @@ public:
         yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
         pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
         pipe.InitBuffer(outQueueY, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Y));
-        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(DTYPE_X));
     }
     __aicore__ inline void Process()
     {
@@ -158,25 +155,19 @@ private:
     {
         AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
         AscendC::LocalTensor<DTYPE_Y> yLocal = outQueueY.AllocTensor<DTYPE_Y>();
-        AscendC::LocalTensor<DTYPE_X> tmp = tmpBuf.Get<DTYPE_X>();
 
-        // swish: x * sigmoid(x)
-        AscendC::Sigmoid(tmp, xLocal, this->tileLength);
-        AscendC::Mul(yLocal, xLocal, tmp, this->tileLength);
+        AscendC::Sigmoid(yLocal, xLocal, this->tileLength);
+        AscendC::Mul(yLocal, xLocal, yLocal, this->tileLength);
 
-        // divide by 2.0
-        AscendC::Muls(yLocal, yLocal, (DTYPE_Y)0.5f, this->tileLength);
+        AscendC::Muls(yLocal, yLocal, (float)0.5, this->tileLength);
 
-        // clamp to [-1, 1]
-        AscendC::Mins(yLocal, yLocal, (DTYPE_Y)1.0f, this->tileLength);
-        AscendC::Maxs(yLocal, yLocal, (DTYPE_Y)-1.0f, this->tileLength);
+        AscendC::Mins(yLocal, yLocal, (float)1.0, this->tileLength);
+        AscendC::Maxs(yLocal, yLocal, (float)-1.0, this->tileLength);
 
-        // tanh
-        AscendC::Tanh(tmp, yLocal, this->tileLength);
+        AscendC::Tanh(yLocal, yLocal, this->tileLength);
 
-        // clamp to [-1, 1] (redundant after tanh but preserved for correctness)
-        AscendC::Mins(yLocal, tmp, (DTYPE_Y)1.0f, this->tileLength);
-        AscendC::Maxs(yLocal, yLocal, (DTYPE_Y)-1.0f, this->tileLength);
+        AscendC::Mins(yLocal, yLocal, (float)1.0, this->tileLength);
+        AscendC::Maxs(yLocal, yLocal, (float)-1.0, this->tileLength);
 
         outQueueY.EnQue<DTYPE_Y>(yLocal);
         inQueueX.FreeTensor(xLocal);
@@ -192,7 +183,6 @@ private:
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
     AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
     AscendC::GlobalTensor<DTYPE_X> xGm;
     AscendC::GlobalTensor<DTYPE_Y> yGm;
     uint32_t blockLength;
@@ -202,7 +192,7 @@ private:
 
 extern "C" __global__ __aicore__ void gemm_swish_divide_clamp_tanh_clamp_custom(GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
     GET_TILING_DATA(tiling_data, tiling);
-    KernelFused op;
+    KernelGemmSwishDivideClampTanhClamp op;
     op.Init(x, y, tiling_data.totalLength, tiling_data.tileNum);
     op.Process();
 }
@@ -225,7 +215,7 @@ TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("gemm_swish_divide_clamp_tanh_clamp_custom", &gemm_swish_divide_clamp_tanh_clamp_custom_impl_npu, "fused swish/divide/clamp/tanh/clamp after gemm");
+    m.def("gemm_swish_divide_clamp_tanh_clamp_custom", &gemm_swish_divide_clamp_tanh_clamp_custom_impl_npu, "fused swish divide clamp tanh clamp");
 }
 """
 
@@ -242,6 +232,6 @@ class ModelNew(nn.Module):
 
     def forward(self, x):
         x = self.gemm(x)
-        return custom_ops_lib.gemm_swish_divide_clamp_tanh_clamp_custom(x)
+        x = custom_ops_lib.gemm_swish_divide_clamp_tanh_clamp_custom(x.contiguous())
+        return x
 '''
-```
