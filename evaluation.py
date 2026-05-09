@@ -6,18 +6,47 @@ import tempfile
 from config import temperature, top_p
 import argparse
 def eval_all(out_dir, categories, op_tested=dataset.keys()):
-    result = {}
     if categories == ['all']:
         output_file = os.path.join(out_dir,'result.json')
     else:
         output_file = os.path.join(out_dir, f'result_{"_".join(categories)}.json')
+
+    # 把 result.json 当增量 checkpoint 用：启动时读已有进度，
+    # 每跑完一个算子立即写盘，中断后再跑只补未完成的算子。
+    result = {}
     if os.path.exists(output_file):
-        print(f"[INFO] Already evaluated, please see {output_file}")
+        try:
+            with open(output_file, 'r') as f:
+                result = json.load(f)
+        except Exception as e:
+            print(f"[WARN] Failed to load existing {output_file} ({e}), starting fresh")
+            result = {}
+
+    op_tested = list(op_tested)
+    pending = [op for op in op_tested if op not in result]
+    if not pending:
+        print(f"[INFO] All {len(op_tested)} ops already evaluated, see {output_file}")
         return
-    for op in op_tested:
+    if len(result) > 0:
+        print(f"[INFO] Resuming: {len(result)} done, {len(pending)} remaining (out of {len(op_tested)})")
+
+    def _persist():
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, 'w') as f:
+            json.dump(result, f, indent=2)
+
+    for op in pending:
         print(f"[INFO] Evaluating op {op}")
-        with open(os.path.join(out_dir, f'{op}.txt'), 'r') as saved_log:
-            response_txt = saved_log.read()
+        op_txt_path = os.path.join(out_dir, f'{op}.txt')
+        try:
+            with open(op_txt_path, 'r') as saved_log:
+                response_txt = saved_log.read()
+        except FileNotFoundError:
+            print(f"[FAIL] Generated kernel file not found: {op_txt_path}")
+            result[op] = {'compiled': False, 'correctness': False, 'performance': None,
+                          'correctness_info': f'Generated kernel file not found: {op_txt_path}'}
+            _persist()
+            continue
         with tempfile.NamedTemporaryFile(mode='w+', delete=True) as tf_input, \
             tempfile.NamedTemporaryFile(mode='r', delete=True) as tf_output:
 
@@ -35,30 +64,33 @@ def eval_all(out_dir, categories, op_tested=dataset.keys()):
             except subprocess.CalledProcessError as e:
                 if 'FileNotFoundError' in e.stderr:
                     print("[FAIL] FileNotFoundError - Possibly due to incorrect 'project_root_path' setting in config.py")
+                    _persist()
                     break
                 elif e.returncode == -11:
                     print("[FAIL] Segmentation fault" )
-                    seg_result = {'compiled': True, 'correctness': False, 'performance': None, 'correctness_info': 'Segmentation fault'} 
+                    seg_result = {'compiled': True, 'correctness': False, 'performance': None, 'correctness_info': 'Segmentation fault'}
                     result[op] = seg_result
+                    _persist()
                     continue
                 else:
                     print("[FAIL] unknown error, please report or fix bug")
-                    unknown_result = {'compiled': True, 'correctness': False, 'performance': None, 'correctness_info': 'Unknown fault'} 
+                    unknown_result = {'compiled': True, 'correctness': False, 'performance': None, 'correctness_info': 'Unknown fault'}
                     result[op] = unknown_result
+                    _persist()
                     continue
             except subprocess.TimeoutExpired as e:
                 print("[FAIL] run timeout")
-                time_result = {'compiled': True, 'correctness': False, 'performance': None, 'correctness_info': 'Timeout fault'} 
+                time_result = {'compiled': True, 'correctness': False, 'performance': None, 'correctness_info': 'Timeout fault'}
                 result[op] = time_result
+                _persist()
                 continue
             result[op] = result_item
+            _persist()
             print(f'[INFO] {result_item}')
-        
-    with open(output_file, 'w') as f:
-        print(f"[INFO] Evaluated succesfully, write into {output_file}") 
-        json.dump(result, f, indent=2)
 
-    
+    print(f"[INFO] Evaluated successfully, written into {output_file}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Process command line arguments.')
 
