@@ -134,14 +134,15 @@ def ascend_compile(generated_code, op, context, extra_kernel_include_paths=None)
         feedback = f'Exit Code: {e.returncode}\nError Output:\n{error_output}'
         raise Exception(feedback)
 
-    # Update ASCEND_CUSTOM_OPP_PATH
-    custom_opp_path = f"{project_root_path}/ascend_op_projects/opp/vendors/customize"
+    # Update ASCEND_CUSTOM_OPP_PATH (must follow op_engineer_dir for per-worker isolation)
+    custom_opp_path = f"{deploy_path}/vendors/customize"
     os.environ["ASCEND_CUSTOM_OPP_PATH"] = custom_opp_path
 
-    # Update LD_LIBRARY_PATH
-    if 'ascend_op_projects' not in os.environ["LD_LIBRARY_PATH"]:
-        custom_lib_path = f"{project_root_path}/ascend_op_projects/opp/vendors/customize/op_api/lib/"
-        existing_ld_path = os.environ.get("LD_LIBRARY_PATH", "")
+    # Update LD_LIBRARY_PATH — use op_engineer_dir as the sentinel so each worker's
+    # unique workspace path gets injected exactly once.
+    custom_lib_path = f"{deploy_path}/vendors/customize/op_api/lib/"
+    existing_ld_path = os.environ.get("LD_LIBRARY_PATH", "")
+    if custom_lib_path not in existing_ld_path:
         os.environ["LD_LIBRARY_PATH"] = f"{custom_lib_path}:{existing_ld_path}"
     
     try:

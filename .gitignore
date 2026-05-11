@@ -1,1 +1,9 @@
 AscendC-Kernel-Wiki/
+
+# Parallel evaluator runtime artifacts (per-worker venvs + workspaces)
+.worker_envs/
+ascend_op_projects_w*/
+
+# Python bytecode
+__pycache__/
+*.pyc

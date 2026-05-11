@@ -19,6 +19,7 @@ num_completions=1
 seed_num=1024
 
 # Ascend compile related
-op_engineer_dir = f'{project_root_path}/ascend_op_projects'
+# OP_ENGINEER_DIR can override the workspace path (used by parallel workers for isolation)
+op_engineer_dir = os.environ.get('OP_ENGINEER_DIR', f'{project_root_path}/ascend_op_projects')
 deploy_path = f'{op_engineer_dir}/opp'
 ascendc_device = 'ai_core-Ascend910B2'

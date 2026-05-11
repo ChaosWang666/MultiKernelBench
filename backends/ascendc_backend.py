@@ -13,7 +13,8 @@ class AscendBackend(Backend):
         self.context = {}
         self.device = self.get_device()
     def get_device(self):
-        return torch.device('npu:0')
+        device_id = int(os.environ.get('ASCEND_DEVICE_ID', '0'))
+        return torch.device(f'npu:{device_id}')
 
     def get_hardware_name(self):
         return ascendc_device  # torch_npu.npu.get_device_name(device) causes crash
