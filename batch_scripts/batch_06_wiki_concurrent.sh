@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Batch 6/10 - Wiki (claude-code-wiki) - ops[50..59] - CONCURRENT GEN+EVAL
+set -euo pipefail
+
+STRATEGY="${STRATEGY:-add_shot}"
+RUNS="${RUNS:-1}"
+TIMEOUT="${TIMEOUT:-1200}"
+EVAL_TIMEOUT="${EVAL_TIMEOUT:-180}"
+
+cd "$(dirname "$0")/.."
+
+echo "==> Batch 6/10 Wiki concurrent (claude-code-wiki): 10 ops"
+python generate_and_evaluate.py \
+    --model-name claude-code-wiki \
+    --strategy "$STRATEGY" \
+    --runs "$RUNS" \
+    --timeout "$TIMEOUT" \
+    --eval-timeout "$EVAL_TIMEOUT" \
+    --disable-skills \
+    --with-wiki \
+    --ops \
+        conv2d_multiply_leaky_relu_gelu \
+        conv_transpose3d_batch_norm_subtract \
+        convtranspose2d_batchnorm_tanh_maxpool_groupnorm \
+        conv2d_activation_batch_norm \
+        gemm_scale_batch_norm \
+        conv_transpose3d_sum_residual_add_multiply_residual_add \
+        conv_transpose3d_clamp_min_divide \
+        gemm_scaling_hard_tanh_gelu \
+        matmul_scale_residual_add_clamp_log_sum_exp_mish \
+        matmul_scaling_residual_add
+
+echo "==> Batch 6/10 Wiki concurrent done."
