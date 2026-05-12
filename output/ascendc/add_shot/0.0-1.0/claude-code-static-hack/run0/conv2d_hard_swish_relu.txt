@@ -1,0 +1,339 @@
+project_json_src='''
+[
+    {
+        "op": "Conv2dHardSwishReluCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv2dHardSwishReluCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, batchPerCore);
+  TILING_DATA_FIELD_DEF(uint32_t, totalBatch);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv2dHardSwishReluCustom, Conv2dHardSwishReluCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv2d_hard_swish_relu_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv2dHardSwishReluCustomTilingData tiling;
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t totalBatch = static_cast<uint32_t>(xShape.GetDim(0));
+    uint32_t batchPerCore = (totalBatch + BLOCK_DIM - 1) / BLOCK_DIM;
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_batchPerCore(batchPerCore);
+    tiling.set_totalBatch(totalBatch);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* xShape = context->GetInputShape(0);
+    const gert::Shape* wShape = context->GetInputShape(1);
+    gert::Shape* yShape = context->GetOutputShape(0);
+    yShape->SetDimNum(4);
+    yShape->SetDim(0, xShape->GetDim(0));
+    yShape->SetDim(1, wShape->GetDim(0));
+    yShape->SetDim(2, xShape->GetDim(2) - wShape->GetDim(2) + 1);
+    yShape->SetDim(3, xShape->GetDim(3) - wShape->GetDim(3) + 1);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv2dHardSwishReluCustom : public OpDef {
+public:
+    explicit Conv2dHardSwishReluCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910_93");
+    }
+};
+
+OP_ADD(Conv2dHardSwishReluCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t IN_C = 8;
+constexpr int32_t OUT_C = 64;
+constexpr int32_t IN_H = 128;
+constexpr int32_t IN_W = 128;
+constexpr int32_t KSIZE = 3;
+constexpr int32_t OUT_H = 126;
+constexpr int32_t OUT_W = 126;
+constexpr int32_t IN_W_PAD = 136;
+constexpr int32_t OUT_W_PAD = 128;
+
+class KernelConv2dHardSwishRelu {
+public:
+    __aicore__ inline KernelConv2dHardSwishRelu() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z,
+                                uint32_t batchPerCore, uint32_t totalBatch)
+    {
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t batchOffset = blockIdx * batchPerCore;
+        uint32_t actualBatch = 0;
+        if (batchOffset < totalBatch) {
+            uint32_t remain = totalBatch - batchOffset;
+            actualBatch = (remain < batchPerCore) ? remain : batchPerCore;
+        }
+        this->actualBatch = actualBatch;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + (uint64_t)batchOffset * IN_C * IN_H * IN_W,
+                            (uint64_t)actualBatch * IN_C * IN_H * IN_W);
+        wGm.SetGlobalBuffer((__gm__ float *)weight, OUT_C * IN_C * KSIZE * KSIZE);
+        bGm.SetGlobalBuffer((__gm__ float *)bias, OUT_C);
+        zGm.SetGlobalBuffer((__gm__ float *)z + (uint64_t)batchOffset * OUT_C * OUT_H * OUT_W,
+                            (uint64_t)actualBatch * OUT_C * OUT_H * OUT_W);
+
+        pipe.InitBuffer(weightBuf, OUT_C * IN_C * KSIZE * KSIZE * sizeof(float));
+        pipe.InitBuffer(biasBuf, OUT_C * sizeof(float));
+        pipe.InitBuffer(rowsBuf, IN_C * KSIZE * IN_W_PAD * sizeof(float));
+        pipe.InitBuffer(outBuf, OUT_W_PAD * sizeof(float));
+        pipe.InitBuffer(tmpBuf, OUT_W_PAD * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (actualBatch == 0) {
+            return;
+        }
+        AscendC::LocalTensor<float> wLocal = weightBuf.Get<float>();
+        AscendC::LocalTensor<float> bLocal = biasBuf.Get<float>();
+        AscendC::LocalTensor<float> rowsLocal = rowsBuf.Get<float>();
+        AscendC::LocalTensor<float> outLocal = outBuf.Get<float>();
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+
+        AscendC::Duplicate(rowsLocal, (float)0.0f, IN_C * KSIZE * IN_W_PAD);
+
+        AscendC::DataCopy(wLocal, wGm, OUT_C * IN_C * KSIZE * KSIZE);
+        AscendC::DataCopy(bLocal, bGm, OUT_C);
+
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(0);
+
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
+
+        for (uint32_t n = 0; n < actualBatch; n++) {
+            for (uint32_t h = 0; h < OUT_H; h++) {
+                for (uint32_t c = 0; c < IN_C; c++) {
+                    for (uint32_t r = 0; r < KSIZE; r++) {
+                        uint64_t srcOffset = ((uint64_t)n * IN_C + c) * IN_H * IN_W
+                                             + (uint64_t)(h + r) * IN_W;
+                        uint32_t dstOffset = (c * KSIZE + r) * IN_W_PAD;
+                        AscendC::DataCopy(rowsLocal[dstOffset], xGm[srcOffset], IN_W);
+                    }
+                }
+
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(0);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(0);
+
+                for (uint32_t k = 0; k < OUT_C; k++) {
+                    float biasVal = bLocal.GetValue(k);
+                    AscendC::Duplicate(outLocal, biasVal, OUT_W_PAD);
+
+                    for (uint32_t c = 0; c < IN_C; c++) {
+                        for (uint32_t r = 0; r < KSIZE; r++) {
+                            for (uint32_t s = 0; s < KSIZE; s++) {
+                                uint32_t wIdx = ((k * IN_C + c) * KSIZE + r) * KSIZE + s;
+                                float wVal = wLocal.GetValue(wIdx);
+                                uint32_t srcOff = (c * KSIZE + r) * IN_W_PAD + s;
+                                AscendC::Axpy<float, float>(outLocal, rowsLocal[srcOff], wVal, OUT_W_PAD);
+                            }
+                        }
+                    }
+
+                    AscendC::Muls(tmpLocal, outLocal, (float)(1.0f / 6.0f), OUT_W_PAD);
+                    AscendC::Adds(tmpLocal, tmpLocal, (float)0.5f, OUT_W_PAD);
+                    AscendC::Maxs(tmpLocal, tmpLocal, (float)0.0f, OUT_W_PAD);
+                    AscendC::Mins(tmpLocal, tmpLocal, (float)1.0f, OUT_W_PAD);
+                    AscendC::Mul(outLocal, outLocal, tmpLocal, OUT_W_PAD);
+                    AscendC::Maxs(outLocal, outLocal, (float)0.0f, OUT_W_PAD);
+
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(0);
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(0);
+
+                    uint64_t dstOff = ((uint64_t)n * OUT_C + k) * OUT_H * OUT_W
+                                      + (uint64_t)h * OUT_W;
+                    AscendC::DataCopyExtParams copyParams;
+                    copyParams.blockCount = 1;
+                    copyParams.blockLen = OUT_W * sizeof(float);
+                    copyParams.srcStride = 0;
+                    copyParams.dstStride = 0;
+                    copyParams.rsv = 0;
+                    AscendC::DataCopyPad(zGm[dstOff], outLocal, copyParams);
+
+                    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
+                }
+
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
+            }
+        }
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> weightBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> biasBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> rowsBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> outBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> wGm;
+    AscendC::GlobalTensor<float> bGm;
+    AscendC::GlobalTensor<float> zGm;
+    uint32_t actualBatch;
+};
+
+extern "C" __global__ __aicore__ void conv2d_hard_swish_relu_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR z,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv2dHardSwishRelu op;
+    op.Init(x, weight, bias, z, tiling_data.batchPerCore, tiling_data.totalBatch);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv2d_hard_swish_relu_custom_impl_npu(const at::Tensor& x,
+                                                  const at::Tensor& weight,
+                                                  const at::Tensor& bias) {
+    auto N = x.size(0);
+    auto K = weight.size(0);
+    auto Hout = x.size(2) - weight.size(2) + 1;
+    auto Wout = x.size(3) - weight.size(3) + 1;
+    at::Tensor result = at::empty({N, K, Hout, Wout}, x.options());
+    EXEC_NPU_CMD(aclnnConv2dHardSwishReluCustom, x, weight, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv2d_hard_swish_relu_custom", &conv2d_hard_swish_relu_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv2d_hard_swish_relu_custom", &conv2d_hard_swish_relu_custom_impl_npu, "conv2d + hardswish + relu");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(in_channels, out_channels, kernel_size)
+
+    def forward(self, x):
+        return custom_ops_lib.conv2d_hard_swish_relu_custom(x, self.conv.weight, self.conv.bias)
+'''

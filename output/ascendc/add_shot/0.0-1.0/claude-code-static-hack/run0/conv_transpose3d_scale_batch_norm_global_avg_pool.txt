@@ -1,0 +1,329 @@
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose3dScaleBatchNormGlobalAvgPoolCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose3dScaleBatchNormGlobalAvgPoolCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, numChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, channelLen);
+  TILING_DATA_FIELD_DEF(uint32_t, channelsPerCore);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLen);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);
+  TILING_DATA_FIELD_DEF(uint32_t, lastTileLen);
+  TILING_DATA_FIELD_DEF(float, invChannelLen);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose3dScaleBatchNormGlobalAvgPoolCustom, ConvTranspose3dScaleBatchNormGlobalAvgPoolCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose3d_scale_batch_norm_global_avg_pool_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t MAX_BLOCK_DIM = 32;
+const uint32_t MAX_TILE_LEN = 8192;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose3dScaleBatchNormGlobalAvgPoolCustomTilingData tiling;
+
+    auto inputShapePtr = context->GetInputShape(0);
+    auto inputShape = inputShapePtr->GetOriginShape();
+    uint32_t totalLen = inputShape.GetShapeSize();
+
+    uint32_t N = inputShape.GetDim(0);
+    uint32_t C = inputShape.GetDim(1);
+    uint32_t numChannels = N * C;
+    uint32_t channelLen = (numChannels == 0) ? 0 : (totalLen / numChannels);
+
+    uint32_t blockDim = MAX_BLOCK_DIM;
+    if (numChannels < blockDim) {
+        blockDim = numChannels;
+    }
+    while (blockDim > 1 && (numChannels % blockDim != 0)) {
+        blockDim--;
+    }
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+    uint32_t channelsPerCore = numChannels / blockDim;
+
+    uint32_t tileLen = (channelLen <= MAX_TILE_LEN) ? channelLen : MAX_TILE_LEN;
+    tileLen = (tileLen / 8) * 8;
+    if (tileLen == 0) {
+        tileLen = 8;
+    }
+    uint32_t tileNum = (channelLen + tileLen - 1) / tileLen;
+    if (tileNum == 0) {
+        tileNum = 1;
+    }
+    uint32_t lastTileLen = channelLen - (tileNum - 1) * tileLen;
+
+    float invChannelLen = (channelLen == 0) ? 0.0f : (1.0f / static_cast<float>(channelLen));
+
+    context->SetBlockDim(blockDim);
+    tiling.set_numChannels(numChannels);
+    tiling.set_channelLen(channelLen);
+    tiling.set_channelsPerCore(channelsPerCore);
+    tiling.set_tileLen(tileLen);
+    tiling.set_tileNum(tileNum);
+    tiling.set_lastTileLen(lastTileLen);
+    tiling.set_invChannelLen(invChannelLen);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(5);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, x_shape->GetDim(1));
+    y_shape->SetDim(2, 1);
+    y_shape->SetDim(3, 1);
+    y_shape->SetDim(4, 1);
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class ConvTranspose3dScaleBatchNormGlobalAvgPoolCustom : public OpDef {
+public:
+    explicit ConvTranspose3dScaleBatchNormGlobalAvgPoolCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910_93");
+    }
+};
+
+OP_ADD(ConvTranspose3dScaleBatchNormGlobalAvgPoolCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelGlobalAvgPool3d {
+public:
+    __aicore__ inline KernelGlobalAvgPool3d() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y,
+                                  uint32_t numChannels, uint32_t channelLen,
+                                  uint32_t channelsPerCore, uint32_t tileLen,
+                                  uint32_t tileNum, uint32_t lastTileLen,
+                                  float invChannelLen)
+    {
+        this->numChannels = numChannels;
+        this->channelLen = channelLen;
+        this->channelsPerCore = channelsPerCore;
+        this->tileLen = tileLen;
+        this->tileNum = tileNum;
+        this->lastTileLen = lastTileLen;
+        this->invChannelLen = invChannelLen;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->startChannelIdx = blockIdx * channelsPerCore;
+
+        uint32_t end = this->startChannelIdx + this->channelsPerCore;
+        if (end > this->numChannels) {
+            end = this->numChannels;
+        }
+        if (end < this->startChannelIdx) {
+            this->numLocalChannels = 0;
+        } else {
+            this->numLocalChannels = end - this->startChannelIdx;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X*)x + this->startChannelIdx * this->channelLen,
+                            this->numLocalChannels * this->channelLen);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y*)y + this->startChannelIdx,
+                            this->numLocalChannels);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLen * sizeof(DTYPE_X));
+        pipe.InitBuffer(sumBuf, 32);
+        pipe.InitBuffer(workBuf, this->tileLen * sizeof(DTYPE_X));
+        pipe.InitBuffer(outBuf, this->channelsPerCore * sizeof(DTYPE_Y));
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (this->numLocalChannels == 0) {
+            return;
+        }
+
+        AscendC::LocalTensor<DTYPE_Y> outTensor = outBuf.Get<DTYPE_Y>();
+        AscendC::LocalTensor<DTYPE_X> sumTmp = sumBuf.Get<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_X> workTmp = workBuf.Get<DTYPE_X>();
+
+        for (uint32_t cIdx = 0; cIdx < this->numLocalChannels; cIdx++) {
+            float channelSum = 0.0f;
+            for (uint32_t tIdx = 0; tIdx < this->tileNum; tIdx++) {
+                uint32_t curLen = (tIdx == this->tileNum - 1) ? this->lastTileLen : this->tileLen;
+
+                AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+                AscendC::DataCopy(xLocal,
+                                  xGm[cIdx * this->channelLen + tIdx * this->tileLen],
+                                  curLen);
+                inQueueX.EnQue(xLocal);
+
+                xLocal = inQueueX.DeQue<DTYPE_X>();
+                AscendC::ReduceSum<DTYPE_X>(sumTmp, xLocal, workTmp, curLen);
+                channelSum += sumTmp.GetValue(0);
+                inQueueX.FreeTensor(xLocal);
+            }
+            float meanVal = channelSum * this->invChannelLen;
+            outTensor.SetValue(cIdx, meanVal);
+        }
+
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+
+        AscendC::DataCopy(yGm, outTensor, this->channelsPerCore);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> sumBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> workBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> outBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+
+    uint32_t numChannels;
+    uint32_t channelLen;
+    uint32_t channelsPerCore;
+    uint32_t tileLen;
+    uint32_t tileNum;
+    uint32_t lastTileLen;
+    uint32_t startChannelIdx;
+    uint32_t numLocalChannels;
+    float invChannelLen;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose3d_scale_batch_norm_global_avg_pool_custom(
+    GM_ADDR x, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelGlobalAvgPool3d op;
+    op.Init(x, y,
+            tiling_data.numChannels, tiling_data.channelLen,
+            tiling_data.channelsPerCore, tiling_data.tileLen,
+            tiling_data.tileNum, tiling_data.lastTileLen,
+            tiling_data.invChannelLen);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose3d_scale_batch_norm_global_avg_pool_custom_impl_npu(const at::Tensor& self) {
+    auto sizes = self.sizes();
+    at::Tensor result = at::empty({sizes[0], sizes[1], 1, 1, 1}, self.options());
+    EXEC_NPU_CMD(aclnnConvTranspose3dScaleBatchNormGlobalAvgPoolCustom, self, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose3d_scale_batch_norm_global_avg_pool_custom",
+           &conv_transpose3d_scale_batch_norm_global_avg_pool_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose3d_scale_batch_norm_global_avg_pool_custom",
+          &conv_transpose3d_scale_batch_norm_global_avg_pool_custom_impl_npu,
+          "fused conv_transpose3d->scale->bn->global_avg_pool tail kernel (global avg pool 3d)");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, scale_factor, eps=1e-5, momentum=0.1):
+        super(ModelNew, self).__init__()
+        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size)
+        self.scale_factor = scale_factor
+        self.batch_norm = nn.BatchNorm3d(out_channels, eps=eps, momentum=momentum)
+
+    def forward(self, x):
+        x = self.conv_transpose(x)
+        x = x * self.scale_factor
+        x = self.batch_norm(x)
+        x = x.contiguous()
+        x = custom_ops_lib.conv_transpose3d_scale_batch_norm_global_avg_pool_custom(x)
+        return x
+'''

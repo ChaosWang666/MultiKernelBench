@@ -1,0 +1,302 @@
+project_json_src='''
+[
+    {
+        "op": "MatmulScalingResidualAddCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "weight",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(MatmulScalingResidualAddCustomTilingData)
+    TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, cubeTiling);
+    TILING_DATA_FIELD_DEF(uint32_t, M);
+    TILING_DATA_FIELD_DEF(uint32_t, N);
+    TILING_DATA_FIELD_DEF(uint32_t, K);
+    TILING_DATA_FIELD_DEF(uint32_t, singleCoreM);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(MatmulScalingResidualAddCustom, MatmulScalingResidualAddCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "matmul_scaling_residual_add_custom_tiling.h"
+#include "register/op_def_registry.h"
+#include "tiling/tiling_api.h"
+#include "tiling/platform/platform_ascendc.h"
+
+namespace optiling {
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    MatmulScalingResidualAddCustomTilingData tiling;
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    auto wShape = context->GetInputShape(1)->GetOriginShape();
+
+    uint32_t M = static_cast<uint32_t>(xShape.GetDim(0));
+    uint32_t K = static_cast<uint32_t>(xShape.GetDim(1));
+    uint32_t N = static_cast<uint32_t>(wShape.GetDim(0));
+
+    uint32_t coreNum = ascendcPlatform.GetCoreNumAic();
+    if (coreNum == 0) {
+        coreNum = 1;
+    }
+
+    const uint32_t alignM = 128;
+    uint32_t singleCoreM = (M + coreNum - 1) / coreNum;
+    singleCoreM = (singleCoreM + alignM - 1) / alignM * alignM;
+    if (singleCoreM == 0) {
+        singleCoreM = alignM;
+    }
+    uint32_t usedCoreNum = (M + singleCoreM - 1) / singleCoreM;
+    if (usedCoreNum == 0) {
+        usedCoreNum = 1;
+    }
+
+    tiling.set_M(M);
+    tiling.set_N(N);
+    tiling.set_K(K);
+    tiling.set_singleCoreM(singleCoreM);
+
+    matmul_tiling::MatmulApiTiling cubeTiling(ascendcPlatform);
+    cubeTiling.SetAType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                        matmul_tiling::DataType::DT_FLOAT, false);
+    cubeTiling.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                        matmul_tiling::DataType::DT_FLOAT, true);
+    cubeTiling.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                        matmul_tiling::DataType::DT_FLOAT);
+    cubeTiling.SetBiasType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
+                           matmul_tiling::DataType::DT_FLOAT);
+    cubeTiling.SetShape(singleCoreM, N, K);
+    cubeTiling.SetOrgShape(M, N, K);
+    cubeTiling.SetBias(true);
+    cubeTiling.SetBufferSpace(-1, -1, -1);
+
+    if (cubeTiling.GetTiling(tiling.cubeTiling) == -1) {
+        return ge::GRAPH_FAILED;
+    }
+
+    context->SetBlockDim(usedCoreNum);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
+                        context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+
+    size_t sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
+    size_t* currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = sysWorkspaceSize;
+
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    const gert::Shape* w_shape = context->GetInputShape(1);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    y_shape->SetDimNum(2);
+    y_shape->SetDim(0, x_shape->GetDim(0));
+    y_shape->SetDim(1, w_shape->GetDim(0));
+    return GRAPH_SUCCESS;
+}
+
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+namespace ops {
+class MatmulScalingResidualAddCustom : public OpDef {
+public:
+    explicit MatmulScalingResidualAddCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("weight")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910_93");
+    }
+};
+
+OP_ADD(MatmulScalingResidualAddCustom);
+}
+"""
+
+kernel_src="""
+#define ASCENDC_CUBE_ONLY
+#include "kernel_operator.h"
+#include "lib/matmul_intf.h"
+
+extern "C" __global__ __aicore__ void matmul_scaling_residual_add_custom(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR y,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tilingData, tiling);
+
+    using A_TYPE = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND, DTYPE_X, false>;
+    using B_TYPE = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND, DTYPE_WEIGHT, true>;
+    using C_TYPE = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND, DTYPE_Y>;
+    using BIAS_TYPE = AscendC::MatmulType<AscendC::TPosition::GM, CubeFormat::ND, DTYPE_BIAS>;
+
+    AscendC::TPipe pipe;
+    AscendC::Matmul<A_TYPE, B_TYPE, C_TYPE, BIAS_TYPE> mm;
+    REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), mm, &tilingData.cubeTiling);
+
+    uint32_t blockIdx = static_cast<uint32_t>(AscendC::GetBlockIdx());
+    uint32_t M = tilingData.M;
+    uint32_t N = tilingData.N;
+    uint32_t K = tilingData.K;
+    uint32_t singleCoreM = tilingData.singleCoreM;
+
+    uint32_t mStart = blockIdx * singleCoreM;
+    if (mStart >= M) {
+        return;
+    }
+    uint32_t actualM = singleCoreM;
+    if (mStart + singleCoreM > M) {
+        actualM = M - mStart;
+    }
+
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_WEIGHT> weightGm;
+    AscendC::GlobalTensor<DTYPE_BIAS> biasGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    xGm.SetGlobalBuffer((__gm__ DTYPE_X*)x);
+    weightGm.SetGlobalBuffer((__gm__ DTYPE_WEIGHT*)weight);
+    biasGm.SetGlobalBuffer((__gm__ DTYPE_BIAS*)bias);
+    yGm.SetGlobalBuffer((__gm__ DTYPE_Y*)y);
+
+    mm.SetTensorA(xGm[mStart * K]);
+    mm.SetTensorB(weightGm);
+    mm.SetBias(biasGm);
+    if (actualM != singleCoreM) {
+        mm.SetTail(static_cast<int>(actualM), static_cast<int>(N), static_cast<int>(K));
+    }
+    mm.IterateAll(yGm[mStart * N]);
+    mm.End();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor matmul_scaling_residual_add_custom_impl_npu(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& bias) {
+    auto out_sizes = std::vector<int64_t>{x.size(0), weight.size(0)};
+    at::Tensor result = at::empty(out_sizes, x.options());
+    EXEC_NPU_CMD(aclnnMatmulScalingResidualAddCustom, x, weight, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("matmul_scaling_residual_add_custom", &matmul_scaling_residual_add_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("matmul_scaling_residual_add_custom",
+          &matmul_scaling_residual_add_custom_impl_npu,
+          "fused matmul + bias custom kernel (residual scaling done in python)");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_features, out_features, scaling_factor):
+        super().__init__()
+        self.matmul = nn.Linear(in_features, out_features)
+        self.scaling_factor = scaling_factor
+
+    def forward(self, x):
+        y = custom_ops_lib.matmul_scaling_residual_add_custom(
+            x.contiguous(),
+            self.matmul.weight.contiguous(),
+            self.matmul.bias.contiguous(),
+        )
+        return y * (1.0 + self.scaling_factor)
+'''

@@ -1,0 +1,339 @@
+project_json_src='''
+[
+    {
+        "op": "Conv3dMultiplyInstanceNormClampMultiplyMaxCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "mul",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv3dMultiplyInstanceNormClampMultiplyMaxCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalPairs);
+  TILING_DATA_FIELD_DEF(uint32_t, pairsPerCore);
+  TILING_DATA_FIELD_DEF(uint32_t, sliceSize);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(float, invSliceSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv3dMultiplyInstanceNormClampMultiplyMaxCustom, Conv3dMultiplyInstanceNormClampMultiplyMaxCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv3d_multiply_instance_norm_clamp_multiply_max_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv3dMultiplyInstanceNormClampMultiplyMaxCustomTilingData tiling;
+    auto inputShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = inputShape.GetDim(0);
+    uint32_t C = inputShape.GetDim(1);
+    uint32_t D = inputShape.GetDim(2);
+    uint32_t H = inputShape.GetDim(3);
+    uint32_t W = inputShape.GetDim(4);
+
+    uint32_t totalPairs = N * C;
+    uint32_t sliceSize = D * H * W;
+    uint32_t pairsPerCore = (totalPairs + BLOCK_DIM - 1) / BLOCK_DIM;
+
+    float invSliceSize = 1.0f / static_cast<float>(static_cast<int32_t>(sliceSize));
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalPairs(totalPairs);
+    tiling.set_pairsPerCore(pairsPerCore);
+    tiling.set_sliceSize(sliceSize);
+    tiling.set_channels(C);
+    tiling.set_invSliceSize(invSliceSize);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv3dMultiplyInstanceNormClampMultiplyMaxCustom : public OpDef {
+public:
+    explicit Conv3dMultiplyInstanceNormClampMultiplyMaxCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("mul")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910_93");
+    }
+};
+
+OP_ADD(Conv3dMultiplyInstanceNormClampMultiplyMaxCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelFusedNorm {
+public:
+    __aicore__ inline KernelFusedNorm() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR mul, GM_ADDR z,
+                                 uint32_t totalPairs, uint32_t pairsPerCore,
+                                 uint32_t sliceSize, uint32_t channels,
+                                 float invSliceSize)
+    {
+        this->totalPairs_ = totalPairs;
+        this->pairsPerCore_ = pairsPerCore;
+        this->sliceSize_ = sliceSize;
+        this->channels_ = channels;
+        this->invSliceSize_ = invSliceSize;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->startPair_ = pairsPerCore * blockIdx;
+        uint32_t endPair = this->startPair_ + pairsPerCore;
+        if (endPair > totalPairs) {
+            endPair = totalPairs;
+        }
+        this->myPairs_ = (endPair > this->startPair_) ? (endPair - this->startPair_) : 0u;
+
+        xGm_.SetGlobalBuffer((__gm__ float*)x, totalPairs * sliceSize);
+        mulGm_.SetGlobalBuffer((__gm__ float*)mul, channels);
+        zGm_.SetGlobalBuffer((__gm__ float*)z, totalPairs * sliceSize);
+
+        pipe_.InitBuffer(inQueueX_, 1, sliceSize * sizeof(float));
+        pipe_.InitBuffer(outQueueZ_, 1, sliceSize * sizeof(float));
+        pipe_.InitBuffer(tmpBuf_, sliceSize * sizeof(float));
+        pipe_.InitBuffer(mulBuf_, 256);
+        pipe_.InitBuffer(reduceDstBuf_, 256);
+        pipe_.InitBuffer(reduceWorkBuf_, 8192);
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (myPairs_ == 0u) {
+            return;
+        }
+
+        AscendC::LocalTensor<float> mulLocal = mulBuf_.Get<float>();
+        uint32_t mulCount = (channels_ + 7u) / 8u * 8u;
+        AscendC::DataCopy(mulLocal, mulGm_, mulCount);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+
+        for (uint32_t i = 0u; i < myPairs_; ++i) {
+            uint32_t globalPair = startPair_ + i;
+            uint32_t c = globalPair % channels_;
+            float mulVal = mulLocal.GetValue(c);
+
+            CopyIn(i);
+            Compute(mulVal);
+            CopyOut(i);
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint32_t progress)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX_.AllocTensor<float>();
+        uint32_t offset = (startPair_ + progress) * sliceSize_;
+        AscendC::DataCopy(xLocal, xGm_[offset], sliceSize_);
+        inQueueX_.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Compute(float mulVal)
+    {
+        AscendC::LocalTensor<float> xLocal = inQueueX_.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = outQueueZ_.AllocTensor<float>();
+        AscendC::LocalTensor<float> tmp = tmpBuf_.Get<float>();
+        AscendC::LocalTensor<float> reduceDst = reduceDstBuf_.Get<float>();
+        AscendC::LocalTensor<float> reduceWork = reduceWorkBuf_.Get<float>();
+
+        AscendC::Muls(xLocal, xLocal, mulVal, sliceSize_);
+
+        AscendC::ReduceSum<float>(reduceDst, xLocal, reduceWork, sliceSize_);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        float sumVal = reduceDst.GetValue(0);
+        float meanVal = sumVal * invSliceSize_;
+
+        AscendC::Adds(xLocal, xLocal, -meanVal, sliceSize_);
+
+        AscendC::Mul(tmp, xLocal, xLocal, sliceSize_);
+
+        AscendC::ReduceSum<float>(reduceDst, tmp, reduceWork, sliceSize_);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        float sumSqVal = reduceDst.GetValue(0);
+        float varVal = sumSqVal * invSliceSize_;
+        float invStd = 1.0f / sqrt(varVal + 1e-5f);
+
+        AscendC::Muls(xLocal, xLocal, invStd, sliceSize_);
+
+        AscendC::Mins(xLocal, xLocal, 1.0f, sliceSize_);
+        AscendC::Maxs(xLocal, xLocal, -1.0f, sliceSize_);
+
+        AscendC::Muls(yLocal, xLocal, mulVal, sliceSize_);
+
+        outQueueZ_.EnQue<float>(yLocal);
+        inQueueX_.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(uint32_t progress)
+    {
+        AscendC::LocalTensor<float> yLocal = outQueueZ_.DeQue<float>();
+        uint32_t offset = (startPair_ + progress) * sliceSize_;
+        AscendC::DataCopy(zGm_[offset], yLocal, sliceSize_);
+        outQueueZ_.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe pipe_;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX_;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueZ_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tmpBuf_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> mulBuf_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceDstBuf_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceWorkBuf_;
+    AscendC::GlobalTensor<float> xGm_;
+    AscendC::GlobalTensor<float> mulGm_;
+    AscendC::GlobalTensor<float> zGm_;
+    uint32_t totalPairs_;
+    uint32_t pairsPerCore_;
+    uint32_t sliceSize_;
+    uint32_t channels_;
+    uint32_t startPair_;
+    uint32_t myPairs_;
+    float invSliceSize_;
+};
+
+extern "C" __global__ __aicore__ void conv3d_multiply_instance_norm_clamp_multiply_max_custom(
+    GM_ADDR x, GM_ADDR mul, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelFusedNorm op;
+    op.Init(x, mul, z,
+            tiling_data.totalPairs, tiling_data.pairsPerCore,
+            tiling_data.sliceSize, tiling_data.channels,
+            tiling_data.invSliceSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv3d_multiply_instance_norm_clamp_multiply_max_custom_impl_npu(const at::Tensor& x, const at::Tensor& mul) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnConv3dMultiplyInstanceNormClampMultiplyMaxCustom, x, mul, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv3d_multiply_instance_norm_clamp_multiply_max_custom", &conv3d_multiply_instance_norm_clamp_multiply_max_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv3d_multiply_instance_norm_clamp_multiply_max_custom", &conv3d_multiply_instance_norm_clamp_multiply_max_custom_impl_npu, "fused mul+instancenorm+clamp+mul per (b,c) slice");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, multiplier_shape, clamp_min, clamp_max):
+        super().__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size)
+        self.multiplier = nn.Parameter(torch.randn(multiplier_shape))
+        self.clamp_min = clamp_min
+        self.clamp_max = clamp_max
+
+    def forward(self, x):
+        x = self.conv(x).contiguous()
+        mul = self.multiplier.contiguous()
+        x = custom_ops_lib.conv3d_multiply_instance_norm_clamp_multiply_max_custom(x, mul)
+        x = torch.max(x, dim=1)[0]
+        return x
+'''

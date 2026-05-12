@@ -1,0 +1,277 @@
+project_json_src='''
+[
+    {
+        "op": "Conv2dReluBiasAddCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv2dReluBiasAddCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, elementsPerChannel);
+  TILING_DATA_FIELD_DEF(uint32_t, channelsPerCore);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv2dReluBiasAddCustom, Conv2dReluBiasAddCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv2d_relu_bias_add_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv2dReluBiasAddCustomTilingData tiling;
+
+    auto xShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t N = xShape.GetDim(0);
+    uint32_t C = xShape.GetDim(1);
+    uint32_t H = xShape.GetDim(2);
+    uint32_t W = xShape.GetDim(3);
+
+    uint32_t totalChannelInstances = N * C;
+    uint32_t elementsPerChannel = H * W;
+    uint32_t channelsPerCore = totalChannelInstances / BLOCK_DIM;
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_channels(C);
+    tiling.set_elementsPerChannel(elementsPerChannel);
+    tiling.set_channelsPerCore(channelsPerCore);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv2dReluBiasAddCustom : public OpDef {
+public:
+    explicit Conv2dReluBiasAddCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910_93");
+    }
+};
+
+OP_ADD(Conv2dReluBiasAddCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelConv2dReluBiasAdd {
+public:
+    __aicore__ inline KernelConv2dReluBiasAdd() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR y,
+                                 uint32_t channels, uint32_t elementsPerChannel,
+                                 uint32_t channelsPerCore)
+    {
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        this->channels = channels;
+        this->elementsPerChannel = elementsPerChannel;
+        this->channelsPerCore = channelsPerCore;
+        this->startCi = blockIdx * channelsPerCore;
+        this->alignedElems = (elementsPerChannel + 7) / 8 * 8;
+        this->alignedChannels = (channels + 7) / 8 * 8;
+
+        uint64_t coreOffset = (uint64_t)this->startCi * (uint64_t)elementsPerChannel;
+        uint64_t coreSize = (uint64_t)channelsPerCore * (uint64_t)elementsPerChannel;
+
+        xGm.SetGlobalBuffer((__gm__ float *)x + coreOffset, coreSize);
+        yGm.SetGlobalBuffer((__gm__ float *)y + coreOffset, coreSize);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, channels);
+
+        pipe.InitBuffer(inQueue, 1, this->alignedElems * sizeof(float));
+        pipe.InitBuffer(outQueue, 1, this->alignedElems * sizeof(float));
+        pipe.InitBuffer(biasQueue, 1, this->alignedChannels * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<float> biasIn = biasQueue.AllocTensor<float>();
+        AscendC::DataCopyExtParams biasCopyParams{1, (uint32_t)(channels * sizeof(float)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<float> biasPadParams{true, 0, (uint8_t)(alignedChannels - channels), 0.0f};
+        AscendC::DataCopyPad(biasIn, biasGm, biasCopyParams, biasPadParams);
+        biasQueue.EnQue(biasIn);
+        AscendC::LocalTensor<float> biasLocal = biasQueue.DeQue<float>();
+
+        for (uint32_t i = 0; i < channelsPerCore; i++) {
+            uint32_t ci = startCi + i;
+            uint32_t c = ci % channels;
+
+            uint64_t channelOffset = (uint64_t)i * (uint64_t)elementsPerChannel;
+
+            AscendC::LocalTensor<float> xLocal = inQueue.AllocTensor<float>();
+            AscendC::DataCopyExtParams copyParams{1, (uint32_t)(elementsPerChannel * sizeof(float)), 0, 0, 0};
+            AscendC::DataCopyPadExtParams<float> padParams{true, 0, (uint8_t)(alignedElems - elementsPerChannel), 0.0f};
+            AscendC::DataCopyPad(xLocal, xGm[channelOffset], copyParams, padParams);
+            inQueue.EnQue(xLocal);
+
+            AscendC::LocalTensor<float> xIn = inQueue.DeQue<float>();
+            AscendC::LocalTensor<float> yOut = outQueue.AllocTensor<float>();
+
+            float biasVal = biasLocal.GetValue(c);
+
+            AscendC::Maxs(yOut, xIn, (float)0.0f, alignedElems);
+            AscendC::Adds(yOut, yOut, biasVal, alignedElems);
+
+            outQueue.EnQue<float>(yOut);
+            inQueue.FreeTensor(xIn);
+
+            AscendC::LocalTensor<float> yLocal = outQueue.DeQue<float>();
+            AscendC::DataCopyExtParams outCopyParams{1, (uint32_t)(elementsPerChannel * sizeof(float)), 0, 0, 0};
+            AscendC::DataCopyPad(yGm[channelOffset], yLocal, outCopyParams);
+            outQueue.FreeTensor(yLocal);
+        }
+
+        biasQueue.FreeTensor(biasLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueue;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueue;
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> biasQueue;
+    AscendC::GlobalTensor<float> xGm;
+    AscendC::GlobalTensor<float> yGm;
+    AscendC::GlobalTensor<float> biasGm;
+    uint32_t channels;
+    uint32_t elementsPerChannel;
+    uint32_t channelsPerCore;
+    uint32_t startCi;
+    uint32_t alignedElems;
+    uint32_t alignedChannels;
+};
+
+extern "C" __global__ __aicore__ void conv2d_relu_bias_add_custom(GM_ADDR x, GM_ADDR bias, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv2dReluBiasAdd op;
+    op.Init(x, bias, y, tiling_data.channels, tiling_data.elementsPerChannel, tiling_data.channelsPerCore);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv2d_relu_bias_add_custom_impl_npu(const at::Tensor& x, const at::Tensor& bias) {
+    at::Tensor result = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnConv2dReluBiasAddCustom, x, bias, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv2d_relu_bias_add_custom", &conv2d_relu_bias_add_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv2d_relu_bias_add_custom", &conv2d_relu_bias_add_custom_impl_npu, "fused relu + per-channel bias add after conv2d");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, bias_shape):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+        self.bias = nn.Parameter(torch.randn(bias_shape))
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = x.contiguous()
+        bias_flat = self.bias.reshape(-1).contiguous()
+        return custom_ops_lib.conv2d_relu_bias_add_custom(x, bias_flat)
+'''

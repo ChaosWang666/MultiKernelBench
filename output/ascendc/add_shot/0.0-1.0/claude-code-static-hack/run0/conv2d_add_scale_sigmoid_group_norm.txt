@@ -1,0 +1,555 @@
+project_json_src='''
+[
+    {
+        "op": "Conv2dAddScaleSigmoidGroupNormCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "bias",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "scale",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "gn_w",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "gn_b",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv2dAddScaleSigmoidGroupNormCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, batchSize);
+  TILING_DATA_FIELD_DEF(uint32_t, numChannels);
+  TILING_DATA_FIELD_DEF(uint32_t, numGroups);
+  TILING_DATA_FIELD_DEF(uint32_t, channelsPerGroup);
+  TILING_DATA_FIELD_DEF(uint32_t, hw);
+  TILING_DATA_FIELD_DEF(uint32_t, groupSize);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+  TILING_DATA_FIELD_DEF(uint32_t, fullTilesPerGroup);
+  TILING_DATA_FIELD_DEF(uint32_t, lastTileLen);
+  TILING_DATA_FIELD_DEF(float, eps);
+  TILING_DATA_FIELD_DEF(float, invGroupSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv2dAddScaleSigmoidGroupNormCustom, Conv2dAddScaleSigmoidGroupNormCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv2d_add_scale_sigmoid_group_norm_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t TILE_LENGTH = 4096;
+const uint32_t NUM_GROUPS = 8;
+const float EPS = 1e-5f;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv2dAddScaleSigmoidGroupNormCustomTilingData tiling;
+
+    auto inputShape = context->GetInputShape(0)->GetOriginShape();
+    uint32_t batchSize = static_cast<uint32_t>(inputShape.GetDim(0));
+    uint32_t numChannels = static_cast<uint32_t>(inputShape.GetDim(1));
+    uint32_t H = static_cast<uint32_t>(inputShape.GetDim(2));
+    uint32_t W = static_cast<uint32_t>(inputShape.GetDim(3));
+    uint32_t hw = H * W;
+    uint32_t numGroups = NUM_GROUPS;
+    uint32_t channelsPerGroup = numChannels / numGroups;
+    uint32_t groupSize = channelsPerGroup * hw;
+    uint32_t totalLength = batchSize * numChannels * hw;
+    uint32_t tileLength = TILE_LENGTH;
+    uint32_t fullTilesPerGroup = groupSize / tileLength;
+    uint32_t lastTileLen = groupSize - fullTilesPerGroup * tileLength;
+    float invGroupSize = 1.0f / static_cast<float>(static_cast<int32_t>(groupSize));
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalLength(totalLength);
+    tiling.set_batchSize(batchSize);
+    tiling.set_numChannels(numChannels);
+    tiling.set_numGroups(numGroups);
+    tiling.set_channelsPerGroup(channelsPerGroup);
+    tiling.set_hw(hw);
+    tiling.set_groupSize(groupSize);
+    tiling.set_tileLength(tileLength);
+    tiling.set_fullTilesPerGroup(fullTilesPerGroup);
+    tiling.set_lastTileLen(lastTileLen);
+    tiling.set_eps(EPS);
+    tiling.set_invGroupSize(invGroupSize);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv2dAddScaleSigmoidGroupNormCustom : public OpDef {
+public:
+    explicit Conv2dAddScaleSigmoidGroupNormCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("bias")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("scale")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("gn_w")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("gn_b")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910_93");
+    }
+};
+
+OP_ADD(Conv2dAddScaleSigmoidGroupNormCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+class KernelFused {
+public:
+    __aicore__ inline KernelFused() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR scale,
+                                GM_ADDR gn_w, GM_ADDR gn_b, GM_ADDR y,
+                                uint32_t totalLength, uint32_t batchSize,
+                                uint32_t numChannels, uint32_t numGroups,
+                                uint32_t channelsPerGroup, uint32_t hw,
+                                uint32_t groupSize, uint32_t tileLength,
+                                uint32_t fullTilesPerGroup, uint32_t lastTileLen,
+                                float eps, float invGroupSize)
+    {
+        this->batchSize = batchSize;
+        this->numChannels = numChannels;
+        this->numGroups = numGroups;
+        this->channelsPerGroup = channelsPerGroup;
+        this->hw = hw;
+        this->groupSize = groupSize;
+        this->tileLength = tileLength;
+        this->fullTilesPerGroup = fullTilesPerGroup;
+        this->lastTileLen = lastTileLen;
+        this->eps = eps;
+        this->invGroupSize = invGroupSize;
+
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockDim = AscendC::GetBlockNum();
+        uint32_t totalGroups = batchSize * numGroups;
+        uint32_t base = totalGroups / blockDim;
+        uint32_t rem = totalGroups % blockDim;
+        if (blockIdx < rem) {
+            this->groupsPerBlock = base + 1;
+            this->startGroup = blockIdx * this->groupsPerBlock;
+        } else {
+            this->groupsPerBlock = base;
+            this->startGroup = blockIdx * base + rem;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ float *)x, totalLength);
+        yGm.SetGlobalBuffer((__gm__ float *)y, totalLength);
+        biasGm.SetGlobalBuffer((__gm__ float *)bias, numChannels);
+        scaleGm.SetGlobalBuffer((__gm__ float *)scale, numChannels);
+        gnWGm.SetGlobalBuffer((__gm__ float *)gn_w, numChannels);
+        gnBGm.SetGlobalBuffer((__gm__ float *)gn_b, numChannels);
+
+        pipe.InitBuffer(xBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(yBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(tmpBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(biasArrBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(scaleArrBuf, this->tileLength * sizeof(float));
+        pipe.InitBuffer(reduceDstBuf, 64 * sizeof(float));
+        pipe.InitBuffer(reduceWorkBuf, 1024 * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t gi = 0; gi < this->groupsPerBlock; gi++) {
+            uint32_t globalGroupIdx = this->startGroup + gi;
+            uint32_t n = globalGroupIdx / this->numGroups;
+            uint32_t g = globalGroupIdx % this->numGroups;
+            ProcessOneGroup(n, g);
+        }
+    }
+
+private:
+    __aicore__ inline void ProcessOneGroup(uint32_t n, uint32_t g)
+    {
+        uint32_t firstChannel = g * this->channelsPerGroup;
+        uint64_t groupBaseOffset = (uint64_t)n * this->numChannels * this->hw +
+                                    (uint64_t)firstChannel * this->hw;
+
+        float sumVal = 0.0f;
+        float sumSqVal = 0.0f;
+
+        for (uint32_t t = 0; t < this->fullTilesPerGroup; t++) {
+            uint32_t tileStartInGroup = t * this->tileLength;
+            ProcessPhase1Tile(groupBaseOffset, tileStartInGroup, this->tileLength,
+                              firstChannel, sumVal, sumSqVal);
+        }
+        if (this->lastTileLen > 0) {
+            uint32_t tileStartInGroup = this->fullTilesPerGroup * this->tileLength;
+            ProcessPhase1Tile(groupBaseOffset, tileStartInGroup, this->lastTileLen,
+                              firstChannel, sumVal, sumSqVal);
+        }
+
+        float mean = sumVal * this->invGroupSize;
+        float var = sumSqVal * this->invGroupSize - mean * mean;
+        if (var < 0.0f) var = 0.0f;
+
+        AscendC::LocalTensor<float> sqrtBuf = tmpBuf.Get<float>();
+        AscendC::Duplicate(sqrtBuf, var + this->eps, 64);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Sqrt(sqrtBuf, sqrtBuf, 64);
+        AscendC::PipeBarrier<PIPE_V>();
+        float stdVal = sqrtBuf.GetValue(0);
+        float invStd = 1.0f / stdVal;
+
+        for (uint32_t t = 0; t < this->fullTilesPerGroup; t++) {
+            uint32_t tileStartInGroup = t * this->tileLength;
+            ProcessPhase2Tile(groupBaseOffset, tileStartInGroup, this->tileLength,
+                              firstChannel, mean, invStd);
+        }
+        if (this->lastTileLen > 0) {
+            uint32_t tileStartInGroup = this->fullTilesPerGroup * this->tileLength;
+            ProcessPhase2Tile(groupBaseOffset, tileStartInGroup, this->lastTileLen,
+                              firstChannel, mean, invStd);
+        }
+    }
+
+    __aicore__ inline void ProcessPhase1Tile(uint64_t groupBaseOffset,
+                                              uint32_t tileStartInGroup, uint32_t tileLen,
+                                              uint32_t firstChannel,
+                                              float& sumVal, float& sumSqVal)
+    {
+        uint32_t startChInGroup = tileStartInGroup / this->hw;
+        uint32_t endChInGroup = (tileStartInGroup + tileLen - 1) / this->hw;
+        uint64_t globalOffset = groupBaseOffset + (uint64_t)tileStartInGroup;
+
+        AscendC::LocalTensor<float> xLocal = xBuf.Get<float>();
+        AscendC::LocalTensor<float> yLocal = yBuf.Get<float>();
+        AscendC::LocalTensor<float> tmpLocal = tmpBuf.Get<float>();
+
+        AscendC::DataCopy(xLocal, xGm[globalOffset], tileLen);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        if (startChInGroup == endChInGroup) {
+            float bVal = biasGm.GetValue(firstChannel + startChInGroup);
+            float sVal = scaleGm.GetValue(firstChannel + startChInGroup);
+            AscendC::Adds(yLocal, xLocal, bVal, tileLen);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Muls(yLocal, yLocal, sVal, tileLen);
+        } else {
+            uint32_t splitPos = (startChInGroup + 1) * this->hw - tileStartInGroup;
+            float b0 = biasGm.GetValue(firstChannel + startChInGroup);
+            float s0 = scaleGm.GetValue(firstChannel + startChInGroup);
+            float b1 = biasGm.GetValue(firstChannel + endChInGroup);
+            float s1 = scaleGm.GetValue(firstChannel + endChInGroup);
+
+            AscendC::LocalTensor<float> biasArr = biasArrBuf.Get<float>();
+            AscendC::LocalTensor<float> scaleArr = scaleArrBuf.Get<float>();
+
+            AscendC::Duplicate(biasArr, b1, tileLen);
+            AscendC::Duplicate(scaleArr, s1, tileLen);
+            AscendC::PipeBarrier<PIPE_V>();
+
+            uint32_t alignedSplit = (splitPos / 8) * 8;
+            if (alignedSplit > 0) {
+                AscendC::Duplicate(biasArr, b0, alignedSplit);
+                AscendC::Duplicate(scaleArr, s0, alignedSplit);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
+            for (uint32_t i = alignedSplit; i < splitPos; i++) {
+                biasArr.SetValue(i, b0);
+                scaleArr.SetValue(i, s0);
+            }
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            AscendC::Add(yLocal, xLocal, biasArr, tileLen);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Mul(yLocal, yLocal, scaleArr, tileLen);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+
+        AscendC::Muls(tmpLocal, yLocal, -1.0f, tileLen);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Exp(tmpLocal, tmpLocal, tileLen);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Adds(tmpLocal, tmpLocal, 1.0f, tileLen);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Reciprocal(yLocal, tmpLocal, tileLen);
+        AscendC::PipeBarrier<PIPE_V>();
+
+        AscendC::LocalTensor<float> reduceDst = reduceDstBuf.Get<float>();
+        AscendC::LocalTensor<float> reduceWork = reduceWorkBuf.Get<float>();
+
+        AscendC::Mul(tmpLocal, yLocal, yLocal, tileLen);
+        AscendC::PipeBarrier<PIPE_V>();
+
+        AscendC::ReduceSum<float>(reduceDst, yLocal, reduceWork, tileLen);
+        AscendC::PipeBarrier<PIPE_ALL>();
+        sumVal += reduceDst.GetValue(0);
+
+        AscendC::ReduceSum<float>(reduceDst, tmpLocal, reduceWork, tileLen);
+        AscendC::PipeBarrier<PIPE_ALL>();
+        sumSqVal += reduceDst.GetValue(0);
+
+        AscendC::DataCopy(yGm[globalOffset], yLocal, tileLen);
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+
+    __aicore__ inline void ProcessPhase2Tile(uint64_t groupBaseOffset,
+                                              uint32_t tileStartInGroup, uint32_t tileLen,
+                                              uint32_t firstChannel,
+                                              float mean, float invStd)
+    {
+        uint32_t startChInGroup = tileStartInGroup / this->hw;
+        uint32_t endChInGroup = (tileStartInGroup + tileLen - 1) / this->hw;
+        uint64_t globalOffset = groupBaseOffset + (uint64_t)tileStartInGroup;
+
+        AscendC::LocalTensor<float> xLocal = xBuf.Get<float>();
+        AscendC::LocalTensor<float> yLocal = yBuf.Get<float>();
+
+        AscendC::DataCopy(xLocal, yGm[globalOffset], tileLen);
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        if (startChInGroup == endChInGroup) {
+            float gnW = gnWGm.GetValue(firstChannel + startChInGroup);
+            float gnB = gnBGm.GetValue(firstChannel + startChInGroup);
+            float a = gnW * invStd;
+            float b = gnB - mean * a;
+            AscendC::Muls(yLocal, xLocal, a, tileLen);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Adds(yLocal, yLocal, b, tileLen);
+        } else {
+            uint32_t splitPos = (startChInGroup + 1) * this->hw - tileStartInGroup;
+            float gnW0 = gnWGm.GetValue(firstChannel + startChInGroup);
+            float gnB0 = gnBGm.GetValue(firstChannel + startChInGroup);
+            float gnW1 = gnWGm.GetValue(firstChannel + endChInGroup);
+            float gnB1 = gnBGm.GetValue(firstChannel + endChInGroup);
+            float a0 = gnW0 * invStd;
+            float b0 = gnB0 - mean * a0;
+            float a1 = gnW1 * invStd;
+            float b1 = gnB1 - mean * a1;
+
+            AscendC::LocalTensor<float> aArr = biasArrBuf.Get<float>();
+            AscendC::LocalTensor<float> bArr = scaleArrBuf.Get<float>();
+
+            AscendC::Duplicate(aArr, a1, tileLen);
+            AscendC::Duplicate(bArr, b1, tileLen);
+            AscendC::PipeBarrier<PIPE_V>();
+
+            uint32_t alignedSplit = (splitPos / 8) * 8;
+            if (alignedSplit > 0) {
+                AscendC::Duplicate(aArr, a0, alignedSplit);
+                AscendC::Duplicate(bArr, b0, alignedSplit);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
+            for (uint32_t i = alignedSplit; i < splitPos; i++) {
+                aArr.SetValue(i, a0);
+                bArr.SetValue(i, b0);
+            }
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            AscendC::Mul(yLocal, xLocal, aArr, tileLen);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Add(yLocal, yLocal, bArr, tileLen);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+
+        AscendC::DataCopy(yGm[globalOffset], yLocal, tileLen);
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> xBuf, yBuf, tmpBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> biasArrBuf, scaleArrBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceDstBuf, reduceWorkBuf;
+    AscendC::GlobalTensor<float> xGm, yGm, biasGm, scaleGm, gnWGm, gnBGm;
+
+    uint32_t batchSize;
+    uint32_t numChannels;
+    uint32_t numGroups;
+    uint32_t channelsPerGroup;
+    uint32_t hw;
+    uint32_t groupSize;
+    uint32_t tileLength;
+    uint32_t fullTilesPerGroup;
+    uint32_t lastTileLen;
+    uint32_t groupsPerBlock;
+    uint32_t startGroup;
+    float eps;
+    float invGroupSize;
+};
+
+extern "C" __global__ __aicore__ void conv2d_add_scale_sigmoid_group_norm_custom(
+    GM_ADDR x, GM_ADDR bias, GM_ADDR scale, GM_ADDR gn_w, GM_ADDR gn_b,
+    GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelFused op;
+    op.Init(x, bias, scale, gn_w, gn_b, y,
+            tiling_data.totalLength, tiling_data.batchSize, tiling_data.numChannels,
+            tiling_data.numGroups, tiling_data.channelsPerGroup, tiling_data.hw,
+            tiling_data.groupSize, tiling_data.tileLength,
+            tiling_data.fullTilesPerGroup, tiling_data.lastTileLen,
+            tiling_data.eps, tiling_data.invGroupSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv2d_add_scale_sigmoid_group_norm_custom_impl_npu(
+    const at::Tensor& x, const at::Tensor& conv_w, const at::Tensor& conv_b,
+    const at::Tensor& bias, const at::Tensor& scale,
+    const at::Tensor& gn_w, const at::Tensor& gn_b)
+{
+    at::Tensor t = at::conv2d(x, conv_w, conv_b).contiguous();
+    at::Tensor result = at::empty_like(t);
+    EXEC_NPU_CMD(aclnnConv2dAddScaleSigmoidGroupNormCustom, t, bias, scale, gn_w, gn_b, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv2d_add_scale_sigmoid_group_norm_custom", &conv2d_add_scale_sigmoid_group_norm_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv2d_add_scale_sigmoid_group_norm_custom", &conv2d_add_scale_sigmoid_group_norm_custom_impl_npu, "fused conv2d + bias + scale + sigmoid + groupnorm");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import torch.nn as nn
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, num_groups, bias_shape, scale_shape):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+        self.bias = nn.Parameter(torch.randn(bias_shape))
+        self.scale = nn.Parameter(torch.randn(scale_shape))
+        self.group_norm = nn.GroupNorm(num_groups, out_channels)
+
+    def forward(self, x):
+        return custom_ops_lib.conv2d_add_scale_sigmoid_group_norm_custom(
+            x, self.conv.weight, self.conv.bias,
+            self.bias.view(-1).contiguous(),
+            self.scale.view(-1).contiguous(),
+            self.group_norm.weight, self.group_norm.bias)
+'''

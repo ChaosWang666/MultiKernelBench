@@ -1,0 +1,271 @@
+project_json_src='''
+[
+    {
+        "op": "Conv2dMishMishCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(Conv2dMishMishCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalLength);
+  TILING_DATA_FIELD_DEF(uint32_t, blockLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(Conv2dMishMishCustom, Conv2dMishMishCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv2d_mish_mish_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t MAX_BLOCK_DIM = 32;
+const uint32_t TILE_LENGTH = 4096;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    Conv2dMishMishCustomTilingData tiling;
+    uint32_t totalLength = context->GetInputShape(0)->GetOriginShape().GetShapeSize();
+
+    uint32_t blockDim = MAX_BLOCK_DIM;
+    while (blockDim > 1 && (totalLength % (blockDim * 8) != 0)) {
+        blockDim /= 2;
+    }
+    if (blockDim == 0) {
+        blockDim = 1;
+    }
+
+    uint32_t blockLength = totalLength / blockDim;
+
+    context->SetBlockDim(blockDim);
+    tiling.set_totalLength(totalLength);
+    tiling.set_blockLength(blockLength);
+    tiling.set_tileLength(TILE_LENGTH);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class Conv2dMishMishCustom : public OpDef {
+public:
+    explicit Conv2dMishMishCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910_93");
+    }
+};
+
+OP_ADD(Conv2dMishMishCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConv2dMishMish {
+public:
+    __aicore__ inline KernelConv2dMishMish() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR z,
+                                uint32_t blockLength,
+                                uint32_t tileLength)
+    {
+        this->blockLength = blockLength;
+        this->tileLength = tileLength;
+
+        uint32_t coreIdx = AscendC::GetBlockIdx();
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + blockLength * coreIdx, blockLength);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + blockLength * coreIdx, blockLength);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, tileLength * sizeof(DTYPE_Z));
+        pipe.InitBuffer(tBuf1, tileLength * sizeof(float));
+        pipe.InitBuffer(tBuf2, tileLength * sizeof(float));
+        pipe.InitBuffer(tBuf3, tileLength * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t base = 0;
+        while (base < this->blockLength) {
+            uint32_t curLen = this->tileLength;
+            if (base + curLen > this->blockLength) {
+                curLen = this->blockLength - base;
+            }
+            CopyIn(base, curLen);
+            Compute(curLen);
+            CopyOut(base, curLen);
+            base += curLen;
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint32_t base, uint32_t len)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        AscendC::DataCopy(xLocal, xGm[base], len);
+        inQueueX.EnQue(xLocal);
+    }
+
+    __aicore__ inline void Compute(uint32_t len)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        AscendC::LocalTensor<float> t1 = tBuf1.Get<float>();
+        AscendC::LocalTensor<float> t2 = tBuf2.Get<float>();
+        AscendC::LocalTensor<float> t3 = tBuf3.Get<float>();
+
+        // First Mish: y = x * (u^2 + 2u) / (u^2 + 2u + 2), u = exp(x)
+        AscendC::Exp(t1, xLocal, len);
+        AscendC::Adds(t2, t1, (float)2.0f, len);
+        AscendC::Mul(t1, t1, t2, len);
+        AscendC::Adds(t2, t1, (float)2.0f, len);
+        AscendC::Mul(t1, xLocal, t1, len);
+        AscendC::Div(t3, t1, t2, len);
+
+        // Second Mish: z = t3 * (u'^2 + 2u') / (u'^2 + 2u' + 2), u' = exp(t3)
+        AscendC::Exp(t1, t3, len);
+        AscendC::Adds(t2, t1, (float)2.0f, len);
+        AscendC::Mul(t1, t1, t2, len);
+        AscendC::Adds(t2, t1, (float)2.0f, len);
+        AscendC::Mul(t1, t3, t1, len);
+        AscendC::Div(zLocal, t1, t2, len);
+
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void CopyOut(uint32_t base, uint32_t len)
+    {
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
+        AscendC::DataCopy(zGm[base], zLocal, len);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tBuf1;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tBuf2;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> tBuf3;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
+    uint32_t blockLength;
+    uint32_t tileLength;
+};
+
+extern "C" __global__ __aicore__ void conv2d_mish_mish_custom(GM_ADDR x, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConv2dMishMish op;
+    op.Init(x, z, tiling_data.blockLength, tiling_data.tileLength);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv2d_mish_mish_custom_impl_npu(const at::Tensor& self) {
+    at::Tensor result = at::empty_like(self);
+    EXEC_NPU_CMD(aclnnConv2dMishMishCustom, self, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv2d_mish_mish_custom", &conv2d_mish_mish_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv2d_mish_mish_custom", &conv2d_mish_mish_custom_impl_npu, "fused mish(mish(x))");
+}
+"""
+
+model_src='''
+import torch
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(in_channels, out_channels, kernel_size)
+
+    def forward(self, x):
+        x = self.conv(x).contiguous()
+        x = custom_ops_lib.conv2d_mish_mish_custom(x)
+        return x
+'''

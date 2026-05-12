@@ -1,0 +1,331 @@
+project_json_src='''
+[
+    {
+        "op": "ConvTranspose3dAvgPoolClampSoftmaxMultiplyCustom",
+        "language": "cpp",
+        "input_desc": [
+            {
+                "name": "x",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            },
+            {
+                "name": "y",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ],
+        "output_desc": [
+            {
+                "name": "z",
+                "param_type": "required",
+                "format": [
+                    "ND"
+                ],
+                "type": [
+                    "float"
+                ]
+            }
+        ]
+    }
+]
+'''
+
+host_tiling_src="""
+#include "register/tilingdata_base.h"
+
+namespace optiling {
+BEGIN_TILING_DATA_DEF(ConvTranspose3dAvgPoolClampSoftmaxMultiplyCustomTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, totalSlices);
+  TILING_DATA_FIELD_DEF(uint32_t, channels);
+  TILING_DATA_FIELD_DEF(uint32_t, sliceLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);
+  TILING_DATA_FIELD_DEF(uint32_t, tileNumPerSlice);
+  TILING_DATA_FIELD_DEF(uint32_t, scaleAlignedSize);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ConvTranspose3dAvgPoolClampSoftmaxMultiplyCustom, ConvTranspose3dAvgPoolClampSoftmaxMultiplyCustomTilingData)
+}
+"""
+
+host_operator_src="""
+#include "conv_transpose3d_avg_pool_clamp_softmax_multiply_custom_tiling.h"
+#include "register/op_def_registry.h"
+
+
+namespace optiling {
+const uint32_t BLOCK_DIM = 32;
+const uint32_t DEFAULT_TILE_LENGTH = 4096;
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context)
+{
+    ConvTranspose3dAvgPoolClampSoftmaxMultiplyCustomTilingData tiling;
+
+    const gert::Shape& xShape = context->GetInputShape(0)->GetOriginShape();
+    const gert::Shape& scaleShape = context->GetInputShape(1)->GetOriginShape();
+
+    uint32_t totalSlices = xShape.GetDim(0);
+    uint32_t sliceLength = xShape.GetDim(1);
+    uint32_t channels = scaleShape.GetDim(0);
+
+    uint32_t tileLength = DEFAULT_TILE_LENGTH;
+    if (tileLength > sliceLength) {
+        tileLength = sliceLength;
+    }
+    while (tileLength > 0 && (sliceLength % tileLength) != 0) {
+        tileLength /= 2;
+    }
+    if (tileLength == 0) {
+        tileLength = sliceLength;
+    }
+    uint32_t tileNumPerSlice = sliceLength / tileLength;
+
+    uint32_t blockSize = 32 / sizeof(float);
+    uint32_t scaleAlignedSize = ((channels + blockSize - 1) / blockSize) * blockSize * sizeof(float);
+
+    context->SetBlockDim(BLOCK_DIM);
+    tiling.set_totalSlices(totalSlices);
+    tiling.set_channels(channels);
+    tiling.set_sliceLength(sliceLength);
+    tiling.set_tileLength(tileLength);
+    tiling.set_tileNumPerSlice(tileNumPerSlice);
+    tiling.set_scaleAlignedSize(scaleAlignedSize);
+
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
+    currentWorkspace[0] = 0;
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ge {
+static ge::graphStatus InferShape(gert::InferShapeContext* context)
+{
+    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;
+    return GRAPH_SUCCESS;
+}
+static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
+{
+    const auto inputDataType = context->GetInputDataType(0);
+    context->SetOutputDataType(0, inputDataType);
+    return ge::GRAPH_SUCCESS;
+}
+}
+
+
+namespace ops {
+class ConvTranspose3dAvgPoolClampSoftmaxMultiplyCustom : public OpDef {
+public:
+    explicit ConvTranspose3dAvgPoolClampSoftmaxMultiplyCustom(const char* name) : OpDef(name)
+    {
+        this->Input("x")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("z")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
+
+        this->AICore()
+            .SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910_93");
+
+    }
+};
+
+OP_ADD(ConvTranspose3dAvgPoolClampSoftmaxMultiplyCustom);
+}
+"""
+
+kernel_src="""
+#include "kernel_operator.h"
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class KernelConvTranspose3dAvgPoolClampSoftmaxMultiplyCustom {
+public:
+    __aicore__ inline KernelConvTranspose3dAvgPoolClampSoftmaxMultiplyCustom() {}
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z,
+                                 uint32_t totalSlices, uint32_t channels,
+                                 uint32_t sliceLength, uint32_t tileLength,
+                                 uint32_t tileNumPerSlice,
+                                 uint32_t scaleAlignedSize)
+    {
+        this->totalSlices = totalSlices;
+        this->channels = channels;
+        this->sliceLength = sliceLength;
+        this->tileLength = tileLength;
+        this->tileNumPerSlice = tileNumPerSlice;
+
+        uint32_t blockNum = AscendC::GetBlockNum();
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t slicesPerCore = totalSlices / blockNum;
+        uint32_t remainder = totalSlices - slicesPerCore * blockNum;
+        if (blockIdx < remainder) {
+            this->startSlice = blockIdx * (slicesPerCore + 1);
+            this->slicesThisCore = slicesPerCore + 1;
+        } else {
+            this->startSlice = remainder * (slicesPerCore + 1) + (blockIdx - remainder) * slicesPerCore;
+            this->slicesThisCore = slicesPerCore;
+        }
+
+        xGm.SetGlobalBuffer((__gm__ DTYPE_X *)x + this->startSlice * sliceLength,
+                            this->slicesThisCore * sliceLength);
+        yGm.SetGlobalBuffer((__gm__ DTYPE_Y *)y, channels);
+        zGm.SetGlobalBuffer((__gm__ DTYPE_Z *)z + this->startSlice * sliceLength,
+                            this->slicesThisCore * sliceLength);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(DTYPE_X));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(DTYPE_Z));
+        pipe.InitBuffer(scaleBuf, scaleAlignedSize);
+    }
+
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<DTYPE_Y> scaleLocal = scaleBuf.Get<DTYPE_Y>();
+
+        uint32_t blockSize = 32 / sizeof(DTYPE_Y);
+        uint32_t scaleElems = ((this->channels + blockSize - 1) / blockSize) * blockSize;
+        AscendC::DataCopy(scaleLocal, yGm, scaleElems);
+
+        event_t eventIdMte2ToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_S));
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(eventIdMte2ToS);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(eventIdMte2ToS);
+
+        for (uint32_t s = 0; s < this->slicesThisCore; s++) {
+            uint32_t globalSlice = this->startSlice + s;
+            uint32_t c = globalSlice % this->channels;
+            DTYPE_Y scaleVal = scaleLocal.GetValue(c);
+
+            for (uint32_t t = 0; t < this->tileNumPerSlice; t++) {
+                CopyIn(s, t);
+                Compute(scaleVal);
+                CopyOut(s, t);
+            }
+        }
+    }
+
+private:
+    __aicore__ inline void CopyIn(uint32_t s, uint32_t t)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.AllocTensor<DTYPE_X>();
+        uint32_t offset = s * this->sliceLength + t * this->tileLength;
+        AscendC::DataCopy(xLocal, xGm[offset], this->tileLength);
+        inQueueX.EnQue(xLocal);
+    }
+    __aicore__ inline void Compute(DTYPE_Y scaleVal)
+    {
+        AscendC::LocalTensor<DTYPE_X> xLocal = inQueueX.DeQue<DTYPE_X>();
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.AllocTensor<DTYPE_Z>();
+        AscendC::Muls(zLocal, xLocal, scaleVal, this->tileLength);
+        outQueueZ.EnQue<DTYPE_Z>(zLocal);
+        inQueueX.FreeTensor(xLocal);
+    }
+    __aicore__ inline void CopyOut(uint32_t s, uint32_t t)
+    {
+        AscendC::LocalTensor<DTYPE_Z> zLocal = outQueueZ.DeQue<DTYPE_Z>();
+        uint32_t offset = s * this->sliceLength + t * this->tileLength;
+        AscendC::DataCopy(zGm[offset], zLocal, this->tileLength);
+        outQueueZ.FreeTensor(zLocal);
+    }
+
+private:
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> scaleBuf;
+    AscendC::GlobalTensor<DTYPE_X> xGm;
+    AscendC::GlobalTensor<DTYPE_Y> yGm;
+    AscendC::GlobalTensor<DTYPE_Z> zGm;
+    uint32_t totalSlices;
+    uint32_t channels;
+    uint32_t sliceLength;
+    uint32_t tileLength;
+    uint32_t tileNumPerSlice;
+    uint32_t startSlice;
+    uint32_t slicesThisCore;
+};
+
+extern "C" __global__ __aicore__ void conv_transpose3d_avg_pool_clamp_softmax_multiply_custom(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {
+    GET_TILING_DATA(tiling_data, tiling);
+    KernelConvTranspose3dAvgPoolClampSoftmaxMultiplyCustom op;
+    op.Init(x, y, z, tiling_data.totalSlices, tiling_data.channels,
+            tiling_data.sliceLength, tiling_data.tileLength,
+            tiling_data.tileNumPerSlice, tiling_data.scaleAlignedSize);
+    op.Process();
+}
+"""
+
+python_bind_src="""
+#include <torch/library.h>
+#include <torch/csrc/autograd/custom_function.h>
+#include "pytorch_npu_helper.hpp"
+#include <torch/extension.h>
+
+at::Tensor conv_transpose3d_avg_pool_clamp_softmax_multiply_custom_impl_npu(const at::Tensor& self, const at::Tensor& scale) {
+    at::Tensor result = at::empty_like(self);
+    EXEC_NPU_CMD(aclnnConvTranspose3dAvgPoolClampSoftmaxMultiplyCustom, self, scale, result);
+    return result;
+}
+
+TORCH_LIBRARY_IMPL(myops, PrivateUse1, m) {
+    m.impl("conv_transpose3d_avg_pool_clamp_softmax_multiply_custom", &conv_transpose3d_avg_pool_clamp_softmax_multiply_custom_impl_npu);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("conv_transpose3d_avg_pool_clamp_softmax_multiply_custom", &conv_transpose3d_avg_pool_clamp_softmax_multiply_custom_impl_npu, "fused per-channel scale multiply on softmax-normalized tensor");
+}
+"""
+
+model_src='''
+import torch
+import torch.nn as nn
+import torch_npu
+import custom_ops_lib
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, output_padding, pool_kernel_size, clamp_min, clamp_max):
+        super(ModelNew, self).__init__()
+        self.avg_pool = nn.AvgPool3d(pool_kernel_size)
+        self.conv_transpose = nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, output_padding=output_padding)
+        self.clamp_min = clamp_min
+        self.clamp_max = clamp_max
+        self.scale = nn.Parameter(torch.ones(1, out_channels, 1, 1, 1))
+
+    def forward(self, x):
+        x = self.avg_pool(x)
+        x = self.conv_transpose(x)
+        x = torch.clamp(x, self.clamp_min, self.clamp_max)
+        b, c, d, h, w = x.shape
+        x = x.view(b, c, -1)
+        x = torch.softmax(x, dim=2)
+        x_flat = x.contiguous().view(b * c, -1)
+        scale_flat = self.scale.contiguous().view(-1)
+        result = custom_ops_lib.conv_transpose3d_avg_pool_clamp_softmax_multiply_custom(x_flat, scale_flat)
+        result = result.view(b, c, d, h, w)
+        return result
+'''
