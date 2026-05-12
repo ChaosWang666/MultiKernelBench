@@ -13,19 +13,23 @@ A constraint block is always appended to tell Claude Code:
   - emit the full answer to stdout only.
 """
 
+import asyncio
 import os
-import re
 import sys
-import subprocess
 import argparse
-import shutil
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from generate_and_write import generate_prompt
 from dataset import dataset
 from config import temperature, top_p
+from utils.claude_sdk_adapter import (
+    EXPECTED_FIELDS,
+    SUBMIT_TOOL_DIRECTIVE,
+    append_metric,
+    render_kernel_text,
+    run_generation,
+)
 
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -75,15 +79,9 @@ Wiki 查询协议（请严格按此步骤检索知识）：
 注意：请仅使用 Read、Glob、Grep 工具查阅上述 Wiki 目录中的文件，不要修改任何文件或执行其他工具操作。
 """
 
-OUTPUT_FORMAT_RULES = """
-输出格式（最终答复必须严格遵守）：
-- 最终答复的第一个非空字符必须是 `project_json_src` 的 `p`。换言之，第一行就是 `project_json_src='''` 开头。
-- 禁止在代码之前写任何开场白/总结句，尤其不要以以下任一方式开头：
-  "I found...", "Now I have...", "Let me...", "I've gathered...", "Here's the...",
-  "I now have...", "好的", "让我", "现在我已经", "根据", "基于".
-- 禁止在代码之后追加任何说明、注释、总结或后记。
-- 禁止使用 markdown 代码块包裹整段输出（不要输出 ``` 或 ```python）。
-- 输出必须且只能包含 6 个变量的顺序赋值：project_json_src、host_tiling_src、host_operator_src、kernel_src、python_bind_src、model_src。
+OUTPUT_FORMAT_RULES = f"""
+输出格式（最终交付必须严格遵守）：
+{SUBMIT_TOOL_DIRECTIVE}
 """
 
 ASCENDC_PITFALLS = """
@@ -123,52 +121,6 @@ CONSTRAINT_SUFFIX_WIKI = f"""
 """
 
 
-EXPECTED_VARS = (
-    'project_json_src',
-    'host_tiling_src',
-    'host_operator_src',
-    'kernel_src',
-    'python_bind_src',
-    'model_src',
-)
-
-_VAR_ASSIGN_RE = re.compile(
-    r'^(' + '|'.join(EXPECTED_VARS) + r')\s*=',
-    re.MULTILINE,
-)
-
-
-def _extract_kernel_code(raw):
-    """Strip preamble prose and markdown fences from Claude CLI output.
-
-    Returns the cleaned source text, or None if the six required variable
-    assignments aren't all present (likely a rate-limit / error response).
-    """
-    if not raw:
-        return None
-    text = raw.strip()
-
-    # Unwrap a surrounding fenced code block, e.g. ```python\n...\n```
-    fence_match = re.match(
-        r'^```(?:python|py|cpp|c\+\+)?\s*\n(.*)\n```\s*$',
-        text,
-        re.DOTALL,
-    )
-    if fence_match:
-        text = fence_match.group(1).strip()
-
-    first_assign = _VAR_ASSIGN_RE.search(text)
-    if first_assign is None:
-        return None
-    text = text[first_assign.start():]
-
-    present = {m.group(1) for m in _VAR_ASSIGN_RE.finditer(text)}
-    if not set(EXPECTED_VARS).issubset(present):
-        return None
-
-    return text.rstrip() + '\n'
-
-
 def load_best_practices():
     with open(BEST_PRACTICES_PATH, 'r', encoding='utf-8') as f:
         return f.read()
@@ -189,78 +141,79 @@ def build_prompt(language, strategy, op, best_practices=None, wiki=False):
     return ''.join(parts)
 
 
-def generate_with_claude_code(prompt, out_dir, op, timeout=300, disable_skills=False, with_wiki=False):
-    """Invoke claude CLI in print mode."""
+def _persist_result(out_dir, op, result):
+    """Write `{op}.txt` (or `.raw.txt` on failure) and append metrics line.
+    Shared by the sync and async entry points so behavior stays identical."""
+    print(f"[INFO] {op} done in {result.duration_s:.1f}s, "
+          f"turns={result.num_turns}, cost=${result.cost_usd:.4f}, "
+          f"limit_hit={result.limit_hit}, has_fields={result.fields is not None}")
+    append_metric(out_dir, result)
+
+    if result.limit_hit:
+        print(f"[SKIP] {op}: limit hit ({result.error or 'budget/rate'})")
+        return
+
+    if result.fields is None:
+        raw_path = os.path.join(out_dir, f'{op}.raw.txt')
+        with open(raw_path, 'w') as f:
+            f.write(result.raw_text or '')
+            if result.error:
+                f.write(f"\n\n[ERROR] {result.error}\n")
+        print(f"[SKIP] {op}: model did not call submit_kernel; raw saved to {raw_path}")
+        return
+
+    missing = [k for k in EXPECTED_FIELDS if not result.fields.get(k)]
+    if missing:
+        raw_path = os.path.join(out_dir, f'{op}.raw.txt')
+        with open(raw_path, 'w') as f:
+            f.write(repr(result.fields))
+        print(f"[SKIP] {op}: submit_kernel missing/empty fields: {missing}; raw saved to {raw_path}")
+        return
+
+    out_path = os.path.join(out_dir, f'{op}.txt')
+    with open(out_path, 'w') as f:
+        f.write(render_kernel_text(result.fields))
+
+
+async def agenerate_with_claude_code(prompt, out_dir, op, timeout=300,
+                                     disable_skills=False, with_wiki=False,
+                                     extra_allowed_tools=None):
+    """Async version. Use this directly from asyncio.gather-driven callers
+    (e.g. generate_and_evaluate_parallel.py) to avoid nesting asyncio.run()."""
     out_path = os.path.join(out_dir, f'{op}.txt')
     if os.path.exists(out_path):
         print(f"[INFO] Already generated at {out_path}, skip")
         return
 
-    claude_bin = shutil.which("claude") or "/usr/bin/claude"
-    cmd = [
-        claude_bin,
-        "-p",
-        "--output-format", "text",
-    ]
-    if with_wiki:
-        cmd.extend(["--allowed-tools", "Read Glob Grep"])
-    else:
-        cmd.extend([
-            "--disallowed-tools",
-            "Read Glob Grep Write Edit Bash Task WebFetch WebSearch NotebookEdit",
-        ])
-    if disable_skills:
-        cmd.append("--disable-slash-commands")
+    print(f"[INFO] Generating {op} via Claude Agent SDK (prompt_len={len(prompt)})...")
+    result = await run_generation(
+        prompt, op,
+        timeout=timeout,
+        with_wiki=with_wiki,
+        disable_skills=disable_skills,
+        cwd=REPO_ROOT,
+        extra_allowed_tools=extra_allowed_tools,
+    )
+    _persist_result(out_dir, op, result)
 
-    print(f"[INFO] Generating {op} via Claude Code CLI (prompt_len={len(prompt)})...")
-    start = time.time()
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=REPO_ROOT,
-        )
-    except subprocess.TimeoutExpired:
-        print(f"[ERROR] Timeout ({timeout}s) for {op}")
-        return
+def generate_with_claude_code(prompt, out_dir, op, timeout=300, disable_skills=False,
+                              with_wiki=False, extra_allowed_tools=None):
+    """Sync entry point — wraps the async version in asyncio.run().
 
-    elapsed = time.time() - start
-    print(f"[INFO] {op} completed in {elapsed:.1f}s, "
-          f"exit_code={proc.returncode}, output_len={len(proc.stdout)}")
-
-    if proc.returncode != 0:
-        print(f"[WARN] Non-zero exit for {op}: {proc.stderr[:500]}")
-
-    out = (proc.stdout or '').strip()
-    rate_limit_markers = [
-        "You've hit your limit",
-        "Please log in",
-        "Rate limit exceeded",
-    ]
-    if len(out) < 200 or any(m in out for m in rate_limit_markers):
-        print(f"[SKIP] {op}: output looks like rate-limit/error ({len(out)} bytes): {out[:80]}")
-        return
-
-    cleaned = _extract_kernel_code(out)
-    if cleaned is None:
-        raw_path = os.path.join(out_dir, f'{op}.raw.txt')
-        with open(raw_path, 'w') as f:
-            f.write(out)
-        print(f"[SKIP] {op}: could not locate all six required variables; raw output saved to {raw_path}")
-        return
-
-    if cleaned != out:
-        raw_path = os.path.join(out_dir, f'{op}.raw.txt')
-        with open(raw_path, 'w') as f:
-            f.write(out)
-        print(f"[INFO] {op}: stripped {len(out) - len(cleaned)} bytes of preamble/fence; raw saved to {raw_path}")
-
-    with open(out_path, 'w') as f:
-        f.write(cleaned)
+    The model must deliver its result through the in-process `submit_kernel`
+    MCP tool (6 fields, schema-validated). Output is rendered to
+    `{out_dir}/{op}.txt` in the same triple-quoted-assignment format that
+    `eval_single_runner.py` expects. Per-op metrics are appended to
+    `{out_dir}/metrics.jsonl`.
+    """
+    asyncio.run(agenerate_with_claude_code(
+        prompt, out_dir, op,
+        timeout=timeout,
+        disable_skills=disable_skills,
+        with_wiki=with_wiki,
+        extra_allowed_tools=extra_allowed_tools,
+    ))
 
 
 def resolve_ops(args):

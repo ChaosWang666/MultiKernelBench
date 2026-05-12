@@ -14,18 +14,16 @@ A constraint block is always appended to tell Claude Code:
 """
 
 import os
-import re
 import sys
-import subprocess
 import argparse
-import shutil
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from generate_and_write import generate_prompt
 from dataset import dataset
 from config import temperature, top_p
+from generate_with_claude_code import generate_with_claude_code
+from utils.claude_sdk_adapter import SUBMIT_TOOL_DIRECTIVE
 
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -39,15 +37,9 @@ WIKI_PREAMBLE = f"""重要提示：
 - 至少调用一次 `cann-ask` skill。即使你认为自己会写任务算子，也必须先查一次高价值知识再写。
 """
 
-OUTPUT_FORMAT_RULES = """
-输出格式（最终答复必须严格遵守）：
-- 最终答复的第一个非空字符必须是 `project_json_src` 的 `p`。换言之，第一行就是 `project_json_src='''` 开头。
-- 禁止在代码之前写任何开场白/总结句，尤其不要以以下任一方式开头：
-  "I found...", "Now I have...", "Let me...", "I've gathered...", "Here's the...",
-  "I now have...", "好的", "让我", "现在我已经", "根据", "基于".
-- 禁止在代码之后追加任何说明、注释、总结或后记。
-- 禁止使用 markdown 代码块包裹整段输出（不要输出 ``` 或 ```python）。
-- 输出必须且只能包含 6 个变量的顺序赋值：project_json_src、host_tiling_src、host_operator_src、kernel_src、python_bind_src、model_src。
+OUTPUT_FORMAT_RULES = f"""
+输出格式（最终交付必须严格遵守）：
+{SUBMIT_TOOL_DIRECTIVE}
 """
 
 ASCENDC_PITFALLS = """
@@ -88,52 +80,6 @@ CONSTRAINT_SUFFIX_WIKI = f"""
 """
 
 
-EXPECTED_VARS = (
-    'project_json_src',
-    'host_tiling_src',
-    'host_operator_src',
-    'kernel_src',
-    'python_bind_src',
-    'model_src',
-)
-
-_VAR_ASSIGN_RE = re.compile(
-    r'^(' + '|'.join(EXPECTED_VARS) + r')\s*=',
-    re.MULTILINE,
-)
-
-
-def _extract_kernel_code(raw):
-    """Strip preamble prose and markdown fences from Claude CLI output.
-
-    Returns the cleaned source text, or None if the six required variable
-    assignments aren't all present (likely a rate-limit / error response).
-    """
-    if not raw:
-        return None
-    text = raw.strip()
-
-    # Unwrap a surrounding fenced code block, e.g. ```python\n...\n```
-    fence_match = re.match(
-        r'^```(?:python|py|cpp|c\+\+)?\s*\n(.*)\n```\s*$',
-        text,
-        re.DOTALL,
-    )
-    if fence_match:
-        text = fence_match.group(1).strip()
-
-    first_assign = _VAR_ASSIGN_RE.search(text)
-    if first_assign is None:
-        return None
-    text = text[first_assign.start():]
-
-    present = {m.group(1) for m in _VAR_ASSIGN_RE.finditer(text)}
-    if not set(EXPECTED_VARS).issubset(present):
-        return None
-
-    return text.rstrip() + '\n'
-
-
 def load_best_practices():
     with open(BEST_PRACTICES_PATH, 'r', encoding='utf-8') as f:
         return f.read()
@@ -154,78 +100,7 @@ def build_prompt(language, strategy, op, best_practices=None, wiki=False):
     return ''.join(parts)
 
 
-def generate_with_claude_code(prompt, out_dir, op, timeout=300, disable_skills=False, with_wiki=False):
-    """Invoke claude CLI in print mode."""
-    out_path = os.path.join(out_dir, f'{op}.txt')
-    if os.path.exists(out_path):
-        print(f"[INFO] Already generated at {out_path}, skip")
-        return
-
-    claude_bin = shutil.which("claude") or "/usr/bin/claude"
-    cmd = [
-        claude_bin,
-        "-p",
-        "--output-format", "text",
-    ]
-    if with_wiki:
-        cmd.extend(["--allowed-tools", "Skill(cann-ask) Skill(setup-cann-wiki) Read Glob Grep"])
-    else:
-        cmd.extend([
-            "--disallowed-tools",
-            "Read Glob Grep Write Edit Bash Task WebFetch WebSearch NotebookEdit",
-        ])
-    if disable_skills:
-        cmd.append("--disable-slash-commands")
-
-    print(f"[INFO] Generating {op} via Claude Code CLI (prompt_len={len(prompt)})...")
-    start = time.time()
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=REPO_ROOT,
-        )
-    except subprocess.TimeoutExpired:
-        print(f"[ERROR] Timeout ({timeout}s) for {op}")
-        return
-
-    elapsed = time.time() - start
-    print(f"[INFO] {op} completed in {elapsed:.1f}s, "
-          f"exit_code={proc.returncode}, output_len={len(proc.stdout)}")
-
-    if proc.returncode != 0:
-        print(f"[WARN] Non-zero exit for {op}: {proc.stderr[:500]}")
-
-    out = (proc.stdout or '').strip()
-    rate_limit_markers = [
-        "You've hit your limit",
-        "Please log in",
-        "Rate limit exceeded",
-    ]
-    if len(out) < 200 or any(m in out for m in rate_limit_markers):
-        print(f"[SKIP] {op}: output looks like rate-limit/error ({len(out)} bytes): {out[:80]}")
-        return
-
-    cleaned = _extract_kernel_code(out)
-    if cleaned is None:
-        raw_path = os.path.join(out_dir, f'{op}.raw.txt')
-        with open(raw_path, 'w') as f:
-            f.write(out)
-        print(f"[SKIP] {op}: could not locate all six required variables; raw output saved to {raw_path}")
-        return
-
-    if cleaned != out:
-        raw_path = os.path.join(out_dir, f'{op}.raw.txt')
-        with open(raw_path, 'w') as f:
-            f.write(out)
-        print(f"[INFO] {op}: stripped {len(out) - len(cleaned)} bytes of preamble/fence; raw saved to {raw_path}")
-
-    with open(out_path, 'w') as f:
-        f.write(cleaned)
+WIKI_SKILL_TOOLS = ['Skill(cann-ask)', 'Skill(setup-cann-wiki)']
 
 
 def resolve_ops(args):
@@ -284,10 +159,13 @@ def main():
                 prompt = build_prompt(language, args.strategy, op,
                                       best_practices=best_practices,
                                       wiki=with_wiki)
-                generate_with_claude_code(prompt, out_dir, op,
-                                          timeout=args.timeout,
-                                          disable_skills=args.disable_skills,
-                                          with_wiki=with_wiki)
+                generate_with_claude_code(
+                    prompt, out_dir, op,
+                    timeout=args.timeout,
+                    disable_skills=args.disable_skills,
+                    with_wiki=with_wiki,
+                    extra_allowed_tools=WIKI_SKILL_TOOLS if with_wiki else None,
+                )
             except Exception as e:
                 print(f"[ERROR] Failed for {op}: {e}")
 
