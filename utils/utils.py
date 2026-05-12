@@ -1,12 +1,12 @@
 import os
 import config
 import re
-from openai import OpenAI
-from dataset import dataset
 import torch
 
 # api3.xhub.chat平台
 def get_client(model):
+    # lazy import: openai 只在真正调 LLM 时才需要; 防 hack 检查脚本不需要它
+    from openai import OpenAI
     client = OpenAI(
         api_key="sk-qLGf3r2HFjyUrtvwqWUkzY6m9LIFOJr2xleMMAO04t6nJceY",
         base_url="https://api3.xhub.chat/v1",
@@ -17,6 +17,7 @@ def get_client(model):
 
 # 阿里云平台
 def get_client(model):
+    from openai import OpenAI
     client = OpenAI(
         api_key="sk-ece3d4b1280243b2acb266002a3e3fd0",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -43,6 +44,8 @@ def get_google_client():
     return client
 
 def get_ref_src_path(op):
+    # lazy import dataset 避免触发其他模块的副作用
+    from dataset import dataset
     return os.path.join(config.ref_impl_base_path, dataset[op]['category'], f'{op}.py')
 
 

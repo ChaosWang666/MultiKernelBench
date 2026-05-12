@@ -1,0 +1,98 @@
+# MultiKernelBench LLM 评测算子精筛清单
+#
+# 从原 300 个算子中筛出 40 个,聚焦大模型(LLM/Transformer/Mamba)相关算子,
+# 砍掉 CNN/elementwise/简单 reduce 等与 LLM 无关或过于简单的算子。
+# attention 类去重后保留 11 个;fuse P2 保留 4 个最经典 hack 样本。
+# 详细使用说明见 README_anti_hack.md。
+
+metadata:
+  total: 40
+  base_dir: reference
+  priority_legend:
+    P0: 核心 LLM 路径(高频出现于 Transformer/Mamba/MLP)
+    P1: 次要 LLM 相关(序列模型 baseline、变体)
+    P2: hack 观察样本(接近 LLM 形态但非真实路径,用于评测 agent 防 hack 能力)
+  distribution:
+    P0: 33
+    P1: 3
+    P2: 4
+
+# ============================================================
+# attention (11) - 全部 P0
+# 从原 15 个去重(SDPA/KV-cache 重复变体、cross_modal 非主流)
+# ============================================================
+ops:
+  - {name: causal_attention,                            category: attention,     path: attention/causal_attention.py,                            priority: P0, notes: "decoder-only LLM 基础"}
+  - {name: cross_attention,                             category: attention,     path: attention/cross_attention.py,                             priority: P0, notes: "encoder-decoder 架构"}
+  - {name: group_query_attention,                       category: attention,     path: attention/group_query_attention.py,                       priority: P0, notes: "GQA, Llama2/3"}
+  - {name: kv_cached_attention_inference,               category: attention,     path: attention/kv_cached_attention_inference.py,               priority: P0, notes: "推理 KV-cache 核心"}
+  - {name: kv_cached_speculative_attention,             category: attention,     path: attention/kv_cached_speculative_attention.py,             priority: P0, notes: "投机解码 KV-cache"}
+  - {name: linear_attention,                            category: attention,     path: attention/linear_attention.py,                            priority: P0, notes: "线性 attention 变体"}
+  - {name: multi_head_attention,                        category: attention,     path: attention/multi_head_attention.py,                        priority: P0, notes: "MHA 经典"}
+  - {name: multi_query_attention,                       category: attention,     path: attention/multi_query_attention.py,                       priority: P0, notes: "MQA, PaLM/Falcon"}
+  - {name: scaled_dot_product_attention,                category: attention,     path: attention/scaled_dot_product_attention.py,                priority: P0, notes: "SDPA 核心"}
+  - {name: sparse_attention,                            category: attention,     path: attention/sparse_attention.py,                            priority: P0, notes: "稀疏 attention"}
+  - {name: windowed_causal_attention,                   category: attention,     path: attention/windowed_causal_attention.py,                   priority: P0, notes: "滑窗 causal(Mistral)"}
+
+  # ============================================================
+  # matmul (5) - 全部 P0
+  # 从原 17 个 matmul 中精选,覆盖 Linear 层/BMM/decode MV/大 K 维/4D
+  # ============================================================
+  - {name: matmul_with_transposed_b,                    category: matmul,        path: matmul/matmul_with_transposed_b.py,                       priority: P0, notes: "Linear 层本质 W^T @ x"}
+  - {name: batched_matrix_multiplication,               category: matmul,        path: matmul/batched_matrix_multiplication.py,                  priority: P0, notes: "BMM, attention Q@K^T / attn@V"}
+  - {name: matrix_vector_multiplication,                category: matmul,        path: matmul/matrix_vector_multiplication.py,                   priority: P0, notes: "decode 阶段 batch=1"}
+  - {name: matmul_with_large_k_dimension,               category: matmul,        path: matmul/matmul_with_large_k_dimension.py,                  priority: P0, notes: "FFN 大 hidden dim"}
+  - {name: four_dim_tensor_matrix_multiplication,       category: matmul,        path: matmul/four_dim_tensor_matrix_multiplication.py,          priority: P0, notes: "attention 4D matmul"}
+
+  # ============================================================
+  # normalization (2) - 全部 P0
+  # LLM 只用 LayerNorm 和 RMSNorm,其他归一化都是 CNN 场景
+  # ============================================================
+  - {name: layer_norm,                                  category: normalization, path: normalization/layer_norm.py,                              priority: P0, notes: "Transformer 经典"}
+  - {name: rms_norm,                                    category: normalization, path: normalization/rms_norm.py,                                priority: P0, notes: "Llama 系列"}
+
+  # ============================================================
+  # fuse (10) - 6 个 P0 真实路径 + 4 个 P2 经典 hack 样本
+  # 从原 100 个 fuse 中精选,砍掉所有 conv2d/conv3d/conv_transpose 融合
+  # ============================================================
+
+  # --- P0: LLM 真实路径融合算子 ---
+  - {name: gemm_add_relu,                               category: fuse,          path: fuse/gemm_add_relu.py,                                    priority: P0, notes: "MLP 基础(Linear+bias+ReLU)"}
+  - {name: gemm_sigmoid_scaling_residual_add,           category: fuse,          path: fuse/gemm_sigmoid_scaling_residual_add.py,                priority: P0, notes: "residual block 形态"}
+  - {name: matmul_scaling_residual_add,                 category: fuse,          path: fuse/matmul_scaling_residual_add.py,                      priority: P0, notes: "residual + scaling"}
+  - {name: matmul_swish_scaling,                        category: fuse,          path: fuse/matmul_swish_scaling.py,                             priority: P0, notes: "接近 SwiGLU 核心"}
+  - {name: matmul_divide_gelu,                          category: fuse,          path: fuse/matmul_divide_gelu.py,                               priority: P0, notes: "类 attention(QK^T/sqrt(d) + gelu)"}
+  - {name: matmul_gelu_softmax,                         category: fuse,          path: fuse/matmul_gelu_softmax.py,                              priority: P0, notes: "类 attention score 形态"}
+
+  # --- P2: 经典 hack 观察样本 ---
+  - {name: gemm_max_subtract_gelu,                      category: fuse,          path: fuse/gemm_max_subtract_gelu.py,                           priority: P2, notes: "hack.md 中 zero-fill stub 经典案例"}
+  - {name: matmul_add_swish_tanh_gelu_hardtanh,         category: fuse,          path: fuse/matmul_add_swish_tanh_gelu_hardtanh.py,              priority: P2, notes: "长链激活融合,hack.md 第 2 类典型"}
+  - {name: matmul_dropout_mean_softmax,                 category: fuse,          path: fuse/matmul_dropout_mean_softmax.py,                      priority: P2, notes: "类 attention 形态,PyTorch 代算高发"}
+  - {name: gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu, category: fuse,    path: fuse/gemm_log_sum_exp_leaky_relu_leaky_relu_gelu_gelu.py,  priority: P2, notes: "多层链式融合,部分融合 hack 重灾"}
+
+  # ============================================================
+  # arch (12) - 9 个 P0 + 3 个 P1
+  # 从原 50 个 arch 中精选,砍掉所有 CNN 经典网络
+  # ============================================================
+
+  # --- MLP (2): P0 基础 + P0 变体 ---
+  - {name: mlp,                                         category: arch,          path: arch/mlp.py,                                              priority: P0, notes: "标准 MLP"}
+  - {name: deep_narrow_mlp,                             category: arch,          path: arch/deep_narrow_mlp.py,                                  priority: P0, notes: "深窄 MLP(代表性变体)"}
+
+  # --- Vision Transformer 系列 (4) ---
+  - {name: vision_transformer,                          category: arch,          path: arch/vision_transformer.py,                               priority: P0, notes: "ViT 基础"}
+  - {name: swintransformer_v2,                          category: arch,          path: arch/swintransformer_v2.py,                               priority: P0, notes: "Swin V2"}
+  - {name: convolutional_vision_transformer,            category: arch,          path: arch/convolutional_vision_transformer.py,                 priority: P1, notes: "CvT(边缘 ViT 变体)"}
+  - {name: vision_attention,                            category: arch,          path: arch/vision_attention.py,                                 priority: P0, notes: "ViT 内部 attention"}
+
+  # --- GPT/causal attention (2) ---
+  - {name: mini_gpt_block,                              category: arch,          path: arch/mini_gpt_block.py,                                   priority: P0, notes: "GPT block 完整结构"}
+  - {name: min_gpt_causal_attention,                    category: arch,          path: arch/min_gpt_causal_attention.py,                         priority: P0, notes: "GPT causal attention"}
+
+  # --- Mamba (2) ---
+  - {name: mamba_return_final_state,                    category: arch,          path: arch/mamba_return_final_state.py,                         priority: P0, notes: "Mamba 推理 final state"}
+  - {name: mamba_return_y,                              category: arch,          path: arch/mamba_return_y.py,                                   priority: P0, notes: "Mamba 输出 y"}
+
+  # --- RNN baseline (2) ---
+  - {name: lstm,                                        category: arch,          path: arch/lstm.py,                                             priority: P1, notes: "序列模型 baseline"}
+  - {name: gru,                                         category: arch,          path: arch/gru.py,                                              priority: P1, notes: "序列模型 baseline"}
