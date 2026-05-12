@@ -1,0 +1,49 @@
+# MultiKernelBench LLM 评测算子 - 快速验证(smoke)子集
+#
+# 从 selected_ops.yaml 的 40 个里再筛 10 个,用于 prompt/检测/生成链路的快速回归。
+# 目标: 最少算子覆盖 5 类评测目录 + 所有典型 ModelNew 形态 + 至少 1 个 hack 样本。
+#
+# 形态覆盖:
+#   - 无 Parameter (纯运算)              : matmul_with_transposed_b, sdpa
+#   - 仅 Parameter (无 buffer)            : gemm_add_relu, matmul_swish_scaling,
+#                                          gemm_max_subtract_gelu, rms_norm
+#   - Parameter + buffer (mask 等)        : min_gpt_causal_attention
+#   - Parameter + bias                    : layer_norm
+#   - 内嵌 nn.Linear 多头形态             : multi_query_attention
+#   - 多层 Linear 堆叠                    : mlp
+#
+# 用法举例:
+#   python tools/batch_validate_schema.py selected_ops_smoke.yaml
+
+metadata:
+  total: 10
+  base_dir: reference
+  parent: selected_ops.yaml
+  purpose: 快速验证/烟测 - prompt 链路、L1 schema 抽取、L2/L3 检测、端到端生成回归
+  priority_legend:
+    P0: 真实 LLM 路径
+    P2: hack 观察样本(保留 1 个用于检测端到端验证)
+  distribution:
+    P0: 9
+    P2: 1
+
+ops:
+  # ---- attention (2) ----
+  - {name: multi_query_attention,        category: attention,     path: attention/multi_query_attention.py,        priority: P0, notes: "MQA, PaLM/Falcon; nn.Linear 多头形态"}
+  - {name: scaled_dot_product_attention, category: attention,     path: attention/scaled_dot_product_attention.py, priority: P0, notes: "SDPA 核心; shape/mask hack 高发"}
+
+  # ---- matmul (1) ----
+  - {name: matmul_with_transposed_b,     category: matmul,        path: matmul/matmul_with_transposed_b.py,        priority: P0, notes: "Linear 层本质 W^T @ x; 最简单 baseline"}
+
+  # ---- normalization (2) ----
+  - {name: layer_norm,                   category: normalization, path: normalization/layer_norm.py,               priority: P0, notes: "Transformer 标配; 含 weight+bias"}
+  - {name: rms_norm,                     category: normalization, path: normalization/rms_norm.py,                 priority: P0, notes: "Llama 系列; 仅 weight 无 bias 的对照"}
+
+  # ---- fuse (3): 2 P0 + 1 P2 ----
+  - {name: gemm_add_relu,                category: fuse,          path: fuse/gemm_add_relu.py,                     priority: P0, notes: "MLP 基础; 新 prompt 已验证通过"}
+  - {name: matmul_swish_scaling,         category: fuse,          path: fuse/matmul_swish_scaling.py,              priority: P0, notes: "接近 SwiGLU"}
+  - {name: gemm_max_subtract_gelu,       category: fuse,          path: fuse/gemm_max_subtract_gelu.py,            priority: P2, notes: "hack.md zero-fill stub 经典样本; 验证检测端到端"}
+
+  # ---- arch (2) ----
+  - {name: mlp,                          category: arch,          path: arch/mlp.py,                               priority: P0, notes: "完整 arch baseline; 多层 Linear 堆叠"}
+  - {name: min_gpt_causal_attention,     category: arch,          path: arch/min_gpt_causal_attention.py,          priority: P0, notes: "GPT causal attention; Parameter + buffer(mask)"}
