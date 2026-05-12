@@ -4,6 +4,10 @@
 ## 执行算子生成
 `batch_scripts/batch_01_wikiV0.sh` 示例脚本展示了怎么启动多个算子的生成任务，主要注意设置自己的实验任务名`model-name`，去掉`disable-skills`（因为要使用知识查询skill）
 
+> 注：`--strategy add_shot`（所有 `batch_*.sh` 默认值）已切换到 anti-hack 加固版模板，
+> 自动嵌入算子 schema + 反例段 + ANTI-HACK RULES，引导模型按 schema 实现 custom op 而非
+> 复制 reference 的 PyTorch 实现。原 add_shot 模板已下线，调用方式无需改动。
+
 **注意事项**
 1. 评测中可能出现生成超时的算子，这种要重跑，不算生成失败
 2. 评测中可能出现`[SKIP] {op}: output looks like rate-limit/error`，这种可能是API消耗超限，也要后续重跑，不算生成失败
