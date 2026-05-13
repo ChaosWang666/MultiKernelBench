@@ -168,7 +168,12 @@ def generate_with_claude_code(prompt, out_dir, op, timeout=300, disable_skills=F
         "--output-format", "text",
     ]
     if with_wiki:
-        cmd.extend(["--allowed-tools", "Skill(cann-ask) Skill(setup-cann-wiki) Read Glob Grep"])
+        cmd.extend([
+            "--allowed-tools",
+            "Skill(cann-ask) Skill(setup-cann-wiki) Read Glob Grep "
+            "mcp__cann-wiki__wiki_search mcp__cann-wiki__wiki_get_page "
+            "mcp__cann-wiki__wiki_get_index mcp__cann-wiki__wiki_submit_trajectory",
+        ])
     else:
         cmd.extend([
             "--disallowed-tools",
